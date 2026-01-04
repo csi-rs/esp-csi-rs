@@ -22,15 +22,15 @@ default = ["no-std", "println", "auto"]
 ## Build without the standard library.
 no-std = []
 ## Enable logging via defmt.
-defmt = [
-    "dep:defmt",
-    "dep:defmt-rtt",
-    "esp-hal/defmt",
-    "esp-wifi/defmt",
-    "esp-backtrace/defmt",
-    "embassy-executor/defmt",
-    "esp-println/defmt-espflash",
-]
+# defmt = [
+#     "dep:defmt",
+#     "dep:defmt-rtt",
+#     "esp-hal/defmt",
+#     "esp-wifi/defmt",
+#     "esp-backtrace/defmt",
+#     "embassy-executor/defmt",
+#     "esp-println/defmt-espflash",
+# ]
 ## Enable logging via `println!()` instead of defmt.
 println = ["esp-backtrace/println"]
 ## Enable the JTAG serial interface for logging. Only supported by ESP32-C3, ESP32-C6, and ESP32-S3.
@@ -41,138 +41,143 @@ auto = ["esp-println/auto"]
 uart = ["esp-println/uart"]
 
 ## Support for the ESP32
-esp32 = [
-    "esp-backtrace/esp32",
-    "esp-hal/esp32",
-    "esp-hal/rt",
-    "esp-println/esp32",
-    "esp-bootloader-esp-idf/esp32",
-    "esp-println/critical-section",
-    "esp-wifi/esp32",
-    "esp-wifi/csi",
-    "esp-wifi/sniffer",
-    "esp-hal-embassy/esp32",
-]
+# esp32 = [
+#     "esp-backtrace/esp32",
+#     "esp-hal/esp32",
+#     "esp-hal/rt",
+#     "esp-println/esp32",
+#     "esp-bootloader-esp-idf/esp32",
+#     "esp-println/critical-section",
+#     "esp-wifi/esp32",
+#     "esp-wifi/csi",
+#     "esp-wifi/sniffer",
+# ]
 
-## Support for the ESP32-C2
-esp32c2 = [
-    "esp-backtrace/esp32c2",
-    "esp-bootloader-esp-idf/esp32c2",
-    "esp-backtrace/println",
-    "esp-hal/esp32c2",
-    "esp-hal/rt",
-    "esp-println/esp32c2",
-    "esp-println/critical-section",
-    "esp-wifi/esp32c2",
-    "esp-wifi/csi",
-    "esp-wifi/sniffer",
-    "esp-hal-embassy/esp32c2",
-]
+# ## Support for the ESP32-C2
+# esp32c2 = [
+#     "esp-backtrace/esp32c2",
+#     "esp-bootloader-esp-idf/esp32c2",
+#     "esp-backtrace/println",
+#     "esp-hal/esp32c2",
+#     "esp-hal/rt",
+#     "esp-println/esp32c2",
+#     "esp-println/critical-section",
+#     "esp-wifi/esp32c2",
+#     "esp-wifi/csi",
+#     "esp-wifi/sniffer",
+# ]
 
-## Support for the ESP32-C3
+# ## Support for the ESP32-C3
 esp32c3 = [
-    "esp-hal/esp32c3",
-    "esp-hal/rt",
-    "esp-backtrace/esp32c3",
-    "esp-wifi/esp32c3",
-    "esp-bootloader-esp-idf/esp32c3",
-    "esp-wifi/csi",
-    "esp-wifi/sniffer",
-    "esp-hal-embassy/esp32c3",
-    "esp-println/esp32c3",
-    "esp-println/critical-section",
+    #     "esp-hal/esp32c3",
+    #     "esp-hal/rt",
+    #     "esp-backtrace/esp32c3",
+    #     "esp-radio/esp32c3",
+    #     "esp-bootloader-esp-idf/esp32c3",
+    #     "esp-radio/csi",
+    #     "esp-radio/sniffer",
+    #     "esp-println/esp32c3",
 ]
 
-## Support for the ESP32-C6 (WiFi 6)
-esp32c6 = [
-    "esp-hal/esp32c6",
-    "esp-hal/rt",
-    "esp-backtrace/esp32c6",
-    "esp-wifi/esp32c6",
-    "esp-bootloader-esp-idf/esp32c6",
-    "esp-wifi/csi",
-    "esp-wifi/sniffer",
-    "esp-hal-embassy/esp32c6",
-    "esp-println/esp32c6",
-    "esp-println/critical-section",
-]
+# ## Support for the ESP32-C6 (WiFi 6)
+# esp32c6 = [
+#     "esp-hal/esp32c6",
+#     "esp-hal/rt",
+#     "esp-backtrace/esp32c6",
+#     "esp-wifi/esp32c6",
+#     "esp-bootloader-esp-idf/esp32c6",
+#     "esp-wifi/csi",
+#     "esp-wifi/sniffer",
+#     "esp-println/esp32c6",
+#     "esp-println/critical-section",
+# ]
 
-## Support for the ESP32-S3 (AIoT)
-esp32s3 = [
-    "esp-hal/esp32s3",
-    "esp-hal/rt",
-    "esp-backtrace/esp32s3",
-    "esp-wifi/esp32s3",
-    "esp-bootloader-esp-idf/esp32s3",
-    "esp-wifi/csi",
-    "esp-wifi/sniffer",
-    "esp-hal-embassy/esp32s3",
-    "esp-println/esp32s3",
-    "esp-println/critical-section",
-]
+# ## Support for the ESP32-S3 (AIoT)
+# esp32s3 = [
+#     "esp-hal/esp32s3",
+#     "esp-hal/rt",
+#     "esp-backtrace/esp32s3",
+#     "esp-wifi/esp32s3",
+#     "esp-bootloader-esp-idf/esp32s3",
+#     "esp-wifi/csi",
+#     "esp-wifi/sniffer",
+#     "esp-println/esp32s3",
+#     "esp-println/critical-section",
+# ]
 
 
 [dependencies]
 # Core dependencies
-esp-bootloader-esp-idf = { version = "0.2.0", optional = false }
-esp-backtrace = { version = "0.17.0", optional = false, features = [
-    "exception-handler",
-    "panic-handler",
-] }
-esp-hal = { version = "=1.0.0-rc.0", default-features = false, optional = false, features = [
+esp-hal = { version = "~1.0", default-features = false, optional = false, features = [
     "unstable",
+    "esp32c3",
 ] }
-esp-alloc = { version = "0.8.0", optional = false }
-embedded-io = { version = "0.6.1", optional = false }
-embedded-io-async = { version = "0.6.1", optional = false }
-embassy-net = { version = "0.7.0", optional = false, features = [
-    "tcp",
-    "udp",
+esp-rtos = { version = "0.2.0", optional = false, features = [
+    "embassy",
+    "esp-alloc",
+    "esp-radio",
+    "esp32c3",
+] }
+esp-bootloader-esp-idf = { version = "0.4.0", optional = false, features = [
+    "esp32c3",
+] }
+embassy-net = { version = "0.7.1", features = [
     "dhcpv4",
     "medium-ethernet",
-    "medium-ip",
+    "tcp",
+    "udp",
     "raw",
-    "dns",
 ] }
-esp-wifi = { version = "0.15.0", default-features = false, optional = false, features = [
+embedded-io = { version = "0.7.1", optional = false }
+embedded-io-async = { version = "0.7.0", optional = false }
+esp-alloc = { version = "0.9.0", optional = false }
+esp-backtrace = { version = "0.18.1", optional = false, features = [
+    "panic-handler",
+    "esp32c3",
+] }
+esp-println = { version = "0.16.1", optional = false, default-features = false, features = [
+    "esp32c3",
+] }
+embassy-executor = { version = "0.9.1", optional = false }
+embassy-time = { version = "0.5.0", optional = false }
+esp-radio = { version = "0.17.0", default-features = false, optional = false, features = [
     "wifi",
     "sniffer",
     "esp-alloc",
-    "builtin-scheduler",
+    "esp32c3",
+    "smoltcp",
+    "unstable",
+    "esp-now",
+    "csi",
 ] }
-heapless = { version = "0.8.0", default-features = false, optional = false }
-smoltcp = { version = "0.12.0", default-features = false, optional = false, features = [
+smoltcp = { version = "0.12.0", default-features = false, features = [
     "medium-ethernet",
+    "multicast",
     "proto-dhcpv4",
+    "proto-dns",
     "proto-ipv4",
-    "socket-dhcpv4",
+    "socket-dns",
     "socket-icmp",
     "socket-raw",
     "socket-tcp",
     "socket-udp",
 ] }
-defmt = { version = "1.0.1", optional = true }
-defmt-rtt = { version = "1.0.0", optional = true }
-embassy-executor = { version = "0.7.0", optional = false, features = [
-    "task-arena-size-32768",
-] }
-embassy-time = { version = "0.4.0", optional = false, features = [
-    "generic-queue-8",
-] }
+heapless = { version = "0.9.2", default-features = false, optional = false }
 embassy-sync = { version = "0.7.0", optional = false }
-embassy-futures = { version = "0.1.2", optional = false }
-esp-hal-embassy = { version = "0.9.0", default-features = false, optional = false, features = [
-    "executors",
-] }
-static_cell = { version = "2.1.0", optional = false, features = ["nightly"] }
-critical-section = { version = "1.2.0", optional = false }
-edge-dhcp = { version = "0.6.0", optional = false }
-edge-nal = { version = "0.5.0", optional = false }
-edge-nal-embassy = { version = "0.6.0", optional = false }
 enumset = { version = "1.1.5", optional = false }
-esp-println = { version = "0.15.0", optional = false, default-features = false }
+embassy-futures = "0.1.2"
+static_cell = "2.1.1"
+
+# embassy-futures = { version = "0.1.2", optional = false }
+# static_cell = { version = "2.1.0", optional = false, features = ["nightly"] }
+# critical-section = { version = "1.2.0", optional = false }
+# edge-dhcp = { version = "0.6.0", optional = false }
+# edge-nal = { version = "0.5.0", optional = false }
+# edge-nal-embassy = { version = "0.7.0", optional = false }
+# enumset = { version = "1.1.5", optional = false }
+
 document-features = "0.2.11"
-ieee80211 = "0.5.9"
+# ieee80211 = "0.5.9"
 
 [profile.dev]
 # Rust debug is too slow.

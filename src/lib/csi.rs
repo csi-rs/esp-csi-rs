@@ -1,16 +1,51 @@
-#[cfg(feature = "println")]
-use esp_println as _;
-#[cfg(feature = "println")]
+// #[cfg(feature = "println")]
 use esp_println::println;
 
-#[cfg(feature = "defmt")]
-use defmt::info;
-#[cfg(feature = "defmt")]
-use defmt::println;
+// #[cfg(feature = "defmt")]
+// use defmt::info;
+// #[cfg(feature = "defmt")]
+// use defmt::println;
 
 use heapless::Vec;
 
-use crate::{DateTime, RxCSIFmt};
+use crate::time::DateTime;
+
+/// A mapping of the different possible recieved CSI data formats supported by the Espressif WiFi driver.
+/// `RxCSIFmt`` encodes the different formats (each column in the table) in one byte to save space when transmitting back CSI data.
+/// The driver can be found here:
+/// <https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/api-guides/wifi.html#wi-fi-channel-state-information>
+#[derive(Debug, Clone)]
+#[repr(u8)]
+pub enum RxCSIFmt {
+    /// Sec Chnl = None, Sig Mode = non-Ht, Chnl BW = 20MHz, non-STBC
+    Bw20,
+    /// Sec Chnl = None, Sig Mode = Ht, Chnl BW = 20MHz, non-STBC         
+    HtBw20,
+    /// Sec Chnl = None, Sig Mode = Ht, Chnl BW = 20MHz, STBC
+    HtBw20Stbc,
+    /// Sec Chnl = Below, Sig Mode = non-Ht, Chnl BW = 20MHz, non-STBC
+    SecbBw20,
+    /// Sec Chnl = Below, Sig Mode = Ht, Chnl BW = 20MHz, non-STBC
+    SecbHtBw20,
+    /// Sec Chnl = Below, Sig Mode = Ht, Chnl BW = 20MHz, STBC
+    SecbHtBw20Stbc,
+    /// Sec Chnl = Below, Sig Mode = Ht, Chnl BW = 40MHz, non-STBC
+    SecbHtBw40,
+    /// Sec Chnl = Below, Sig Mode = Ht, Chnl BW = 40MHz, STBC
+    SecbHtBw40Stbc,
+    /// Sec Chnl = Above, Sig Mode = non-Ht, Chnl BW = 20MHz, non-STBC
+    SecaBw20,
+    /// Sec Chnl = Above, Sig Mode = Ht, Chnl BW = 20MHz, non-STBC
+    SecaHtBw20,
+    /// Sec Chnl = Above, Sig Mode = Ht, Chnl BW = 20MHz, STBC
+    SecaHtBw20Stbc,
+    /// Sec Chnl = Above, Sig Mode = Ht, Chnl BW = 40MHz, non-STBC
+    SecaHtBw40,
+    /// Sec Chnl = Above, Sig Mode = Ht, Chnl BW = 40MHz, STBC
+    SecaHtBw40Stbc,
+    /// Not a defined format
+    Undefined,
+}
 
 // CSI Received Packet Radio Metadata Header Value Interpretations for non-ESP32-C6 devices
 
@@ -117,7 +152,7 @@ pub struct CSIDataPacket {
     pub sig_len: u32,
     /// Optional NTP-based Timestamp Indicating the Time CSI Captured.
     pub date_time: Option<DateTime>,
-    /// Sequence Number Associated with the ICMP Echo Request Packet that triggered a CSI capture.
+    /// Sequence Number Associated with the Packet that triggered a CSI capture.
     pub sequence_number: u16,
     /// Data format of the recieved CSI.
     /// RxCSIFmt is a Compact Representation of the Different Recieved CSI Data Format Options as defined in the ESP WiFi Driver.
@@ -148,27 +183,28 @@ impl CSIDataPacket {
             "mac: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
             self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5]
         );
-        println!("rssi: {}", self.rssi);
-        println!("rate: {}", self.rate);
-        println!("noise floor: {}", self.noise_floor);
-        println!("channel: {}", self.channel);
+        println!("sequence number: {}", self.sequence_number);
+        // println!("rssi: {}", self.rssi);
+        // println!("rate: {}", self.rate);
+        // println!("noise floor: {}", self.noise_floor);
+        // println!("channel: {}", self.channel);
         println!("timestamp: {}", self.timestamp);
-        println!("sig len: {}", self.sig_len);
-        println!("rx state: {}", self.rx_state);
-        println!("secondary channel: {}", self.secondary_channel);
-        println!("sgi: {}", self.sgi);
-        println!("ant: {}", self.antenna);
-        println!("ampdu cnt: {}", self.ampdu_cnt);
-        println!("sig_mode: {}", self.sig_mode);
-        println!("mcs: {}", self.mcs);
-        println!("cwb: {}", self.bandwidth);
-        println!("smoothing: {}", self.smoothing);
-        println!("not sounding: {}", self.not_sounding);
-        println!("aggregation: {}", self.aggregation);
-        println!("stbc: {}", self.stbc);
-        println!("fec coding: {}", self.fec_coding);
-        println!("sig_len: {}", self.sig_len);
-        println!("data length: {}", self.csi_data_len);
+        // println!("sig len: {}", self.sig_len);
+        // println!("rx state: {}", self.rx_state);
+        // println!("secondary channel: {}", self.secondary_channel);
+        // println!("sgi: {}", self.sgi);
+        // println!("ant: {}", self.antenna);
+        // println!("ampdu cnt: {}", self.ampdu_cnt);
+        // println!("sig_mode: {}", self.sig_mode);
+        // println!("mcs: {}", self.mcs);
+        // println!("cwb: {}", self.bandwidth);
+        // println!("smoothing: {}", self.smoothing);
+        // println!("not sounding: {}", self.not_sounding);
+        // println!("aggregation: {}", self.aggregation);
+        // println!("stbc: {}", self.stbc);
+        // println!("fec coding: {}", self.fec_coding);
+        // println!("sig_len: {}", self.sig_len);
+        // println!("data length: {}", self.csi_data_len);
         println!("csi raw data:");
         #[cfg(feature = "defmt")]
         println!("{=[?]}", self.csi_data);
@@ -446,6 +482,7 @@ impl CSIDataPacket {
             "mac: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
             self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5]
         );
+        println!("sequence number: {}", self.sequence_number);
         println!("rssi: {}", self.rssi);
         println!("rate: {}", self.rate);
         println!("noise floor: {}", self.noise_floor);

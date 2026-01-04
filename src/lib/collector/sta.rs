@@ -1,44 +1,21 @@
+use core::{net::Ipv4Addr, str::FromStr};
 use embassy_executor::Spawner;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::watch::Receiver;
-
+use embassy_futures::select::{select, Either};
+use embassy_net::raw::{IpProtocol, IpVersion, PacketMetadata, RawSocket};
+use embassy_net::{Ipv4Address, Ipv4Cidr, Runner, Stack, StackResources};
+use embassy_time::{Duration, Timer};
+use enumset::enum_set;
+use esp_println::println;
+use esp_radio::wifi::{ModeConfig, WifiController, WifiDevice, WifiEvent};
 use smoltcp::phy::ChecksumCapabilities;
+
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+
 use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, Ipv4Packet, Ipv4Repr};
 
-use embassy_futures::select::{select, Either};
+use crate::WifiStationConfig;
 
-use embassy_net::{
-    raw::{IpProtocol, IpVersion, PacketMetadata as RawPacketMetadata, RawSocket},
-    udp::{PacketMetadata, UdpSocket},
-    IpEndpoint, Stack, StackResources,
-};
-
-use embassy_time::{Duration, Timer};
-
-use enumset::enum_set;
-
-use esp_alloc as _;
-use esp_backtrace as _;
-use esp_println::println;
-use esp_wifi::wifi::WifiController;
-use esp_wifi::wifi::{ClientConfiguration, Configuration, Interfaces, WifiDevice, WifiEvent};
-
-use crate::error::Result;
-use crate::run_dhcp_client;
-
-use heapless::Vec;
-
-use crate::{
-    build_csi_config, capture_csi_info, configure_connection, connect_wifi, net_task,
-    process_csi_packet, recapture_controller, run_ntp_sync, start_collection, start_wifi,
-    stop_collection, ConnectionType,
-};
-use crate::{sequence_sync_task, CSIConfig};
-
-use crate::{
-    CSIDataPacket, CONTROLLER_CH, CONTROLLER_HALTED_SIGNAL, CSI_CONFIG_CH, DHCP_CLIENT_INFO,
-    PROC_CSI_DATA, SEQ_NUM_EN, START_COLLECTION,
-};
+static DHCP_CLIENT_INFO: Signal<CriticalSectionRawMutex, IpInfo> = Signal::new();
 
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
@@ -49,524 +26,275 @@ macro_rules! mk_static {
     }};
 }
 
-/// Station Operation Modes
-/// Trigger: Sends trigger packets (traffic) to stimulate CSI collection locally.
-/// Monitor: Monitors incoming trigger packets stimulating CSI collection and sends back collected CSI to trigger source in UDP packet.
-#[derive(PartialEq, Copy, Clone)]
-pub enum StaOperationMode {
-    Trigger(StaTriggerConfig),
-    Monitor(StaMonitorConfig),
+#[derive(Debug, Clone)]
+struct IpInfo {
+    pub local_address: Ipv4Cidr,
+    pub gateway_address: Ipv4Address,
 }
 
-/// Configuration for Station Monitor Mode
-#[derive(PartialEq, Copy, Clone)]
-pub struct StaMonitorConfig {
-    /// Source Port #
-    local_port: u16,
-    /// Destination Port #
-    dest_port: u16,
-}
+pub fn sta_init(
+    interfaces: WifiDevice<'static>,
+    config: &WifiStationConfig,
+    controller: &mut WifiController,
+    spawner: Spawner,
+) -> Stack<'static> {
+    // Station IP Configuration - DHCP
+    let sta_ip_config = embassy_net::Config::dhcpv4(Default::default());
+    let seed = 123456_u64;
 
-/// Configuration for Station Trigger Mode
-#[derive(PartialEq, Copy, Clone)]
-pub struct StaTriggerConfig {
-    /// Trigger Packet Frequency
-    pub trigger_freq_hz: u32,
-}
+    // Create STA Network Stack
+    let (sta_stack, sta_runner) = embassy_net::new(
+        interfaces,
+        sta_ip_config,
+        mk_static!(StackResources<6>, StackResources::<6>::new()),
+        seed,
+    );
 
-impl Default for StaMonitorConfig {
-    fn default() -> Self {
-        Self {
-            local_port: 10789,
-            dest_port: 10789,
-        }
-    }
-}
+    // Spawn the network runner task
+    spawner.spawn(net_task(sta_runner)).ok();
+    println!("Network Task Running");
 
-impl Default for StaTriggerConfig {
-    fn default() -> Self {
-        Self {
-            trigger_freq_hz: 100,
-        }
-    }
-}
-
-/// Driver Struct to Collect CSI as a Station
-pub struct CSIStation {
-    /// Station Configuration
-    /// Note: This configuration is applied during init and can be updated via 'update_station_config()'
-    pub sta_config: ClientConfiguration,
-    /// Operation Mode: Trigger or Monitor
-    pub op_mode: StaOperationMode,
-    /// CSI Collection Parameters
-    pub csi_config: CSIConfig,
-    /// Synchronize NTP Time with Trigger Source
-    /// Note: Requires internet connectivity at the Access Point
-    pub sync_time: bool,
-    // MAC Address Filter for CSI Data
-    // mac_filter: Option<[u8; 6]>,
-    /// Receiver for Processed CSI Data Packets
-    csi_data_rx: Receiver<'static, CriticalSectionRawMutex, CSIDataPacket, 3>,
-}
-
-impl CSIStation {
-    /// Creates a new `CSIStation` instance with a defined configuration/profile.
-    /// 'CSIConfig' Defines the CSI Collection Parameters
-    /// 'ClientConfiguration' Defines the WiFi Client/Station Connection Parameters
-    /// 'StaOperationMode' Defines the Operation Mode: Trigger or Monitor
-    /// 'mac_filter' is a' 'Option<[u8; 6]>' Optional MAC Address Filter for CSI Data
-    /// 'sync_time' is to synchronize time with NTP server at Access Point (requirecs internet connectivity at AP)
-    /// 'WifiController' Is a WiFi Controller instance
-    pub async fn new(
-        csi_config: CSIConfig,
-        sta_config: ClientConfiguration,
-        op_mode: StaOperationMode,
-        sync_time: bool,
-        wifi_controller: WifiController<'static>,
-    ) -> Self {
-        let csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
-        // Send shared data to global context
-        CONTROLLER_CH.send(wifi_controller).await;
-        Self {
-            csi_config,
-            sta_config,
-            // mac_filter: None,
-            op_mode,
-            csi_data_rx,
-            sync_time,
+    // Configure WiFi Client/Station Connection
+    let station_config = ModeConfig::Client(config.client_config.clone());
+    // Set the Configuration
+    match controller.set_config(&station_config) {
+        Ok(_) => println!("WiFi Configuration Set: {:?}", config),
+        Err(_) => {
+            println!("WiFi Configuration Error");
+            println!("Error Config: {:?}", config);
         }
     }
 
-    /// Creates a new `CSIStation` instance with defaults.
-    /// 'CSIConfig' is set to 'default'
-    /// 'ClientConfiguration' is set to 'default'
-    /// 'StaOperationMode' is set to Trigger with default trigger configuration
-    /// 'mac_filter' is set to 'None'
-    /// 'sync_time' is set to 'false'
-    pub async fn new_with_defaults(wifi_controller: WifiController<'static>) -> Self {
-        let proc_csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
-        // let controller_rx = CONTROLLER_CH.receiver();
-        CONTROLLER_CH.send(wifi_controller).await;
-        // CLIENT_CONFIG_CH.send(ClientConfiguration::default()).await;
-        Self {
-            csi_config: CSIConfig::default(),
-            sta_config: ClientConfiguration::default(),
-            // mac_filter: None,
-            op_mode: StaOperationMode::Trigger(StaTriggerConfig::default()),
-            csi_data_rx: proc_csi_data_rx,
-            sync_time: false,
+    sta_stack
+}
+
+pub async fn sta_connect(
+    controller: &'static mut WifiController<'static>,
+    freq: Option<u16>,
+    sta_stack: Stack<'static>,
+    spawner: Spawner,
+) {
+    // Connect WiFi
+    match controller.connect_async().await {
+        Ok(_) => println!("WiFi Connected"),
+        Err(e) => {
+            panic!("Failed to connect WiFi: {:?}", e);
         }
     }
 
-    /// Initialize WiFi and the CSI Collection System. This method starts the WiFi connection and spawns the required tasks.
-    pub async fn init(&mut self, interface: Interfaces<'static>, spawner: &Spawner) -> Result<()> {
-        println!("Initializing Station");
-
-        // Station IP Configuration - DHCP
-        let sta_ip_config = embassy_net::Config::dhcpv4(Default::default());
-        let seed = 123456_u64;
-
-        // Create STA Network Stack
-        let (sta_stack, sta_runner) = embassy_net::new(
-            interface.sta,
-            sta_ip_config,
-            mk_static!(StackResources<6>, StackResources::<6>::new()),
-            seed,
-        );
-
-        // Spawn the network runner task
-        spawner.spawn(net_task(sta_runner)).ok();
-        println!("Network Task Running");
-
-        // Configure WiFi Client/Station Connection
-        let config = Configuration::Client(self.sta_config.clone());
-        configure_connection(ConnectionType::Client, config).await;
-
-        // Start & Connect WiFi
-        // This needs to be done before DHCP and NTP
-        start_wifi().await;
-        connect_wifi().await;
-
-        // Optionally retrieve MAC address from AP
-        // let bssid = get_connected_ap_bssid();
-        // esp_println::println!("Connected AP BSSID: {:02X?}", bssid);
-        // self.mac_filter = Some(bssid);
-
-        // Run DHCP Client to acquire IP
-        run_dhcp_client(sta_stack).await;
-        // Run NTP Sync to synchronize time
-        if self.sync_time {
-            run_ntp_sync(sta_stack).await;
-        }
-
-        // Spawn Remaining Tasks: CSI Processing, Connection Managment, and Network Operations
-        spawner.spawn(process_csi_packet()).ok();
-        spawner.spawn(sta_connection(self.op_mode)).ok();
-        spawner.spawn(sta_network_ops(sta_stack, self.op_mode)).ok();
-
-        // If in Monitor Mode, sniffer promiscuous mode is required to cross reference triggering ICMP or Beacon packets sequence number with extracted CSI
-        match self.op_mode {
-            StaOperationMode::Monitor(_config) => {
-                SEQ_NUM_EN.store(true, core::sync::atomic::Ordering::Relaxed);
-                // Spawn sequence number sync task
-                spawner.spawn(sequence_sync_task(interface.sniffer)).ok();
-            }
-            _ => {}
-        }
-
-        // No need to wait on DHCP and NTP as they are awaited in init above
-        println!("Station Initialized");
-
-        Ok(())
-    }
-
-    /// Starts the Station & Loads Configuration
-    /// To reconfigure Station settings, no need to reinit, only call start again with the updated configuration.
-    pub async fn start_collection(&self) {
-        let config = Configuration::Client(self.sta_config.clone());
-        CSI_CONFIG_CH.send(self.csi_config.clone()).await;
-        start_collection(crate::ConnectionType::Client, config).await;
-    }
-
-    /// Stops Collection
-    pub async fn stop_collection(&self) {
-        stop_collection().await;
-    }
-
-    /// Recaptures WiFi Controller Instance
-    pub async fn recapture_controller(&self) -> WifiController<'static> {
-        recapture_controller().await
-    }
-
-    /// Updates Client Configuration
-    pub async fn update_sta_config(&mut self, sta_config: ClientConfiguration) {
-        // update_client_config(sta_config).await;
-        self.sta_config = sta_config;
-    }
-
-    /// Updates CSI Configuration
-    pub async fn update_csi_config(&mut self, csi_config: CSIConfig) {
-        self.csi_config = csi_config;
-    }
-
-    /// Updates the Operation Mode
-    pub async fn update_op_mode(&mut self, op_mode: StaOperationMode) {
-        self.op_mode = op_mode;
-    }
-
-    // Updates MAC Address Filter
-    // pub async fn update_mac_filter(&mut self, mac_filter: Option<[u8; 6]>) {
-    //     self.mac_filter = mac_filter;
+    // Run DHCP Client to acquire IP
+    run_dhcp_client(sta_stack).await;
+    // Run NTP Sync to synchronize time
+    // if self.sync_time {
+    //     run_ntp_sync(sta_stack).await;
     // }
 
-    /// Retrieve the latest available CSI data packet
-    pub async fn get_csi_data(&mut self) -> Result<CSIDataPacket> {
-        // Wait for CSI data packet to update
-        let csi_data_pkt = self.csi_data_rx.changed().await;
-        Ok(csi_data_pkt)
-    }
-
-    /// Print the latest CSI data with metadata to console
-    pub async fn print_csi_w_metadata(&mut self) {
-        // Wait for CSI data packet to update
-        let proc_csi_data = self.csi_data_rx.changed().await;
-
-        // Print the CSI data to console
-        proc_csi_data.print_csi_w_metadata();
-    }
+    spawner.spawn(sta_connection(controller)).ok();
+    spawner.spawn(sta_network_ops(sta_stack, freq)).ok();
 }
 
 #[embassy_executor::task]
-pub async fn sta_connection(op_mode: StaOperationMode) {
-    // Acquire Controller receiver
-    let controller_rx = CONTROLLER_CH.receiver();
-    // Get access to start collection watch
-    let mut start_collection_watch = match START_COLLECTION.receiver() {
-        Some(r) => r,
-        None => panic!("Maximum number of recievers reached"),
+pub async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
+    // println!("Network Task Running");
+    runner.run().await
+}
+
+async fn run_dhcp_client(sta_stack: Stack<'static>) {
+    println!("Running DHCP Client");
+
+    // Acquire and store IP information for gateway and client after configuration is up
+
+    // Check if link is up
+    sta_stack.wait_link_up().await;
+    println!("Link is up!");
+
+    // Create instance to store acquired IP information
+    let mut ip_info = IpInfo {
+        local_address: Ipv4Cidr::new(Ipv4Addr::UNSPECIFIED, 24),
+        gateway_address: Ipv4Address::UNSPECIFIED,
     };
+
+    println!("Acquiring config...");
+    sta_stack.wait_config_up().await;
+    println!("Config Acquired");
+
+    // Print out acquired IP configuration
+    loop {
+        if let Some(config) = sta_stack.config_v4() {
+            ip_info.local_address = config.address;
+            ip_info.gateway_address = config.gateway.unwrap();
+
+            #[cfg(feature = "defmt")]
+            {
+                info!("Local IP: {:?}", ip_info.local_address);
+                info!("Gateway IP: {:?}", ip_info.gateway_address);
+            }
+
+            #[cfg(not(feature = "defmt"))]
+            {
+                println!("Local IP: {:?}", ip_info.local_address);
+                println!("Gateway IP: {:?}", ip_info.gateway_address);
+            }
+
+            break;
+        }
+        Timer::after(Duration::from_millis(500)).await;
+    }
+    // // Store Gateway Address in Global Context
+    // GATEWAY_ADDRESS.lock(|lock| {
+    //     lock.replace(ip_info.gateway_address);
+    // });
+    // Signal that DHCP is complete
+    DHCP_CLIENT_INFO.signal(ip_info);
+}
+
+#[embassy_executor::task]
+pub async fn sta_connection(controller: &'static mut WifiController<'static>) {
+    // let mut start_collection_watch = match START_COLLECTION.receiver() {
+    //     Some(r) => r,
+    //     None => panic!("Maximum number of recievers reached"),
+    // };
+
     // Define Events to Listen for
     let sta_events =
         enum_set!(WifiEvent::StaDisconnected | WifiEvent::StaStop | WifiEvent::StaConnected);
 
+    // Monitoring/stop loop
     loop {
-        // Wait fot start signal
-        while !start_collection_watch.changed().await {
-            // If Start Collection is false, keep waiting
-            Timer::after(Duration::from_millis(100)).await;
+        // // Stop Collection Future
+        // let stop_coll_fut = start_collection_watch.changed();
+        // // Events Future
+        let mut wait_event_fut = controller.wait_for_events(sta_events, true).await;
+
+        // MAYBE JUST DO A STOP COLLECTION & DEINIT WHERE WE RETURN FROM ALL TASKS
+
+        // // If either future completes, handle accordingly
+        // match select(wait_event_fut, stop_coll_fut).await {
+        //     // Wait event future cases
+        //     Either::First(mut event) => {
+        if wait_event_fut.contains(WifiEvent::StaDisconnected) {
+            println!("STA Disconnected");
         }
-
-        // Acquire the controller
-        let mut controller = controller_rx.receive().await;
-
-        // Trigger Logic
-        match op_mode {
-            StaOperationMode::Trigger(_) => {
-                // Retrieved Updated Configuration)
-                let csi_config = CSI_CONFIG_CH.receive().await;
-                // Build CSI Configuration
-                let csi_cfg = build_csi_config(csi_config.clone());
-                println!("Starting CSI Collection");
-                controller
-                    .set_csi(csi_cfg, |info: esp_wifi::wifi::wifi_csi_info_t| {
-                        capture_csi_info(info);
-                    })
-                    .unwrap();
-            }
-            _ => {
-                // Monitor mode is handled by sequence_sync_task,
-                // Nothing needed here.
-            }
+        if wait_event_fut.contains(WifiEvent::StaStop) {
+            println!("STA Stopped");
         }
-
-        // Monitoring/stop loop
-        loop {
-            // Events Future
-            let wait_event_fut = controller.wait_for_events(sta_events, true);
-            // Stop Collection Future
-            let stop_coll_fut = start_collection_watch.changed();
-
-            // If either future completes, handle accordingly
-            match select(wait_event_fut, stop_coll_fut).await {
-                // Wait event future cases
-                Either::First(mut event) => {
-                    if event.contains(WifiEvent::StaDisconnected) {
-                        println!("STA Disconnected");
-                    }
-                    if event.contains(WifiEvent::StaStop) {
-                        println!("STA Stopped");
-                    }
-                    event.clear();
-                }
-                // Stop collection future case
-                Either::Second(sig) => {
-                    // Stop Signal
-                    if !sig {
-                        println!("Halting CSI Collection...");
-                        // Send the controller back before exiting loop
-                        CONTROLLER_CH.send(controller).await;
-                        CONTROLLER_HALTED_SIGNAL.signal(true);
-                        break;
-                    }
-                }
-            }
-        }
+        wait_event_fut.clear();
+        //     }
+        //     // Stop collection future case
+        //     Either::Second(sig) => {
+        //         // Stop Signal
+        //         if !sig {
+        //             println!("Halting CSI Collection...");
+        //             // Send the controller back before exiting loop
+        //             // CONTROLLER_CH.send(controller).await;
+        //             // CONTROLLER_HALTED_SIGNAL.signal(true);
+        //             break;
+        //         }
+        //     }
+        // }
     }
 }
 
 // This task manages network operations for the station
 #[embassy_executor::task]
-pub async fn sta_network_ops(sta_stack: Stack<'static>, sta_config: StaOperationMode) {
+pub async fn sta_network_ops(sta_stack: Stack<'static>, freq: Option<u16>) {
     // Retrieve acquired IP information from DHCP
     let ip_info = DHCP_CLIENT_INFO.wait().await;
 
-    let mut start_collection_watch = match START_COLLECTION.receiver() {
-        Some(r) => r,
-        None => panic!("Maximum number of recievers reached"),
+    // let mut start_collection_watch = match START_COLLECTION.receiver() {
+    //     Some(r) => r,
+    //     None => panic!("Maximum number of recievers reached"),
+    // };
+
+    // ------------------ ICMP Socket Setup ------------------
+    let mut rx_buffer = [0; 64];
+    let mut tx_buffer = [0; 64];
+    let mut rx_meta: [PacketMetadata; 1] = [PacketMetadata::EMPTY; 1];
+    let mut tx_meta: [PacketMetadata; 1] = [PacketMetadata::EMPTY; 1];
+
+    let raw_socket = RawSocket::new::<WifiDevice<'_>>(
+        sta_stack,
+        IpVersion::Ipv4,
+        IpProtocol::Icmp,
+        &mut rx_meta,
+        &mut rx_buffer,
+        &mut tx_meta,
+        &mut tx_buffer,
+    );
+    // Buffer to hold ICMP Packet
+    let mut icmp_buffer = [0u8; 12];
+
+    // Create ICMP Packet
+    let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
+
+    // Create an ICMPv4 Echo Request
+    let icmp_repr = Icmpv4Repr::EchoRequest {
+        ident: 0x22b,
+        seq_no: 0,
+        data: &[0xDE, 0xAD, 0xBE, 0xEF],
     };
 
-    match sta_config {
-        StaOperationMode::Trigger(trigger_config) => {
-            // ------------------ ICMP Socket Setup ------------------
-            let mut rx_buffer = [0; 64];
-            let mut tx_buffer = [0; 64];
-            let mut rx_meta: [RawPacketMetadata; 1] = [RawPacketMetadata::EMPTY; 1];
-            let mut tx_meta: [RawPacketMetadata; 1] = [RawPacketMetadata::EMPTY; 1];
+    // Serialize the ICMP representation into the packet
+    icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
 
-            let raw_socket = RawSocket::new::<WifiDevice<'_>>(
-                sta_stack,
-                IpVersion::Ipv4,
-                IpProtocol::Icmp,
-                &mut rx_meta,
-                &mut rx_buffer,
-                &mut tx_meta,
-                &mut tx_buffer,
-            );
-            // Buffer to hold ICMP Packet
-            let mut icmp_buffer = [0u8; 12];
+    // Buffer for the full IPv4 packet
+    let mut tx_ipv4_buffer = [0u8; 64];
 
-            // Create ICMP Packet
-            let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
+    // Define the IPv4 representation
+    let ipv4_repr = Ipv4Repr {
+        src_addr: ip_info.local_address.address(),
+        dst_addr: ip_info.gateway_address,
+        payload_len: icmp_repr.buffer_len(),
+        hop_limit: 64, // Time-to-live value
+        next_header: IpProtocol::Icmp,
+    };
 
-            // Create an ICMPv4 Echo Request
-            let icmp_repr = Icmpv4Repr::EchoRequest {
-                ident: 0x22b,
-                seq_no: 0,
-                data: &[0xDE, 0xAD, 0xBE, 0xEF],
-            };
+    // Create the IPv4 packet
+    let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut tx_ipv4_buffer);
 
-            // Serialize the ICMP representation into the packet
-            icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
+    // Serialize the IPv4 representation into the packet
+    ipv4_repr.emit(&mut ipv4_packet, &ChecksumCapabilities::default());
 
-            // Buffer for the full IPv4 packet
-            let mut tx_ipv4_buffer = [0u8; 64];
+    // Copy the ICMP packet into the IPv4 packet's payload
+    ipv4_packet
+        .payload_mut()
+        .copy_from_slice(icmp_packet.into_inner());
 
-            // Define the IPv4 representation
-            let ipv4_repr = Ipv4Repr {
-                src_addr: ip_info.local_address.address(),
-                dst_addr: ip_info.gateway_address,
-                payload_len: icmp_repr.buffer_len(),
-                hop_limit: 64, // Time-to-live value
-                next_header: IpProtocol::Icmp,
-            };
+    // IP Packet buffer that will be sent or recieved
+    let ipv4_packet_buffer = ipv4_packet.into_inner();
 
-            // Create the IPv4 packet
-            let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut tx_ipv4_buffer);
+    // loop {
+    // Wait for start signal
+    // while !start_collection_watch.changed().await {
+    //     Timer::after(Duration::from_millis(100)).await;
+    // }
+    // println!("Starting Trigger Traffic");
+    // Station Trigger supports sending ICMP Echo Requests as trigger packets at defined frequency
 
-            // Serialize the IPv4 representation into the packet
-            ipv4_repr.emit(&mut ipv4_packet, &ChecksumCapabilities::default());
+    let trigger_interval = match freq {
+        Some(freq) => 1000_u64 / freq as u64,
+        None => u32::MAX as u64,
+    };
+    // let trigger_interval = Duration::from_millis((1000 / trigger_config.trigger_freq_hz).into());
+    // Start sending trigger packets
+    loop {
+        // Trigger Interval Future
+        let _trigger_timer_fut = Timer::after(Duration::from_millis(trigger_interval)).await;
+        // Stop Trigger Future
+        // let stop_coll_fut = start_collection_watch.changed();
 
-            // Copy the ICMP packet into the IPv4 packet's payload
-            ipv4_packet
-                .payload_mut()
-                .copy_from_slice(icmp_packet.into_inner());
-
-            // IP Packet buffer that will be sent or recieved
-            let ipv4_packet_buffer = ipv4_packet.into_inner();
-
-            loop {
-                // Wait for start signal
-                while !start_collection_watch.changed().await {
-                    Timer::after(Duration::from_millis(100)).await;
-                }
-                println!("Starting Trigger Traffic");
-                // Station Trigger supports sending ICMP Echo Requests as trigger packets at defined frequency
-                let trigger_interval =
-                    Duration::from_millis((1000 / trigger_config.trigger_freq_hz).into());
-                // Start sending trigger packets
-                loop {
-                    // Trigger Interval Future
-                    let trigger_timer_fut = Timer::after(trigger_interval);
-                    // Stop Trigger Future
-                    let stop_coll_fut = start_collection_watch.changed();
-
-                    match select(trigger_timer_fut, stop_coll_fut).await {
-                        Either::First(_) => {
-                            // Send raw packet
-                            raw_socket.send(ipv4_packet_buffer).await;
-                        }
-                        Either::Second(sig) => {
-                            if !sig {
-                                println!("Stopping Trigger Traffic");
-                                break;
-                            }
-                        }
-                    };
-                }
-            }
-        }
-        StaOperationMode::Monitor(monitor_config) => {
-            // ------------------ UDP Socket Setup ------------------
-            let mut udp_rx_buffer = [0; 1024];
-            let mut udp_tx_buffer = [0; 1024];
-            let mut udp_rx_meta: [PacketMetadata; 8] = [PacketMetadata::EMPTY; 8];
-            let mut udp_tx_meta: [PacketMetadata; 8] = [PacketMetadata::EMPTY; 8];
-
-            let mut socket = UdpSocket::new(
-                sta_stack,
-                &mut udp_rx_meta,
-                &mut udp_rx_buffer,
-                &mut udp_tx_meta,
-                &mut udp_tx_buffer,
-            );
-
-            println!("Binding");
-            // Bind to specified source port
-            socket.bind(monitor_config.local_port).unwrap();
-            // Endpoint to send back collected CSI data
-            let endpoint = IpEndpoint::new(
-                embassy_net::IpAddress::Ipv4(ip_info.gateway_address),
-                monitor_config.dest_port,
-            );
-
-            let mut proc_csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
-
-            // Create a message buffer for the data to be sent back
-
-            // Message format w/ seq_no:
-            // [0..1]   : 2 bytes seq_no (u16) - big endian
-            // [2]      : 1 byte for CSI data format (mapping below)
-            // [3..6]   : 4 bytes timestamp (u32) - big endian
-            // [7..12]  : 6 bytes MAC Address of Station
-            // [13..n]   : n-6 bytes CSI data (i8)
-
-            // Width of message (625) = 2 bytes for seq_no + 1 byte for format + 4 bytes for timestamp + 6 bytes for MAC + 612 bytes for CSI data
-            let mut message_u8: Vec<u8, 625> = Vec::new();
-            // let seq_num_en = SEQ_NUM_EN.load(core::sync::atomic::Ordering::SeqCst);
-            loop {
-                // Wait for start signal
-                while !start_collection_watch.changed().await {
-                    Timer::after(Duration::from_millis(100)).await;
-                }
-                loop {
-                    // New CSI Data Future
-                    let proc_csi_data_fut = proc_csi_data_rx.changed();
-                    // Stop Trigger Future
-                    let stop_coll_fut = start_collection_watch.changed();
-
-                    match select(proc_csi_data_fut, stop_coll_fut).await {
-                        Either::First(proc_csi_data) => {
-                            // Clear the buffer for new message
-                            message_u8.clear();
-
-                            println!(
-                                "Sending Back CSI Data with Seq No: {}",
-                                proc_csi_data.sequence_number
-                            );
-
-                            // Append the sequence number to the message
-                            message_u8
-                                .extend_from_slice(&proc_csi_data.sequence_number.to_be_bytes())
-                                .unwrap();
-
-                            // Append the data format to the message
-                            message_u8.push(proc_csi_data.data_format as u8).unwrap();
-
-                            // Append the timestamp to the message
-                            message_u8
-                                .extend_from_slice(&proc_csi_data.timestamp.to_be_bytes())
-                                .unwrap();
-
-                            // Append the MAC Address
-                            message_u8.extend_from_slice(&proc_csi_data.mac).unwrap();
-
-                            // Append the CSI data to the message
-                            for x in proc_csi_data.csi_data.iter() {
-                                message_u8.push(*x as u8).unwrap();
-                            }
-
-                            // Send back to sender if sequence number is not zero
-                            if proc_csi_data.sequence_number != 0 {
-                                socket.send_to(&message_u8, endpoint).await.unwrap();
-                            }
-                        }
-                        Either::Second(sig) => {
-                            if !sig {
-                                println!("Halting Messages to Trigger Source");
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // match select(trigger_timer_fut, stop_coll_fut).await {
+        //     Either::First(_) => {
+        // Send raw packet
+        raw_socket.send(ipv4_packet_buffer).await;
+        // }
+        //     Either::Second(sig) => {
+        //         if !sig {
+        //             println!("Stopping Trigger Traffic");
+        //             break;
+        //         }
+        //     }
+        // };
     }
+    // }
 }
-
-// Get MAC from AP Code
-
-// #[repr(C)]
-// pub struct wifi_ap_record_t {
-//     pub bssid: [u8; 6],
-// }
-// extern "C" {
-//     pub fn esp_wifi_sta_get_ap_info(ap_info: *mut wifi_ap_record_t);
-// }
-
-// fn get_connected_ap_bssid() -> [u8; 6] {
-//     let mut ap_record: wifi_ap_record_t = unsafe { core::mem::zeroed() };
-
-//     unsafe { esp_wifi_sta_get_ap_info(&mut ap_record) };
-
-//     ap_record.bssid
-// }

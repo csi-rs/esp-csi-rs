@@ -1,0 +1,86 @@
+#![no_std]
+#![no_main]
+
+use defmt::{info, println};
+use embassy_executor::Spawner;
+use embassy_time::{with_timeout, Duration, Timer};
+use esp_hal::clock::CpuClock;
+use esp_hal::timer::timg::TimerGroup;
+use esp_radio::{
+    wifi::{ClientConfig, Interfaces, WifiController},
+    Controller,
+};
+use testup::{config::CsiConfig, CSINode};
+use {esp_backtrace as _, esp_println as _};
+
+extern crate alloc;
+
+static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
+    static_cell::StaticCell::new();
+
+// This creates a default app-descriptor required by the esp-idf bootloader.
+// For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
+esp_bootloader_esp_idf::esp_app_desc!();
+
+#[allow(
+    clippy::large_stack_frames,
+    reason = "it's not unusual to allocate larger buffers etc. in main"
+)]
+
+macro_rules! mk_static {
+    ($t:ty,$val:expr) => {{
+        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
+        #[deny(unused_attributes)]
+        let x = STATIC_CELL.uninit().write(($val));
+        x
+    }};
+}
+
+#[esp_rtos::main]
+async fn main(spawner: Spawner) -> ! {
+    // generator version: 1.1.0
+
+    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
+    let peripherals = esp_hal::init(config);
+
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
+
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    let sw_interrupt =
+        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+
+    info!("Embassy initialized!");
+
+    let radio_init = mk_static!(
+        Controller<'static>,
+        esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
+    );
+
+    let (wifi_controller, interfaces) =
+        esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
+            .expect("Failed to initialize Wi-Fi controller");
+
+    let mut node = CSINode::new(testup::Node::Peripheral, Some(CsiConfig::default()), None).await;
+
+    let controller = WIFI_CONTROLLER.init(wifi_controller);
+
+    node.init(interfaces, spawner, controller).await;
+
+    with_timeout(Duration::from_secs(10), async {
+        loop {
+            node.print_csi_w_metadata().await;
+        }
+    })
+    .await
+    .unwrap_err();
+
+    node.stop();
+
+    loop {
+        info!("Hello world!");
+        Timer::after(Duration::from_secs(1)).await;
+    }
+
+    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v~1.0/examples
+}

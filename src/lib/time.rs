@@ -1,5 +1,25 @@
-// Date/Time Calculation Helper Funcions
+use embassy_time::Instant;
 
+// Date Time Struct
+#[derive(Debug, Clone)]
+struct DateTimeCapture {
+    captured_at: Instant,
+    captured_secs: u64,
+    captured_millis: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DateTime {
+    pub year: u64,
+    pub month: u64,
+    pub day: u64,
+    pub hour: u64,
+    pub minute: u64,
+    pub second: u64,
+    pub millisecond: u64,
+}
+
+// Date/Time Calculation Helper Funcions
 // Function to convert UNIX timestamp to date and time
 pub fn unix_to_date_time(
     unix_seconds: u64,

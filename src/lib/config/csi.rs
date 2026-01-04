@@ -1,20 +1,20 @@
 /// CSI Collection Configuration Struct
 #[derive(Debug, Clone)]
 #[cfg(not(feature = "esp32c6"))]
-pub struct CSIConfig {
+pub struct CsiConfig {
     /// Enable to receive legacy long training field(lltf) data.
-    pub lltf_enabled: bool,
+    pub lltf_en: bool,
     /// Enable to receive HT long training field(htltf) data.
-    pub htltf_enabled: bool,
+    pub htltf_en: bool,
     /// Enable to receive space time block code HT long training
     /// field(stbc-htltf2) data.
-    pub stbc_htltf2_enabled: bool,
+    pub stbc_htltf2_en: bool,
     /// Enable to generate htlft data by averaging lltf and ht_ltf data when
     /// receiving HT packet. Otherwise, use ht_ltf data directly.
-    pub ltf_merge_enabled: bool,
+    pub ltf_merge_en: bool,
     /// Enable to turn on channel filter to smooth adjacent sub-carrier. Disable
     /// it to keep independence of adjacent sub-carrier.
-    pub channel_filter_enabled: bool,
+    pub channel_filter_en: bool,
     /// Manually scale the CSI data by left shifting or automatically scale the
     /// CSI data. If set true, please set the shift bits. false: automatically.
     /// true: manually.
@@ -28,7 +28,7 @@ pub struct CSIConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg(feature = "esp32c6")]
-pub struct CSIConfig {
+pub struct CsiConfig {
     /// Enable to acquire CSI.
     pub enable: u32,
     /// Enable to acquire L-LTF when receiving a 11g PPDU.
@@ -57,7 +57,7 @@ pub struct CSIConfig {
     pub reserved: u32,
 }
 
-impl Default for CSIConfig {
+impl Default for CsiConfig {
     /// Default implmentation for CSI Collection Configuration:
     /// - lltf is enabled
     /// - htltfis enabled
@@ -70,11 +70,11 @@ impl Default for CSIConfig {
     #[cfg(not(feature = "esp32c6"))]
     fn default() -> Self {
         Self {
-            lltf_enabled: true,
-            htltf_enabled: true,
-            stbc_htltf2_enabled: true,
-            ltf_merge_enabled: true,
-            channel_filter_enabled: true,
+            lltf_en: true,
+            htltf_en: true,
+            stbc_htltf2_en: true,
+            ltf_merge_en: true,
+            channel_filter_en: true,
             manu_scale: false,
             shift: 0,
             dump_ack_en: false,
