@@ -1,6 +1,6 @@
 use embassy_time::Timer;
-use esp_println::println;
 
+use crate::log_ln;
 use esp_radio::esp_now::{
     EspNow, EspNowManager, EspNowReceiver, EspNowSender, EspNowWifiInterface, PeerInfo,
     BROADCAST_ADDRESS,
@@ -34,7 +34,7 @@ pub fn esp_now_collector_init(
     frequency_hz: Option<u16>,
 ) {
     esp_now.set_channel(config.channel).unwrap();
-    println!("esp-now version {}", esp_now.version().unwrap());
+    log_ln!("esp-now version {}", esp_now.version().unwrap());
     esp_now
         .set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi)
         .unwrap();
@@ -90,15 +90,15 @@ async fn broadcaster(
             }
             Either::Second(_) => {
                 let elapsed = current_timestamp.elapsed().as_micros();
-                println!("Send Broadcast at {:?}", elapsed);
+                log_ln!("Send Broadcast at {:?}", elapsed);
                 let mut sender = sender.lock().await;
                 let status = sender.send_async(&BROADCAST_ADDRESS, b"H").await;
-                println!("Send broadcast status: {:?}", status);
+                log_ln!("Send broadcast status: {:?}", status);
             }
         }
     }
     TX_STOP_SIGNAL.reset();
-    println!("Node Stopped. Halting Broacasts.");
+    log_ln!("Node Stopped. Halting Broacasts.");
 }
 
 #[embassy_executor::task]
@@ -111,7 +111,7 @@ async fn listener(manager: &'static EspNowManager<'static>, mut receiver: EspNow
                 break;
             }
             Either::Second(r) => {
-                // println!("Received {:?}", r.data());
+                // log_ln!("Received {:?}", r.data());
 
                 let csi_packet = reconstruct_raw_csi(r.data()).await;
                 if csi_packet.is_some() {
@@ -131,12 +131,12 @@ async fn listener(manager: &'static EspNowManager<'static>, mut receiver: EspNow
                                 encrypt: false,
                             })
                             .unwrap();
-                        println!("Added peer {:?}", r.info.src_address);
+                        log_ln!("Added peer {:?}", r.info.src_address);
                     }
                 }
             }
         }
     }
     RX_STOP_SIGNAL.reset();
-    println!("Node Stopped. Halting CSI Collection.");
+    log_ln!("Node Stopped. Halting CSI Collection.");
 }

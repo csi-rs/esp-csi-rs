@@ -1,13 +1,6 @@
-// #[cfg(feature = "println")]
-use esp_println::println;
-
-// #[cfg(feature = "defmt")]
-// use defmt::info;
-// #[cfg(feature = "defmt")]
-// use defmt::println;
-
 use heapless::Vec;
 
+use crate::log_ln;
 use crate::time::DateTime;
 
 /// A mapping of the different possible recieved CSI data formats supported by the Espressif WiFi driver.
@@ -168,7 +161,7 @@ impl CSIDataPacket {
     /// Prints Recieved CSI Data Packet with it's Metadata
     pub fn print_csi_w_metadata(&self) {
         if let Some(date_time) = &self.date_time {
-            println!(
+            log_ln!(
                 "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
                 date_time.year,
                 date_time.month,
@@ -179,37 +172,34 @@ impl CSIDataPacket {
                 date_time.millisecond
             );
         }
-        println!(
+        log_ln!(
             "mac: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
             self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5]
         );
-        println!("sequence number: {}", self.sequence_number);
-        // println!("rssi: {}", self.rssi);
-        // println!("rate: {}", self.rate);
-        // println!("noise floor: {}", self.noise_floor);
-        // println!("channel: {}", self.channel);
-        println!("timestamp: {}", self.timestamp);
-        // println!("sig len: {}", self.sig_len);
-        // println!("rx state: {}", self.rx_state);
-        // println!("secondary channel: {}", self.secondary_channel);
-        // println!("sgi: {}", self.sgi);
-        // println!("ant: {}", self.antenna);
-        // println!("ampdu cnt: {}", self.ampdu_cnt);
-        // println!("sig_mode: {}", self.sig_mode);
-        // println!("mcs: {}", self.mcs);
-        // println!("cwb: {}", self.bandwidth);
-        // println!("smoothing: {}", self.smoothing);
-        // println!("not sounding: {}", self.not_sounding);
-        // println!("aggregation: {}", self.aggregation);
-        // println!("stbc: {}", self.stbc);
-        // println!("fec coding: {}", self.fec_coding);
-        // println!("sig_len: {}", self.sig_len);
-        // println!("data length: {}", self.csi_data_len);
-        println!("csi raw data:");
-        #[cfg(feature = "defmt")]
-        println!("{=[?]}", self.csi_data);
-        #[cfg(feature = "println")]
-        println!("{:?}", self.csi_data);
+        log_ln!("sequence number: {}", self.sequence_number);
+        // log_ln!("rssi: {}", self.rssi);
+        // log_ln!("rate: {}", self.rate);
+        // log_ln!("noise floor: {}", self.noise_floor);
+        // log_ln!("channel: {}", self.channel);
+        log_ln!("timestamp: {}", self.timestamp);
+        // log_ln!("sig len: {}", self.sig_len);
+        // log_ln!("rx state: {}", self.rx_state);
+        // log_ln!("secondary channel: {}", self.secondary_channel);
+        // log_ln!("sgi: {}", self.sgi);
+        // log_ln!("ant: {}", self.antenna);
+        // log_ln!("ampdu cnt: {}", self.ampdu_cnt);
+        // log_ln!("sig_mode: {}", self.sig_mode);
+        // log_ln!("mcs: {}", self.mcs);
+        // log_ln!("cwb: {}", self.bandwidth);
+        // log_ln!("smoothing: {}", self.smoothing);
+        // log_ln!("not sounding: {}", self.not_sounding);
+        // log_ln!("aggregation: {}", self.aggregation);
+        // log_ln!("stbc: {}", self.stbc);
+        // log_ln!("fec coding: {}", self.fec_coding);
+        // log_ln!("sig_len: {}", self.sig_len);
+        // log_ln!("data length: {}", self.csi_data_len);
+        log_ln!("csi raw data:");
+        log_ln!("{:?}", self.csi_data);
     }
 
     // Retrieves `RxCSIFmt` for a `CSIDataPacket`
@@ -467,7 +457,7 @@ impl CSIDataPacket {
     pub fn print_csi_w_metadata(&self) {
         // Calculate Elapsed time here and add offset to date_time then call to calculate new time
         if let Some(date_time) = &self.date_time {
-            println!(
+            log_ln!(
                 "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
                 date_time.year,
                 date_time.month,
@@ -478,40 +468,37 @@ impl CSIDataPacket {
                 date_time.millisecond
             );
         }
-        println!(
+        log_ln!(
             "mac: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
             self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5]
         );
-        println!("sequence number: {}", self.sequence_number);
-        println!("rssi: {}", self.rssi);
-        println!("rate: {}", self.rate);
-        println!("noise floor: {}", self.noise_floor);
-        println!("channel: {}", self.channel);
-        println!("timestamp: {}", self.timestamp);
-        println!("rx state: {}", self.rx_state);
-        println!("dump len: {}", self.dump_len);
-        println!("he sigb len: {}", self.he_sigb_len);
-        println!("cur single mpdu: {}", self.cur_single_mpdu);
-        println!("cur bb format: {}", self.cur_bb_format);
-        println!(
+        log_ln!("sequence number: {}", self.sequence_number);
+        log_ln!("rssi: {}", self.rssi);
+        log_ln!("rate: {}", self.rate);
+        log_ln!("noise floor: {}", self.noise_floor);
+        log_ln!("channel: {}", self.channel);
+        log_ln!("timestamp: {}", self.timestamp);
+        log_ln!("rx state: {}", self.rx_state);
+        log_ln!("dump len: {}", self.dump_len);
+        log_ln!("he sigb len: {}", self.he_sigb_len);
+        log_ln!("cur single mpdu: {}", self.cur_single_mpdu);
+        log_ln!("cur bb format: {}", self.cur_bb_format);
+        log_ln!(
             "rx channel estimate info vld: {}",
             self.rx_channel_estimate_info_vld
         );
-        println!("rx channel estimate len: {}", self.rx_channel_estimate_len);
-        println!("second: {}", self.second);
-        println!("is group: {}", self.is_group);
-        println!("rxend state: {}", self.rxend_state);
-        println!("rxmatch3: {}", self.rxmatch3);
-        println!("rxmatch2: {}", self.rxmatch2);
-        println!("rxmatch1: {}", self.rxmatch1);
-        println!("rxmatch0: {}", self.rxmatch0);
-        println!("sig len: {}", self.sig_len);
-        println!("data length: {}", self.csi_data_len);
-        println!("csi raw data:");
-        #[cfg(feature = "defmt")]
-        println!("{=[?]}", self.csi_data);
-        #[cfg(feature = "println")]
-        println!("{:?}", self.csi_data);
+        log_ln!("rx channel estimate len: {}", self.rx_channel_estimate_len);
+        log_ln!("second: {}", self.second);
+        log_ln!("is group: {}", self.is_group);
+        log_ln!("rxend state: {}", self.rxend_state);
+        log_ln!("rxmatch3: {}", self.rxmatch3);
+        log_ln!("rxmatch2: {}", self.rxmatch2);
+        log_ln!("rxmatch1: {}", self.rxmatch1);
+        log_ln!("rxmatch0: {}", self.rxmatch0);
+        log_ln!("sig len: {}", self.sig_len);
+        log_ln!("data length: {}", self.csi_data_len);
+        log_ln!("csi raw data:");
+        log_ln!("{:?}", self.csi_data);
     }
     pub fn csi_fmt_from_params(&mut self) {
         self.data_format = RxCSIFmt::Undefined;

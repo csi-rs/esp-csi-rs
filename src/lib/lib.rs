@@ -13,8 +13,6 @@ use embassy_sync::pubsub::PubSubChannel;
 use embassy_sync::signal::Signal;
 // use embassy_sync::watch::Receiver;
 
-use esp_println::println;
-
 use heapless::Vec;
 
 pub mod collector;
@@ -22,6 +20,7 @@ pub mod config;
 pub mod csi;
 pub mod peripheral;
 pub mod time;
+pub mod logging;
 
 use crate::collector::esp_now::esp_now_collector_init;
 use crate::collector::sta::{sta_connect, sta_init};
@@ -204,12 +203,12 @@ impl CSINode {
         // Build CSI Configuration
         let config = match self.csi_config {
             Some(ref config) => {
-                println!("CSI Configuration Set: {:?}", config);
+                log_ln!("CSI Configuration Set: {:?}", config);
                 build_csi_config(config)
             }
             None => {
                 let default_config = CsiConfiguration::default();
-                println!(
+                log_ln!(
                     "No CSI Configuration Provided. Going with defaults: {:?}",
                     default_config
                 );
@@ -219,7 +218,7 @@ impl CSINode {
 
         // Start the controller
         controller.start_async().await.unwrap();
-        println!("Wi-Fi Controller Started");
+        log_ln!("Wi-Fi Controller Started");
 
         // Initialize Nodes
         match &self.kind {
@@ -451,7 +450,7 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
     };
 
     if CSI_PACKET.is_full() {
-        println!("CSI Packet Channel Full. Dropping Packet.");
+        log_ln!("CSI Packet Channel Full. Dropping Packet.");
     } else {
         CSI_PACKET.publish_immediate(csi_packet);
     }

@@ -5,7 +5,6 @@ use embassy_net::raw::{IpProtocol, IpVersion, PacketMetadata, RawSocket};
 use embassy_net::{Ipv4Address, Ipv4Cidr, Runner, Stack, StackResources};
 use embassy_time::{Duration, Timer};
 use enumset::enum_set;
-use esp_println::println;
 use esp_radio::wifi::{ModeConfig, WifiController, WifiDevice, WifiEvent};
 use smoltcp::phy::ChecksumCapabilities;
 
@@ -14,6 +13,7 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal}
 use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, Ipv4Packet, Ipv4Repr};
 
 use crate::WifiStationConfig;
+use crate::log_ln;
 
 static DHCP_CLIENT_INFO: Signal<CriticalSectionRawMutex, IpInfo> = Signal::new();
 
@@ -52,16 +52,16 @@ pub fn sta_init(
 
     // Spawn the network runner task
     spawner.spawn(net_task(sta_runner)).ok();
-    println!("Network Task Running");
+    log_ln!("Network Task Running");
 
     // Configure WiFi Client/Station Connection
     let station_config = ModeConfig::Client(config.client_config.clone());
     // Set the Configuration
     match controller.set_config(&station_config) {
-        Ok(_) => println!("WiFi Configuration Set: {:?}", config),
+        Ok(_) => log_ln!("WiFi Configuration Set: {:?}", config),
         Err(_) => {
-            println!("WiFi Configuration Error");
-            println!("Error Config: {:?}", config);
+            log_ln!("WiFi Configuration Error");
+            log_ln!("Error Config: {:?}", config);
         }
     }
 
@@ -76,7 +76,7 @@ pub async fn sta_connect(
 ) {
     // Connect WiFi
     match controller.connect_async().await {
-        Ok(_) => println!("WiFi Connected"),
+        Ok(_) => log_ln!("WiFi Connected"),
         Err(e) => {
             panic!("Failed to connect WiFi: {:?}", e);
         }
@@ -95,18 +95,18 @@ pub async fn sta_connect(
 
 #[embassy_executor::task]
 pub async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
-    // println!("Network Task Running");
+    // log_ln!("Network Task Running");
     runner.run().await
 }
 
 async fn run_dhcp_client(sta_stack: Stack<'static>) {
-    println!("Running DHCP Client");
+    log_ln!("Running DHCP Client");
 
     // Acquire and store IP information for gateway and client after configuration is up
 
     // Check if link is up
     sta_stack.wait_link_up().await;
-    println!("Link is up!");
+    log_ln!("Link is up!");
 
     // Create instance to store acquired IP information
     let mut ip_info = IpInfo {
@@ -114,9 +114,9 @@ async fn run_dhcp_client(sta_stack: Stack<'static>) {
         gateway_address: Ipv4Address::UNSPECIFIED,
     };
 
-    println!("Acquiring config...");
+    log_ln!("Acquiring config...");
     sta_stack.wait_config_up().await;
-    println!("Config Acquired");
+    log_ln!("Config Acquired");
 
     // Print out acquired IP configuration
     loop {
@@ -124,17 +124,8 @@ async fn run_dhcp_client(sta_stack: Stack<'static>) {
             ip_info.local_address = config.address;
             ip_info.gateway_address = config.gateway.unwrap();
 
-            #[cfg(feature = "defmt")]
-            {
-                info!("Local IP: {:?}", ip_info.local_address);
-                info!("Gateway IP: {:?}", ip_info.gateway_address);
-            }
-
-            #[cfg(not(feature = "defmt"))]
-            {
-                println!("Local IP: {:?}", ip_info.local_address);
-                println!("Gateway IP: {:?}", ip_info.gateway_address);
-            }
+            log_ln!("Local IP: {:?}", ip_info.local_address);
+            log_ln!("Gateway IP: {:?}", ip_info.gateway_address);
 
             break;
         }
@@ -173,10 +164,10 @@ pub async fn sta_connection(controller: &'static mut WifiController<'static>) {
         //     // Wait event future cases
         //     Either::First(mut event) => {
         if wait_event_fut.contains(WifiEvent::StaDisconnected) {
-            println!("STA Disconnected");
+            log_ln!("STA Disconnected");
         }
         if wait_event_fut.contains(WifiEvent::StaStop) {
-            println!("STA Stopped");
+            log_ln!("STA Stopped");
         }
         wait_event_fut.clear();
         //     }
@@ -184,7 +175,7 @@ pub async fn sta_connection(controller: &'static mut WifiController<'static>) {
         //     Either::Second(sig) => {
         //         // Stop Signal
         //         if !sig {
-        //             println!("Halting CSI Collection...");
+        //             log_ln!("Halting CSI Collection...");
         //             // Send the controller back before exiting loop
         //             // CONTROLLER_CH.send(controller).await;
         //             // CONTROLLER_HALTED_SIGNAL.signal(true);
@@ -268,7 +259,7 @@ pub async fn sta_network_ops(sta_stack: Stack<'static>, freq: Option<u16>) {
     // while !start_collection_watch.changed().await {
     //     Timer::after(Duration::from_millis(100)).await;
     // }
-    // println!("Starting Trigger Traffic");
+    // log_ln!("Starting Trigger Traffic");
     // Station Trigger supports sending ICMP Echo Requests as trigger packets at defined frequency
 
     let trigger_interval = match freq {
@@ -290,7 +281,7 @@ pub async fn sta_network_ops(sta_stack: Stack<'static>, freq: Option<u16>) {
         // }
         //     Either::Second(sig) => {
         //         if !sig {
-        //             println!("Stopping Trigger Traffic");
+        //             log_ln!("Stopping Trigger Traffic");
         //             break;
         //         }
         //     }

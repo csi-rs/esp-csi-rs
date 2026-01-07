@@ -1,4 +1,4 @@
-use esp_println::println;
+use crate::log_ln;
 
 use esp_radio::esp_now::{EspNow, PeerInfo, BROADCAST_ADDRESS};
 
@@ -17,7 +17,7 @@ pub fn esp_now_peripheral_init(
     spawner: embassy_executor::Spawner,
 ) {
     esp_now.set_channel(config.channel).unwrap();
-    println!("esp-now version {}", esp_now.version().unwrap());
+    log_ln!("esp-now version {}", esp_now.version().unwrap());
     esp_now
         .set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi)
         .unwrap();
@@ -47,7 +47,7 @@ async fn responder(mut esp_now: EspNow<'static>) {
                 break;
             }
             Either::Second(proc_csi_data) => {
-                println!(
+                log_ln!(
                     "Sending Back CSI Data with Seq No: {}",
                     proc_csi_data.sequence_number
                 );
@@ -56,7 +56,7 @@ async fn responder(mut esp_now: EspNow<'static>) {
                 match message_u8.extend_from_slice(&proc_csi_data.sequence_number.to_be_bytes()) {
                     Ok(_) => {}
                     Err(e) => {
-                        println!("Failed to append sequence number: {:?}", e);
+                        log_ln!("Failed to append sequence number: {:?}", e);
                     }
                 }
 
@@ -64,7 +64,7 @@ async fn responder(mut esp_now: EspNow<'static>) {
                 match message_u8.push(proc_csi_data.data_format as u8) {
                     Ok(_) => {}
                     Err(e) => {
-                        println!("Failed to append data format: {:?}", e);
+                        log_ln!("Failed to append data format: {:?}", e);
                     }
                 }
 
@@ -72,7 +72,7 @@ async fn responder(mut esp_now: EspNow<'static>) {
                 match message_u8.extend_from_slice(&proc_csi_data.timestamp.to_be_bytes()) {
                     Ok(_) => {}
                     Err(e) => {
-                        println!("Failed to append timestamp: {:?}", e);
+                        log_ln!("Failed to append timestamp: {:?}", e);
                     }
                 }
 
@@ -80,7 +80,7 @@ async fn responder(mut esp_now: EspNow<'static>) {
                 match message_u8.extend_from_slice(&proc_csi_data.mac) {
                     Ok(_) => {}
                     Err(e) => {
-                        println!("Failed to append MAC Address: {:?}", e);
+                        log_ln!("Failed to append MAC Address: {:?}", e);
                     }
                 }
 
@@ -89,7 +89,7 @@ async fn responder(mut esp_now: EspNow<'static>) {
                     match message_u8.push(*x as u8) {
                         Ok(_) => {}
                         Err(e) => {
-                            println!("Failed to append CSI data: {:?}", e);
+                            log_ln!("Failed to append CSI data: {:?}", e);
                         }
                     }
                 }
@@ -103,14 +103,14 @@ async fn responder(mut esp_now: EspNow<'static>) {
                         encrypt: false,
                     });
                     match peer_res {
-                        Ok(()) => println!("Added new peer: {:?}", proc_csi_data.mac),
-                        Err(e) => println!("Failed to add peer: {:?}", e),
+                        Ok(()) => log_ln!("Added new peer: {:?}", proc_csi_data.mac),
+                        Err(e) => log_ln!("Failed to add peer: {:?}", e),
                     }
                 }
                 let status = esp_now.send_async(&proc_csi_data.mac, &message_u8).await;
                 match status {
-                    Ok(()) => println!("Sent CSI data to {:?}", proc_csi_data.mac),
-                    Err(e) => println!("Failed to send CSI data: {:?}", e),
+                    Ok(()) => log_ln!("Sent CSI data to {:?}", proc_csi_data.mac),
+                    Err(e) => log_ln!("Failed to send CSI data: {:?}", e),
                 }
 
                 // Clear Buffer for next use
@@ -119,5 +119,5 @@ async fn responder(mut esp_now: EspNow<'static>) {
         };
     }
     TX_STOP_SIGNAL.reset();
-    println!("Node Stopped. Halting CSI Sending.");
+    log_ln!("Node Stopped. Halting CSI Sending.");
 }
