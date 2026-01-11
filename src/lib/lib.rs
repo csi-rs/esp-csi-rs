@@ -317,12 +317,6 @@ impl CSINode {
         self.csi_config = Some(config);
     }
 
-    pub fn update_sniffer_config(&mut self, config: WifiSnifferConfig) {
-        if let Node::Central(CentralOpMode::WifiSniffer(_)) = &mut self.kind {
-            self.kind = Node::Central(CentralOpMode::WifiSniffer(config));
-        }
-    }
-
     pub fn update_station_config(&mut self, config: WifiStationConfig) {
         if let Node::Central(CentralOpMode::WifiStation(_)) = &mut self.kind {
             self.kind = Node::Central(CentralOpMode::WifiStation(config));
@@ -396,18 +390,6 @@ fn set_csi(controller: &mut WifiController, config: CsiConfig, spawner: Spawner,
     } else {
         crate::log_ln!("CSI Listener Mode: Processing Task Skipped");
     }
-}
-
-fn set_csi(controller: &mut WifiController, config: CsiConfig, spawner: Spawner) {
-    // Set CSI Configuration with callback
-    controller
-        .set_csi(config, |info: esp_radio::wifi::wifi_csi_info_t| {
-            capture_csi_info(info);
-        })
-        .unwrap();
-
-    // Spawn task to process recieved CSI Packets
-    spawner.spawn(process_csi_packet()).ok();
 }
 
 // Function to capture CSI info from callback and publish to channel
