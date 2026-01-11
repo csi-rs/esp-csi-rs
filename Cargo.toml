@@ -32,7 +32,7 @@ defmt = [
     "esp-println/defmt-espflash",
 ]
 ## Enable logging via `println!()` instead of defmt.
-println = ["esp-backtrace/println"]
+println = ["dep:log"]
 ## Enable the JTAG serial interface for logging. Only supported by ESP32-C3, ESP32-C6, and ESP32-S3.
 jtag-serial = ["esp-println/jtag-serial"] # C3, C6, H2, P4, and S3 only!
 ## Automaically select the logging interface based on the target (Ex. UART).
@@ -181,6 +181,8 @@ document-features = "0.2.11"
 
 defmt = { version = "1.0.1", optional = true }
 defmt-rtt = { version = "1.1.0", optional = true }
+
+log = {version = "0.4.29", optional = true }
 
 [profile.dev]
 # Rust debug is too slow.
