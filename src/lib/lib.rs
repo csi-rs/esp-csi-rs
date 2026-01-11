@@ -15,15 +15,15 @@ use embassy_sync::signal::Signal;
 
 use heapless::Vec;
 
-pub mod collector;
+pub mod central;
 pub mod config;
 pub mod csi;
 pub mod peripheral;
 pub mod time;
 pub mod logging;
 
-use crate::collector::esp_now::esp_now_collector_init;
-use crate::collector::sta::{sta_connect, sta_init};
+use crate::central::esp_now::esp_now_central_init;
+use crate::central::sta::{sta_connect, sta_init};
 use crate::config::CsiConfig as CsiConfiguration;
 use crate::csi::{CSIDataPacket, RxCSIFmt};
 use crate::peripheral::esp_now::esp_now_peripheral_init;
@@ -99,21 +99,33 @@ pub struct WifiStationConfig {
     pub client_config: ClientConfig,
 }
 
-// Enum for Collector modes, each wrapping its specific config.
+// Enum for Central modes, each wrapping its specific config.
 
-pub enum CollectorMode {
+pub enum CentralOpMode {
     EspNow(EspNowConfig),
-    WifiSniffer(WifiSnifferConfig),
     WifiStation(WifiStationConfig),
 }
 
+// Enum for Peripheral modes, each wrapping its specific config.
+pub enum PeripheralOpMode {
+    EspNow(EspNowConfig),
+    WifiSniffer(WifiSnifferConfig),
+}
+
 pub enum Node {
-    Peripheral(EspNowConfig), // Mode is implicit (only EspNow), directly holds config.
-    Collector(CollectorMode), // Uses the sub-enum for mode selection.
+    Peripheral(PeripheralOpMode), // Mode is implicit (only EspNow), directly holds config.
+    Central(CentralOpMode), // Uses the sub-enum for mode selection.
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum CollectionMode {
+    Collector, // Enables CSI collection + Collect CSI Data
+    Listener,  // Enables CSI collection + Does not collect CSI Data
 }
 
 pub struct CSINode {
     kind: Node,
+    collection_mode: CollectionMode,
     /// CSI Configuration
     csi_config: Option<CsiConfiguration>,
     /// Traffic Generation Frequency
@@ -132,12 +144,14 @@ pub struct CSINode {
 impl CSINode {
     pub async fn new(
         kind: Node,
+        collection_mode: CollectionMode,
         csi_config: Option<CsiConfiguration>,
         traffic_freq_hz: Option<u16>,
     ) -> Self {
         let csi_data_rx = PROCESSED_CSI_DATA.subscriber().unwrap();
         Self {
             kind,
+            collection_mode,
             csi_config,
             traffic_freq_hz,
             csi_data_rx,
@@ -145,27 +159,31 @@ impl CSINode {
     }
 
     pub async fn new_peripheral_node(
-        esp_now_config: EspNowConfig,
+        op_mode: PeripheralOpMode,
+        collection_mode: CollectionMode,
         csi_config: Option<CsiConfiguration>,
         traffic_freq_hz: Option<u16>,
     ) -> Self {
         let csi_data_rx = PROCESSED_CSI_DATA.subscriber().unwrap();
         Self {
-            kind: Node::Peripheral(esp_now_config),
+            kind: Node::Peripheral(op_mode),
+            collection_mode,
             csi_config,
             traffic_freq_hz,
             csi_data_rx,
         }
     }
 
-    pub async fn new_collector_node(
-        mode: CollectorMode,
+    pub async fn new_central_node(
+        op_mode: CentralOpMode,
+        collection_mode: CollectionMode,
         csi_config: Option<CsiConfiguration>,
         traffic_freq_hz: Option<u16>,
     ) -> Self {
         let csi_data_rx = PROCESSED_CSI_DATA.subscriber().unwrap();
         Self {
-            kind: Node::Collector(mode),
+            kind: Node::Central(op_mode),
+            collection_mode,
             csi_config: None,
             traffic_freq_hz: None,
             csi_data_rx,
@@ -176,10 +194,21 @@ impl CSINode {
         &self.kind
     }
 
-    pub fn get_collector_mode(&self) -> Option<&CollectorMode> {
+    pub fn get_collection_mode(&self) -> CollectionMode {
+        self.collection_mode
+    }
+
+    pub fn get_central_op_mode(&self) -> Option<&CentralOpMode> {
         match &self.kind {
+            Node::Central(mode) => Some(mode),
             Node::Peripheral(_) => None,
-            Node::Collector(mode) => Some(mode),
+        }
+    }
+
+    pub fn get_peripheral_op_mode(&self) -> Option<&PeripheralOpMode> {
+        match &self.kind {
+            Node::Peripheral(mode) => Some(mode),
+            Node::Central(_) => None,
         }
     }
 
@@ -189,8 +218,8 @@ impl CSINode {
         spawner: embassy_executor::Spawner,
         controller: &'static mut WifiController<'static>,
     ) {
-        // Tasks Necessary for Collector Station & Sniffer
-        let sta_stack = if let Some(CollectorMode::WifiStation(config)) = self.get_collector_mode()
+        // Tasks Necessary for Central Station & Sniffer
+        let sta_stack = if let Node::Central(CentralOpMode::WifiStation(config)) = &self.kind
         {
             Some(sta_init(interfaces.sta, config, controller, spawner))
         } else {
@@ -220,31 +249,38 @@ impl CSINode {
         controller.start_async().await.unwrap();
         log_ln!("Wi-Fi Controller Started");
 
+        let is_collector = self.collection_mode == CollectionMode::Collector;
+
         // Initialize Nodes
         match &self.kind {
-            Node::Peripheral(esp_now_config) => {
-                // Set Peripheral to Collect CSI
-                set_csi(controller, config, spawner);
-                // Initialize as Peripheral node with EspNowConfig
-                esp_now_peripheral_init(interfaces.esp_now, esp_now_config, spawner);
-            }
-            Node::Collector(mode) => match mode {
-                CollectorMode::EspNow(esp_now_config) => esp_now_collector_init(
-                    interfaces.esp_now,
-                    esp_now_config,
-                    spawner,
-                    self.traffic_freq_hz,
-                ),
-                CollectorMode::WifiSniffer(sniffer_config) => {
+            Node::Peripheral(op_mode) => match op_mode {
+                PeripheralOpMode::EspNow(esp_now_config) => {
+                    // Set Peripheral to Collect CSI
+                    set_csi(controller, config, spawner, is_collector);
+                    // Initialize as Peripheral node with EspNowConfig
+                    esp_now_peripheral_init(interfaces.esp_now, esp_now_config, spawner);
+                }
+                PeripheralOpMode::WifiSniffer(sniffer_config) => {
                     let sniffer = interfaces.sniffer;
                     sniffer.set_promiscuous_mode(true).unwrap();
                     // Set Sniffer to Collect CSI
-                    set_csi(controller, config, spawner);
+                    set_csi(controller, config, spawner, is_collector);
                     // Initialize as Wifi Sniffer Collector with WifiSnifferConfig
                 }
-                CollectorMode::WifiStation(sta_config) => {
+            }
+            Node::Central(op_mode) => match op_mode {
+                CentralOpMode::EspNow(esp_now_config) => {
+                    set_csi(controller, config, spawner, is_collector);
+                    esp_now_central_init(
+                        interfaces.esp_now,
+                        esp_now_config,
+                        spawner,
+                        self.traffic_freq_hz,
+                    )
+                }
+                CentralOpMode::WifiStation(sta_config) => {
                     // Set Station to collect CSI
-                    set_csi(controller, config, spawner);
+                    set_csi(controller, config, spawner, is_collector);
 
                     // Initialize as Wifi Station Collector with WifiStationConfig
                     // 1. Connect to Wi-Fi network, etc.
@@ -267,7 +303,7 @@ impl CSINode {
     /// Stops CSI Node & data collection
     pub fn stop(&self) {
         match &self.kind {
-            Node::Collector(_) => {
+            Node::Central(_) => {
                 TX_STOP_SIGNAL.signal(true);
                 RX_STOP_SIGNAL.signal(true);
             }
@@ -282,14 +318,14 @@ impl CSINode {
     }
 
     pub fn update_sniffer_config(&mut self, config: WifiSnifferConfig) {
-        if let Node::Collector(CollectorMode::WifiSniffer(_)) = &mut self.kind {
-            self.kind = Node::Collector(CollectorMode::WifiSniffer(config));
+        if let Node::Central(CentralOpMode::WifiSniffer(_)) = &mut self.kind {
+            self.kind = Node::Central(CentralOpMode::WifiSniffer(config));
         }
     }
 
     pub fn update_station_config(&mut self, config: WifiStationConfig) {
-        if let Node::Collector(CollectorMode::WifiStation(_)) = &mut self.kind {
-            self.kind = Node::Collector(CollectorMode::WifiStation(config));
+        if let Node::Central(CentralOpMode::WifiStation(_)) = &mut self.kind {
+            self.kind = Node::Central(CentralOpMode::WifiStation(config));
         }
     }
     /// Retrieve the latest available CSI data packet
@@ -338,6 +374,27 @@ fn build_csi_config(csi_config: &CsiConfiguration) -> CsiConfig {
         manu_scale: csi_config.manu_scale,
         shift: csi_config.shift,
         dump_ack_en: csi_config.dump_ack_en,
+    }
+}
+
+/// Sets CSI Configuration.
+/// - If `spawn_processor` is true (Collector Mode), it starts the processing task.
+/// - If `spawn_processor` is false (Listener Mode), it enables hardware but ignores data processing.
+fn set_csi(controller: &mut WifiController, config: CsiConfig, spawner: Spawner, spawn_processor: bool,)
+{
+    // Set CSI Configuration with callback
+    controller
+        .set_csi(config, |info: esp_radio::wifi::wifi_csi_info_t| {
+            capture_csi_info(info);
+        })
+        .unwrap();
+
+    if (spawn_processor) {
+        // Only spawn the consumer task if we are a Collector
+        spawner.spawn(process_csi_packet()).ok();
+        crate::log_ln!("CSI Processing Task Spawned");
+    } else {
+        crate::log_ln!("CSI Listener Mode: Processing Task Skipped");
     }
 }
 

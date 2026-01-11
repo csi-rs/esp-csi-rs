@@ -27,7 +27,7 @@ macro_rules! mk_static {
     }};
 }
 
-pub fn esp_now_collector_init(
+pub fn esp_now_central_init(
     esp_now: EspNow<'static>,
     config: &EspNowConfig,
     spawner: embassy_executor::Spawner,
