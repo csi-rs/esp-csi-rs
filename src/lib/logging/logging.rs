@@ -1,3 +1,13 @@
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel}
+use heapless::String;
+use core::fmt::Write;
+use crate::csi::{CSIDataPacket}
+
+static CSI_CHANNEL: Channel<CriticalSectionRawMutex, CSIDataPacket, 10> = Channel::new();
+
+type DebugPayload = String<128>;
+static DEBUG_CHANNEL: Channel<CriticalSectionRawMutex, DebugPayload, 20> = Channel::new();
+
 #[macro_export]
 macro_rules! log_ln {
     ($($arg:tt)*) => {{
@@ -22,3 +32,9 @@ macro_rules! log_ln {
         }
     }};
 }
+
+#[macro_export]
+macro_rules! log_csi_ln {
+}
+
+#[embassy_executor::task]
