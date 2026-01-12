@@ -15,6 +15,7 @@ use embassy_sync::signal::Signal;
 
 use heapless::Vec;
 extern crate alloc;
+use alloc::collections::BTreeMap;
 
 
 pub mod central;
@@ -505,10 +506,43 @@ pub async fn process_csi_packet() {
     let mut csi_packet_sub = CSI_PACKET.subscriber().unwrap();
     let proc_csi_packet_sender = PROCESSED_CSI_DATA.publisher().unwrap();
 
+    // Map to track sequence numbers per MAC address
+    let mut peer_tracker: BTreeMap<[u8; 6], u16> = BTreeMap::new();
+    
+    // Global counter for all drops across all MAC addresses
+    let mut global_drop_count: u32 = 0;
+
     // Loop that will process CSI data as soon as it arrives
     loop {
         // Get the unprocessed CSI data packet from the channel
         let mut csi_packet = csi_packet_sub.next_message_pure().await;
+
+        // --- DROP DETECTION LOGIC START ---
+        let current_seq = csi_packet.sequence_number;
+
+        // Check if we have seen this MAC before
+        if let Some(&last_seq) = peer_tracker.get(&csi_packet.mac) {
+            // Station Mode / Hardware Sequence Number Fix:
+            // WiFi hardware sequence numbers (802.11) are 12-bit (0-4095).
+            // We use '& 0x0FFF' to handle the wraparound from 4095 -> 0 correctly.
+            let diff = (current_seq.wrapping_sub(last_seq)) & 0x0FFF;
+
+            if diff > 1 {
+                let lost = (diff - 1) as u32;
+                
+                // Sanity check for huge gaps (e.g. router reset)
+                if lost < 500 {
+                     global_drop_count += lost;
+                }
+            }
+        }
+        
+        // Update tracker with new sequence
+        peer_tracker.insert(csi_packet.mac, current_seq);
+        
+        // Assign the calculated global drop count to the packet
+        csi_packet.packet_drop_count = global_drop_count;
+        // --- DROP DETECTION LOGIC END ---
 
         // Update the CSI data format
         #[cfg(not(feature = "esp32c6"))]

@@ -186,6 +186,7 @@ pub async fn sta_connection(controller: &'static mut WifiController<'static>) {
     }
 }
 
+
 // This task manages network operations for the station
 #[embassy_executor::task]
 pub async fn sta_network_ops(sta_stack: Stack<'static>, freq: Option<u16>) {
@@ -212,80 +213,75 @@ pub async fn sta_network_ops(sta_stack: Stack<'static>, freq: Option<u16>) {
         &mut tx_meta,
         &mut tx_buffer,
     );
+
     // Buffer to hold ICMP Packet
     let mut icmp_buffer = [0u8; 12];
-
-    // Create ICMP Packet
-    let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
-
-    // Create an ICMPv4 Echo Request
-    let icmp_repr = Icmpv4Repr::EchoRequest {
-        ident: 0x22b,
-        seq_no: 0,
-        data: &[0xDE, 0xAD, 0xBE, 0xEF],
-    };
-
-    // Serialize the ICMP representation into the packet
-    icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
-
     // Buffer for the full IPv4 packet
     let mut tx_ipv4_buffer = [0u8; 64];
 
-    // Define the IPv4 representation
-    let ipv4_repr = Ipv4Repr {
-        src_addr: ip_info.local_address.address(),
-        dst_addr: ip_info.gateway_address,
-        payload_len: icmp_repr.buffer_len(),
-        hop_limit: 64, // Time-to-live value
-        next_header: IpProtocol::Icmp,
-    };
-
-    // Create the IPv4 packet
-    let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut tx_ipv4_buffer);
-
-    // Serialize the IPv4 representation into the packet
-    ipv4_repr.emit(&mut ipv4_packet, &ChecksumCapabilities::default());
-
-    // Copy the ICMP packet into the IPv4 packet's payload
-    ipv4_packet
-        .payload_mut()
-        .copy_from_slice(icmp_packet.into_inner());
-
-    // IP Packet buffer that will be sent or recieved
-    let ipv4_packet_buffer = ipv4_packet.into_inner();
-
-    // loop {
-    // Wait for start signal
-    // while !start_collection_watch.changed().await {
-    //     Timer::after(Duration::from_millis(100)).await;
-    // }
-    // log_ln!("Starting Trigger Traffic");
-    // Station Trigger supports sending ICMP Echo Requests as trigger packets at defined frequency
-
+    // Determine trigger frequency
     let trigger_interval = match freq {
         Some(freq) => 1000_u64 / freq as u64,
         None => u32::MAX as u64,
     };
-    // let trigger_interval = Duration::from_millis((1000 / trigger_config.trigger_freq_hz).into());
+
+    // Initialize sequence counter
+    let mut seq_counter: u16 = 0;
+
+    log_ln!("Starting Trigger Traffic");
+
     // Start sending trigger packets
     loop {
         // Trigger Interval Future
-        let _trigger_timer_fut = Timer::after(Duration::from_millis(trigger_interval)).await;
-        // Stop Trigger Future
-        // let stop_coll_fut = start_collection_watch.changed();
+        Timer::after(Duration::from_millis(trigger_interval)).await;
 
-        // match select(trigger_timer_fut, stop_coll_fut).await {
-        //     Either::First(_) => {
+        // Increment sequence number for this packet
+        seq_counter = seq_counter.wrapping_add(1);
+
+        // --- PACKET CONSTRUCTION START ---
+        // We reconstruct the packet inside the loop to update the 'seq_no'
+        
+        // Create ICMP Packet wrapper around the existing buffer
+        let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
+
+        // Create an ICMPv4 Echo Request with dynamic Sequence Number
+        let icmp_repr = Icmpv4Repr::EchoRequest {
+            ident: 0x22b,
+            seq_no: seq_counter, // <--- Updated per loop iteration
+            data: &[0xDE, 0xAD, 0xBE, 0xEF],
+        };
+
+        // Serialize the ICMP representation into the packet
+        icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
+
+        // Define the IPv4 representation
+        let ipv4_repr = Ipv4Repr {
+            src_addr: ip_info.local_address.address(),
+            dst_addr: ip_info.gateway_address,
+            payload_len: icmp_repr.buffer_len(),
+            hop_limit: 64, // Time-to-live value
+            next_header: IpProtocol::Icmp,
+        };
+
+        // Create the IPv4 packet wrapper around the existing buffer
+        let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut tx_ipv4_buffer);
+
+        // Serialize the IPv4 representation into the packet
+        ipv4_repr.emit(&mut ipv4_packet, &ChecksumCapabilities::default());
+
+        // Copy the ICMP packet into the IPv4 packet's payload
+        ipv4_packet
+            .payload_mut()
+            .copy_from_slice(icmp_packet.into_inner());
+
+        // IP Packet buffer that will be sent
+        let ipv4_packet_buffer = ipv4_packet.into_inner();
+        // --- PACKET CONSTRUCTION END ---
+
         // Send raw packet
         raw_socket.send(ipv4_packet_buffer).await;
-        // }
-        //     Either::Second(sig) => {
-        //         if !sig {
-        //             log_ln!("Stopping Trigger Traffic");
-        //             break;
-        //         }
-        //     }
-        // };
+
+        // Stop Trigger Future logic (commented out in original)
+        // ...
     }
-    // }
 }
