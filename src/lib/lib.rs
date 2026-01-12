@@ -14,6 +14,8 @@ use embassy_sync::signal::Signal;
 // use embassy_sync::watch::Receiver;
 
 use heapless::Vec;
+extern crate alloc;
+
 
 pub mod central;
 pub mod config;
@@ -447,6 +449,7 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
         timestamp: info.rx_ctrl.timestamp(),
         rx_state: info.rx_ctrl.rx_state(),
         sig_len: info.rx_ctrl.sig_len(),
+        packet_drop_count: 0, // Initialize to 0. The listener task will calculate the real value later.
         csi_data_len: csi_buf_len,
         csi_data: csi_data,
     };
@@ -657,6 +660,7 @@ async fn reconstruct_raw_csi(raw_csi_data: &[u8]) -> Option<CSIDataPacket> {
         date_time: None,
         sequence_number,
         data_format,
+        packet_drop_count: 0,
         csi_data_len: csi_len,
         csi_data,
     };

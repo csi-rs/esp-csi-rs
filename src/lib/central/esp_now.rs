@@ -1,5 +1,6 @@
 use embassy_time::Timer;
 
+use alloc::collections::BTreeMap;
 use crate::log_ln;
 use esp_radio::esp_now::{
     EspNow, EspNowManager, EspNowReceiver, EspNowSender, EspNowWifiInterface, PeerInfo,
@@ -18,6 +19,8 @@ use crate::EspNowConfig;
 use crate::PROCESSED_CSI_DATA;
 use crate::{RX_STOP_SIGNAL, TX_STOP_SIGNAL};
 
+
+// macro to save a variable in static memory to stay forever in the program lifetime
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
@@ -27,6 +30,11 @@ macro_rules! mk_static {
     }};
 }
 
+
+// setup function, configures the hardware and starts the background tasks
+// manager -> adding peers (peripherals)
+// sender -> transmitting
+// receiver -> listening
 pub fn esp_now_central_init(
     esp_now: EspNow<'static>,
     config: &EspNowConfig,
@@ -104,6 +112,13 @@ async fn broadcaster(
 #[embassy_executor::task]
 async fn listener(manager: &'static EspNowManager<'static>, mut receiver: EspNowReceiver<'static>) {
     let proc_csi_data = PROCESSED_CSI_DATA.publisher().unwrap();
+
+    // Map to track sequence numbers per MAC address
+    let mut peer_tracker: BTreeMap<[u8; 6], u16> = BTreeMap::new();
+
+    // Global counter for all drops across all MAC addresses
+    let mut global_drop_count: u32 = 0;
+
     loop {
         match select(RX_STOP_SIGNAL.wait(), receiver.receive_async()).await {
             Either::First(_) => {
@@ -112,11 +127,29 @@ async fn listener(manager: &'static EspNowManager<'static>, mut receiver: EspNow
             }
             Either::Second(r) => {
                 // log_ln!("Received {:?}", r.data());
-
+                
                 let csi_packet = reconstruct_raw_csi(r.data()).await;
-                if csi_packet.is_some() {
-                    let mut packet = csi_packet.unwrap();
+                if let Some(mut packet) = csi_packet {
                     packet.mac = r.info.src_address;
+
+                    let current_seq = packet.sequence_number;
+
+                    if let Some(&last_seq) = peer_tracker.get(&packet.mac) {
+                        let diff = current_seq.wrapping_sub(last_seq);
+
+                        if diff > 1 {
+                            let lost = (diff - 1) as u32;
+                             if lost < 1000 {
+                                global_drop_count += lost;
+                             } else {
+                                log_ln!("Likely reboot on MAC {:?}, ignoring drops.", packet.mac);
+                             }
+                        }
+                    }
+                    peer_tracker.insert(packet.mac, current_seq);
+
+                    packet.packet_drop_count = global_drop_count;
+
                     let _ = proc_csi_data.publish_immediate(packet);
                 }
 

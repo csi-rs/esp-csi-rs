@@ -147,6 +147,8 @@ pub struct CSIDataPacket {
     pub date_time: Option<DateTime>,
     /// Sequence Number Associated with the Packet that triggered a CSI capture.
     pub sequence_number: u16,
+    /// NEW FIELD: Number of packets dropped since the last successful packet
+    pub packet_drop_count: u32,
     /// Data format of the recieved CSI.
     /// RxCSIFmt is a Compact Representation of the Different Recieved CSI Data Format Options as defined in the ESP WiFi Driver.
     pub data_format: RxCSIFmt,
