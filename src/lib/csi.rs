@@ -1,4 +1,6 @@
 use heapless::Vec;
+use postcard::experimental::max_size::MaxSize;
+use serde::{Deserialize, Serialize};
 
 use crate::log_ln;
 use crate::time::DateTime;
@@ -7,7 +9,7 @@ use crate::time::DateTime;
 /// `RxCSIFmt`` encodes the different formats (each column in the table) in one byte to save space when transmitting back CSI data.
 /// The driver can be found here:
 /// <https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/api-guides/wifi.html#wi-fi-channel-state-information>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, MaxSize)]
 #[repr(u8)]
 pub enum RxCSIFmt {
     /// Sec Chnl = None, Sig Mode = non-Ht, Chnl BW = 20MHz, non-STBC
@@ -88,7 +90,7 @@ pub enum RxCSIFmt {
 
 /// CSI Received Packet w/ Radio Metadata
 #[cfg(not(feature = "esp32c6"))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, MaxSize)]
 pub struct CSIDataPacket {
     /// MAC address of the sender.
     pub mac: [u8; 6],
@@ -393,7 +395,7 @@ impl CSIDataPacket {
 }
 
 #[cfg(feature = "esp32c6")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, MaxSize)]
 pub struct CSIDataPacket {
     /// MAC address of the sender.
     pub mac: [u8; 6],

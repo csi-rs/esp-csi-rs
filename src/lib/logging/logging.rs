@@ -4,11 +4,13 @@ use esp_hal::{peripherals::Peripherals, uart::Uart, usb_serial_jtag::UsbSerialJt
 #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
 mod csi_interface {
     use crate::csi::CSIDataPacket;
-    use core::sync::atomic::AtomicUsize;
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
+    use portable_atomic::{AtomicUsize, Ordering};
     pub static CSI_CHANNEL: Channel<CriticalSectionRawMutex, CSIDataPacket, 10> = Channel::new();
     pub static DROPPED_PACKETS: AtomicUsize = AtomicUsize::new(0);
 }
+
+pub use csi_interface::{CSI_CHANNEL, DROPPED_PACKETS};
 
 #[cfg(feature = "println")]
 mod log_impl {
@@ -200,7 +202,7 @@ macro_rules! log_csi {
     ($arg:expr) => {
         #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
         {
-            match $crate::logging::CSI_CHANNEL.try_send($arg) {
+            match CSI_CHANNEL.try_send($arg) {
                 Ok(_) => {}
                 Err(_) => $crate::logging::DROPPED_PACKETS
                     .fetch_add(1, core::sync::atomic::Ordering::Relaxed),
@@ -266,44 +268,72 @@ pub fn init_logger(spawner: embassy_executor::Spawner) {
 #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
 #[embassy_executor::task]
 pub async fn logger_backend(mut driver: LogOutput) {
+    use crate::csi::CSIDataPacket;
     use embassy_futures::select::{select, Either};
+    use embedded_io_async::Write;
+    use postcard::experimental::max_size::MaxSize;
+
     let mut raw = [0u8; 1024];
     loop {
-        let csi_future = csi_interface::CSI_CHANNEL.receive();
-        #[cfg(feature = "println")]
+        let csi_future = CSI_CHANNEL.receive();
+
+        #[cfg(all(feature = "println", not(feature = "defmt")))]
         let log_future = log_impl::LOG_PIPE.read(&mut raw);
         #[cfg(feature = "defmt")]
         let log_future = defmt_impl::DEFMT_PIPE.read(&mut raw);
+        #[cfg(not(any(feature = "println", feature = "defmt")))]
+        let log_future = embassy_futures::pending::<usize>();
+
+        let mut did_write = false;
+
         match select(csi_future, log_future).await {
             Either::First(packet) => {
-                use embedded_io_async::Write;
+                const PACKET_MAX_SIZE: usize = CSIDataPacket::POSTCARD_MAX_SIZE;
+                const PACKET_BUF_SIZE: usize = PACKET_MAX_SIZE + (PACKET_MAX_SIZE / 254) + 1;
 
-                use crate::csi::CSIDataPacket;
-
-                let header = [
-                    0xFA, 0xFB,
-                    0x01,
-                    (size_of<CSIDataPacket>() & 0xFF) as u8,
-                    (size_of<CSIDataPacket>() >> 8) as u8,
-                ];
-                let res = driver.write(header);
-                match res {
-                    Ok(_) => {}
-                    Error(_) => {
-                        crate::logging::DROPPED_PACKETS
-                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                let mut buf = [0u8; PACKET_BUF_SIZE];
+                match postcard::to_slice_cobs(&packet, &mut buf) {
+                    Ok(cobs_slice) => match driver.write(cobs_slice).await {
+                        Ok(_) => {
+                            did_write = true;
+                        }
+                        Err(_) => {
+                            DROPPED_PACKETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        }
+                    },
+                    Err(_) => {
+                        DROPPED_PACKETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     }
                 }
-                let _ = driver.write(packet);
             }
             Either::Second(n) => {
                 if n > 0 {
                     use embedded_io_async::Write;
-                    let _ = driver.write(&raw[..n]).await;
+                    match driver.write(&raw[..n]).await {
+                        Ok(_) => {
+                            did_write = true;
+                        }
+                        Err(_) => {}
+                    }
                 }
             }
         }
-        if csi_interface::CSI_CHANNEL.is_empty() && log_impl::LOG_PIPE.is_empty() {
+        let logs_empty = {
+            #[cfg(all(feature = "println", not(feature = "defmt")))]
+            {
+                log_impl::LOG_PIPE.is_empty()
+            }
+            #[cfg(feature = "defmt")]
+            {
+                defmt_impl::DEFMT_PIPE.is_empty()
+            }
+            #[cfg(not(any(feature = "println", feature = "defmt")))]
+            {
+                true
+            }
+        };
+
+        if did_write && CSI_CHANNEL.is_empty() && logs_empty {
             let _ = driver.flush().await;
         }
     }
