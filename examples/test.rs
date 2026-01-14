@@ -3,8 +3,9 @@
 
 use embassy_executor::Spawner;
 use embassy_time::{with_timeout, Duration, Timer};
-use esp_csi_rs::{config::CsiConfig, CSINode, EspNowConfig};
-use esp_hal::clock::CpuClock;
+use esp_csi_rs::{log_ln, logging};
+use esp_csi_rs::{CSINode, CollectionMode, EspNowConfig, Node, PeripheralOpMode, config::CsiConfig};
+use esp_hal::{Config, clock::CpuClock};
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
 use esp_radio::{
@@ -42,16 +43,22 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+    logging::logging::init_logger(spawner);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0);
     // esp_rtos::start(timg0.timer0);
 
     println!("Embassy initialized!");
+    loop {
+        log_ln!("LOL123456789123456789123456789123456789123456789123456789123456789123456789");
+        Timer::after(Duration::from_secs(1)).await;
+    }
+        log_ln!("LOL");
 
     let radio_init = mk_static!(
         Controller<'static>,
@@ -63,7 +70,8 @@ async fn main(spawner: Spawner) -> ! {
             .expect("Failed to initialize Wi-Fi controller");
 
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(EspNowConfig::default()),
+        Node::Peripheral(PeripheralOpMode::EspNow(EspNowConfig::default())),
+        CollectionMode::Listener,
         Some(CsiConfig::default()),
         None,
     )

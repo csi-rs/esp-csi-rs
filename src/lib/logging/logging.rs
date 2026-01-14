@@ -97,7 +97,7 @@ mod timeout_impl {
         pub fn new(inner: W) -> Self {
             Self {
                 inner,
-                timeout: Duration::from_millis(10),
+                timeout: Duration::from_millis(100),
             }
         }
     }
@@ -127,6 +127,7 @@ mod timeout_impl {
 
 #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
 mod logging_impl {
+    #[cfg(any(feature = "jtag-serial", feature = "auto"))]
     use crate::logging::logging::timeout_impl::TimeoutWriter;
     use embassy_time::Duration;
     use embedded_io_async::{ErrorKind, ErrorType, Write};
@@ -217,10 +218,15 @@ macro_rules! log_csi {
 }
 
 use crate::logging::logging::logging_impl::LogOutput;
+#[cfg(any(feature = "jtag-serial", feature = "auto"))]
 use crate::logging::logging::timeout_impl::TimeoutWriter;
 use esp_hal::uart::Config;
 
 pub fn init_logger(spawner: embassy_executor::Spawner) {
+    #[cfg(feature = "println")]
+    {
+        log_impl::init_logger(log::LevelFilter::Info);
+    }
     #[cfg(feature = "auto")]
     {
         let periphs = unsafe { Peripherals::steal() };
