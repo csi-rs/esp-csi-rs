@@ -1,4 +1,6 @@
 use embassy_time::Instant;
+use postcard::experimental::max_size::MaxSize;
+use serde::{Deserialize, Serialize};
 
 // Date Time Struct
 #[derive(Debug, Clone)]
@@ -8,7 +10,7 @@ struct DateTimeCapture {
     captured_millis: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, MaxSize)]
 pub struct DateTime {
     pub year: u64,
     pub month: u64,

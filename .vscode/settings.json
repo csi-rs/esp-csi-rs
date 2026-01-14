@@ -3,4 +3,7 @@
     "rust-analyzer.cargo.extraEnv": {
         "RUSTUP_TOOLCHAIN": "esp"
     },
+    "rust-analyzer.cargo.target": "riscv32imc-unknown-none-elf",
+    "rust-analyzer.check.allTargets": false,
+    "rust-analyzer.cargo.features": "all"
 }
