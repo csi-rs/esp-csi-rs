@@ -499,6 +499,10 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
     }
 }
 
+use portable_atomic::{AtomicU32, Ordering};
+// Global counter for all drops across all MAC addresses
+static GLOBAL_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
+
 // Function to process the CSI info
 #[embassy_executor::task]
 pub async fn process_csi_packet() {
@@ -508,9 +512,6 @@ pub async fn process_csi_packet() {
 
     // Map to track sequence numbers per MAC address
     let mut peer_tracker: BTreeMap<[u8; 6], u16> = BTreeMap::new();
-    
-    // Global counter for all drops across all MAC addresses
-    let mut global_drop_count: u32 = 0;
 
     // Loop that will process CSI data as soon as it arrives
     loop {
@@ -532,7 +533,7 @@ pub async fn process_csi_packet() {
                 
                 // Sanity check for huge gaps (e.g. router reset)
                 if lost < 500 {
-                     global_drop_count += lost;
+                    GLOBAL_DROP_COUNT.fetch_add(lost, Ordering::Relaxed);
                 }
             }
         }
@@ -541,7 +542,7 @@ pub async fn process_csi_packet() {
         peer_tracker.insert(csi_packet.mac, current_seq);
         
         // Assign the calculated global drop count to the packet
-        csi_packet.packet_drop_count = global_drop_count;
+        csi_packet.packet_drop_count = GLOBAL_DROP_COUNT.load(Ordering::Relaxed);
         // --- DROP DETECTION LOGIC END ---
 
         // Update the CSI data format
@@ -586,6 +587,12 @@ pub async fn process_csi_packet() {
         // Update the Watch with the processed CSI
         proc_csi_packet_sender.publish_immediate(csi_packet);
     }
+}
+
+use crate::logging::logging::get_log_packet_drops;
+
+pub fn get_dropped_packets() -> u32 {
+    GLOBAL_DROP_COUNT.load(Ordering::Relaxed) + get_log_packet_drops()
 }
 
 /// Reconstructs a `CSIDataPacket` from a raw message buffer received in collector mode.

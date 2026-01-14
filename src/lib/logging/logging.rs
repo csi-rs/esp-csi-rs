@@ -5,12 +5,17 @@ use esp_hal::{peripherals::Peripherals, uart::Uart, usb_serial_jtag::UsbSerialJt
 mod csi_interface {
     use crate::csi::CSIDataPacket;
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
-    use portable_atomic::{AtomicUsize, Ordering};
+    use portable_atomic::{AtomicU32, Ordering};
     pub static CSI_CHANNEL: Channel<CriticalSectionRawMutex, CSIDataPacket, 10> = Channel::new();
-    pub static DROPPED_PACKETS: AtomicUsize = AtomicUsize::new(0);
+    pub static DROPPED_PACKETS: AtomicU32 = AtomicU32::new(0);
 }
 
 pub use csi_interface::{CSI_CHANNEL, DROPPED_PACKETS};
+use portable_atomic::Ordering;
+
+pub fn get_log_packet_drops() -> u32 {
+    DROPPED_PACKETS.load(Ordering::Relaxed)
+}
 
 #[cfg(feature = "println")]
 mod log_impl {
@@ -205,7 +210,7 @@ macro_rules! log_csi {
             match CSI_CHANNEL.try_send($arg) {
                 Ok(_) => {}
                 Err(_) => $crate::logging::DROPPED_PACKETS
-                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+                    .fetch_add(1, Ordering::Relaxed),
             }
         }
     };
@@ -272,6 +277,7 @@ pub async fn logger_backend(mut driver: LogOutput) {
     use embassy_futures::select::{select, Either};
     use embedded_io_async::Write;
     use postcard::experimental::max_size::MaxSize;
+    use portable_atomic::Ordering; 
 
     let mut raw = [0u8; 1024];
     loop {
@@ -298,11 +304,11 @@ pub async fn logger_backend(mut driver: LogOutput) {
                             did_write = true;
                         }
                         Err(_) => {
-                            DROPPED_PACKETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            DROPPED_PACKETS.fetch_add(1, Ordering::Relaxed);
                         }
                     },
                     Err(_) => {
-                        DROPPED_PACKETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        DROPPED_PACKETS.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
