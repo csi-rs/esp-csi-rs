@@ -108,8 +108,8 @@ mod timeout_impl {
 
     impl<W: Write> Write for TimeoutWriter<W> {
         async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-            match with_timeout(self.timeout, self.inner.write(buf)).await {
-                Ok(Ok(len)) => Ok(len),
+            match with_timeout(self.timeout, self.inner.write_all(buf)).await {
+                Ok(Ok(())) => Ok(buf.len()), 
                 Ok(Err(_)) => Err(ErrorKind::Other),
                 Err(_) => Err(ErrorKind::TimedOut),
             }

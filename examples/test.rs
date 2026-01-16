@@ -54,11 +54,6 @@ async fn main(spawner: Spawner) -> ! {
     // esp_rtos::start(timg0.timer0);
 
     println!("Embassy initialized!");
-    loop {
-        log_ln!("LOL123456789123456789123456789123456789123456789123456789123456789123456789");
-        Timer::after(Duration::from_secs(1)).await;
-    }
-        log_ln!("LOL");
 
     let radio_init = mk_static!(
         Controller<'static>,
