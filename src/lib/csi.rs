@@ -201,7 +201,7 @@ impl CSIDataPacket {
         // log_ln!("stbc: {}", self.stbc);
         // log_ln!("fec coding: {}", self.fec_coding);
         // log_ln!("sig_len: {}", self.sig_len);
-        // log_ln!("data length: {}", self.csi_data_len);
+        log_ln!("data length: {}", self.csi_data_len);
         log_ln!("csi raw data:");
         log_ln!("{:?}", self.csi_data);
     }

@@ -16,7 +16,7 @@ use esp_radio::{
     wifi::{ClientConfig, Interfaces, Protocol, WifiController},
     Controller,
 };
-use testup::{config::CsiConfig, CSINode, EspNowConfig, WifiSnifferConfig, WifiStationConfig};
+use esp_csi_rs::{CSINode, EspNowConfig, WifiSnifferConfig, WifiStationConfig, config::CsiConfig, logging::logging::init_logger};
 use {esp_backtrace as _, esp_println as _};
 
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
@@ -48,14 +48,15 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+    init_logger(spawner);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
-    // esp_rtos::start(timg0.timer0);
+    // esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0);
 
     println!("Embassy initialized!");
 
@@ -110,26 +111,27 @@ async fn main(spawner: Spawner) -> ! {
     // .await;
 
     // Create a ESP NOW Node
-    let mut sta_node = CSINode::new(
-        testup::Node::Collector(testup::CollectorMode::EspNow(EspNowConfig::default())),
+    let mut sniffer_node = CSINode::new(
+        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(WifiSnifferConfig::default())),
+        esp_csi_rs::CollectionMode::Collector,
         Some(CsiConfig::default()),
         Some(100),
     )
     .await;
 
-    sta_node.init(interfaces, spawner, controller).await;
+    sniffer_node.init(interfaces, spawner, controller).await;
 
     // Collect for 5 Seconds
     with_timeout(Duration::from_secs(1000), async {
         loop {
-            sta_node.print_csi_w_metadata().await;
+            sniffer_node.print_csi_w_metadata().await;
         }
     })
     .await
     .unwrap_err();
     Timer::after(Duration::from_secs(1000)).await;
 
-    sta_node.stop();
+    sniffer_node.stop();
 
     loop {
         println!("Hello world!");

@@ -5,5 +5,11 @@
     },
     "rust-analyzer.cargo.target": "riscv32imc-unknown-none-elf",
     "rust-analyzer.check.allTargets": false,
-    "rust-analyzer.cargo.features": "all"
+    "rust-analyzer.cargo.features": [
+        "no-std",
+        "println",
+        "auto",
+        "esp32c3"
+    ],
+    "rust-analyzer.cargo.noDefaultFeatures": true
 }

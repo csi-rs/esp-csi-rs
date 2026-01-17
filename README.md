@@ -95,10 +95,10 @@ This is the simplest example of how this crate can be used. This example follows
 For more details refer to the crate [documentation](https://docs.rs/esp_csi_rs).
 
 ```rust
-use esp_csi_rs::{collector::CSISniffer, config::CSIConfig};
+use esp_csi_rs::{collector::CSISniffer, config::CsiConfig};
 
 // Create a Collector Instance
-let mut csi_coll_snif = CSISniffer::new(CSIConfig::default(), controller).await;
+let mut csi_coll_snif = CSISniffer::new(CsiConfig::default(), controller).await;
 
 // Initialize CSI Collector
 csi_coll_snif.init(interfaces, &spawner).await.unwrap();
