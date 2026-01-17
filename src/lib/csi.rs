@@ -164,46 +164,9 @@ pub struct CSIDataPacket {
 impl CSIDataPacket {
     /// Prints Recieved CSI Data Packet with it's Metadata
     pub fn print_csi_w_metadata(&self) {
-        if let Some(date_time) = &self.date_time {
-            log_ln!(
-                "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-                date_time.year,
-                date_time.month,
-                date_time.day,
-                date_time.hour,
-                date_time.minute,
-                date_time.second,
-                date_time.millisecond
-            );
-        }
-        log_ln!(
-            "mac: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-            self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5]
-        );
-        log_ln!("sequence number: {}", self.sequence_number);
-        // log_ln!("rssi: {}", self.rssi);
-        // log_ln!("rate: {}", self.rate);
-        // log_ln!("noise floor: {}", self.noise_floor);
-        // log_ln!("channel: {}", self.channel);
-        log_ln!("timestamp: {}", self.timestamp);
-        // log_ln!("sig len: {}", self.sig_len);
-        // log_ln!("rx state: {}", self.rx_state);
-        // log_ln!("secondary channel: {}", self.secondary_channel);
-        // log_ln!("sgi: {}", self.sgi);
-        // log_ln!("ant: {}", self.antenna);
-        // log_ln!("ampdu cnt: {}", self.ampdu_cnt);
-        // log_ln!("sig_mode: {}", self.sig_mode);
-        // log_ln!("mcs: {}", self.mcs);
-        // log_ln!("cwb: {}", self.bandwidth);
-        // log_ln!("smoothing: {}", self.smoothing);
-        // log_ln!("not sounding: {}", self.not_sounding);
-        // log_ln!("aggregation: {}", self.aggregation);
-        // log_ln!("stbc: {}", self.stbc);
-        // log_ln!("fec coding: {}", self.fec_coding);
-        // log_ln!("sig_len: {}", self.sig_len);
-        log_ln!("data length: {}", self.csi_data_len);
-        log_ln!("csi raw data:");
-        log_ln!("{:?}", self.csi_data);
+        use crate::logging::logging::log_csi;
+
+        log_csi(self.clone());
     }
 
     // Retrieves `RxCSIFmt` for a `CSIDataPacket`

@@ -42,13 +42,15 @@ macro_rules! mk_static {
     }};
 }
 
+use esp_csi_rs::log_ln;
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     // generator version: 1.1.0
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-    init_logger(spawner);
+    init_logger(spawner, false);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
 
@@ -58,7 +60,7 @@ async fn main(spawner: Spawner) -> ! {
     // esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
     esp_rtos::start(timg0.timer0);
 
-    println!("Embassy initialized!");
+    log_ln!("Embassy initialized!");
 
     let radio_init = mk_static!(
         Controller<'static>,
@@ -122,19 +124,19 @@ async fn main(spawner: Spawner) -> ! {
     sniffer_node.init(interfaces, spawner, controller).await;
 
     // Collect for 5 Seconds
-    with_timeout(Duration::from_secs(1000), async {
+    with_timeout(Duration::from_secs(5), async {
         loop {
             sniffer_node.print_csi_w_metadata().await;
         }
     })
     .await
     .unwrap_err();
-    Timer::after(Duration::from_secs(1000)).await;
+    Timer::after(Duration::from_secs(5)).await;
 
     sniffer_node.stop();
 
     loop {
-        println!("Hello world!");
+        log_ln!("Hello world!");
         Timer::after(Duration::from_secs(1)).await;
     }
 
