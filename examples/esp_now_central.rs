@@ -9,7 +9,7 @@ use esp_radio::{
     wifi::{ClientConfig, Interfaces, WifiController},
     Controller,
 };
-use esp_csi_rs::{CSINode, EspNowConfig, PeripheralOpMode, config::CsiConfig, logging::logging::init_logger};
+use esp_csi_rs::{CSINode, CollectionMode, EspNowConfig, PeripheralOpMode, config::CsiConfig, logging::logging::init_logger};
 use esp_csi_rs::log_ln;
 use {esp_backtrace as _, esp_println as _};
 
@@ -53,7 +53,7 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting ESP-NOW Peripheral Node");
+    log_ln!("Starting ESP-NOW Central Node");
 
     let radio_init = mk_static!(
         Controller<'static>,
@@ -65,27 +65,23 @@ async fn main(spawner: Spawner) -> ! {
             .expect("Failed to initialize Wi-Fi controller");
 
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(PeripheralOpMode::EspNow(EspNowConfig::default())),
-        esp_csi_rs::CollectionMode::Collector,
+        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow((EspNowConfig::default()))),
+        CollectionMode::Listener,
         Some(CsiConfig::default()),
-        Some(100)).await;
+        Some(100)
+    ).await;
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     node.init(interfaces, spawner, controller).await;
 
-    // with_timeout(Duration::from_secs(1000), async {
-    //     loop {
-    //         node.print_csi_w_metadata().await;
-    //     }
-    // })
-    // .await
-    // .unwrap_err();
-
-    loop {
-        log_ln!("Hello world!");
-        Timer::after(Duration::from_secs(1)).await;
-    }
+    with_timeout(Duration::from_secs(1000), async {
+        loop {
+            node.print_csi_w_metadata().await;
+        }
+    })
+    .await
+    .unwrap_err();
 
     node.stop();
 

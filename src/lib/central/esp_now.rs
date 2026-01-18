@@ -97,10 +97,10 @@ async fn broadcaster(
             }
             Either::Second(_) => {
                 let elapsed = current_timestamp.elapsed().as_micros();
-                log_ln!("Send Broadcast at {:?}", elapsed);
+                // log_ln!("Send Broadcast at {:?}", elapsed);
                 let mut sender = sender.lock().await;
                 let status = sender.send_async(&BROADCAST_ADDRESS, b"H").await;
-                log_ln!("Send broadcast status: {:?}", status);
+                // log_ln!("Send broadcast status: {:?}", status);
             }
         }
     }

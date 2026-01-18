@@ -52,7 +52,7 @@ static PROCESSED_CSI_DATA: PubSubChannel<
     CSIDataPacket,
     PROC_CSI_CH_CAPACITY,
     PROC_CSI_CH_SUBS,
-    1,
+    2,
 > = PubSubChannel::new();
 
 // Signals
@@ -140,7 +140,7 @@ pub struct CSINode {
         CSIDataPacket,
         PROC_CSI_CH_CAPACITY,
         PROC_CSI_CH_SUBS,
-        1,
+        2,
     >,
 }
 
