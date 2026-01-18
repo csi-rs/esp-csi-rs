@@ -66,7 +66,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut node = CSINode::new(
         esp_csi_rs::Node::Peripheral(PeripheralOpMode::EspNow(EspNowConfig::default())),
-        esp_csi_rs::CollectionMode::Collector,
+        esp_csi_rs::CollectionMode::Listener,
         Some(CsiConfig::default()),
         Some(1000)).await;
 

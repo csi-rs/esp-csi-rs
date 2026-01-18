@@ -1,7 +1,7 @@
 use crate::log_ln;
 use crate::CSI_PACKET;
 
-use esp_radio::esp_now::{EspNow, PeerInfo, BROADCAST_ADDRESS};
+use esp_radio::esp_now::{EspNow, PeerInfo};
 
 use heapless::Vec;
 
@@ -9,7 +9,6 @@ use embassy_futures::select::select;
 use embassy_futures::select::Either;
 
 use crate::EspNowConfig;
-use crate::PROCESSED_CSI_DATA;
 use crate::TX_STOP_SIGNAL;
 
 pub fn esp_now_peripheral_init(

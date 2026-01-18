@@ -59,7 +59,7 @@ static PROCESSED_CSI_DATA: PubSubChannel<
 static TX_STOP_SIGNAL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 static RX_STOP_SIGNAL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 
-const PROC_CSI_CH_CAPACITY: usize = 200;
+const PROC_CSI_CH_CAPACITY: usize = 20;
 const PROC_CSI_CH_SUBS: usize = 2;
 
 // macro_rules! mk_static {
@@ -373,6 +373,26 @@ fn build_csi_config(csi_config: &CsiConfiguration) -> CsiConfig {
     }
 }
 
+use portable_atomic::{AtomicU32, AtomicU64, Ordering};
+// Global counter for all drops across all MAC addresses
+static GLOBAL_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
+static GLOBAL_PACKET_COUNT: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_CAPTURE_START_TIME: AtomicU64 = AtomicU64::new(0);
+
+pub fn get_total_packets() -> u64 {
+    GLOBAL_PACKET_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn get_avg_pps() -> u64 {
+    let start_time = Instant::from_ticks(GLOBAL_CAPTURE_START_TIME.load(Ordering::Relaxed));
+    let elapsed_secs = start_time.elapsed().as_secs() as u64;
+    let total_packets = GLOBAL_PACKET_COUNT.load(Ordering::Relaxed);
+    if elapsed_secs == 0 {
+        return total_packets;
+    }
+    total_packets / elapsed_secs
+}
+
 /// Sets CSI Configuration.
 /// - If `spawn_processor` is true (Collector Mode), it starts the processing task.
 /// - If `spawn_processor` is false (Listener Mode), it enables hardware but ignores data processing.
@@ -383,6 +403,7 @@ fn set_csi(
     spawn_processor: bool,
 ) {
     // Set CSI Configuration with callback
+    GLOBAL_CAPTURE_START_TIME.store(Instant::now().as_ticks(), Ordering::Relaxed);
     controller
         .set_csi(config, |info: esp_radio::wifi::wifi_csi_info_t| {
             capture_csi_info(info);
@@ -400,7 +421,9 @@ fn set_csi(
 
 // Function to capture CSI info from callback and publish to channel
 fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
+    GLOBAL_PACKET_COUNT.fetch_add(1, Ordering::Relaxed);
     if CSI_PACKET.is_full() {
+        GLOBAL_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
         return;
     }
     let rssi = if info.rx_ctrl.rssi() > 127 {
@@ -414,9 +437,13 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
     let csi_buf_len = info.len;
     let csi_slice =
         unsafe { core::slice::from_raw_parts(info.buf as *const i8, csi_buf_len as usize) };
-    csi_data
-        .extend_from_slice(csi_slice)
-        .expect("Exceeded maximum capacity");
+    match csi_data.extend_from_slice(csi_slice) {
+        Ok(_) => {},
+        Err(_) => {
+            GLOBAL_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
     // for data in 0..csi_buf_len {
     //     unsafe {
     //         let value = *csi_buf.add(data as usize);
@@ -501,26 +528,6 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
     CSI_PACKET.publish_immediate(csi_packet);
 }
 
-use portable_atomic::{AtomicU32, AtomicU64, Ordering};
-// Global counter for all drops across all MAC addresses
-static GLOBAL_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
-static GLOBAL_PACKET_COUNT: AtomicU64 = AtomicU64::new(0);
-static GLOBAL_PROCESS_START_TIME: AtomicU64 = AtomicU64::new(0);
-
-pub fn get_total_packets() -> u64 {
-    GLOBAL_PACKET_COUNT.load(Ordering::Relaxed)
-}
-
-pub fn get_avg_pps() -> u64 {
-    let start_time = Instant::from_ticks(GLOBAL_PROCESS_START_TIME.load(Ordering::Relaxed));
-    let elapsed_secs = start_time.elapsed().as_secs() as u64;
-    let total_packets = GLOBAL_PACKET_COUNT.load(Ordering::Relaxed);
-    if elapsed_secs == 0 {
-        return total_packets;
-    }
-    total_packets / elapsed_secs
-}
-
 // Function to process the CSI info
 #[embassy_executor::task]
 pub async fn process_csi_packet() {
@@ -529,12 +536,10 @@ pub async fn process_csi_packet() {
     let proc_csi_packet_sender = PROCESSED_CSI_DATA.publisher().unwrap();
     // Map to track sequence numbers per MAC address
     let mut peer_tracker: BTreeMap<[u8; 6], u16> = BTreeMap::new();
-    GLOBAL_PROCESS_START_TIME.store(Instant::now().as_ticks(), Ordering::Relaxed);
     // Loop that will process CSI data as soon as it arrives
     loop {
         // Get the unprocessed CSI data packet from the channel
         let mut csi_packet = csi_packet_sub.next_message_pure().await;
-        GLOBAL_PACKET_COUNT.fetch_add(1, Ordering::Relaxed);
 
         // --- DROP DETECTION LOGIC START ---
         let current_seq = csi_packet.sequence_number;

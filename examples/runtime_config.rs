@@ -1,26 +1,31 @@
 #![no_std]
 #![no_main]
+#![deny(
+    clippy::mem_forget,
+    reason = "mem::forget is generally not safe to do with esp_hal types, especially those \
+    holding buffers for the duration of a data transfer."
+)]
+#![deny(clippy::large_stack_frames)]
 
 use embassy_executor::Spawner;
 use embassy_time::{with_timeout, Duration, Timer};
-use esp_csi_rs::{get_avg_pps, get_dropped_packets, get_total_packets, log_ln};
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
-    PeripheralOpMode,
+    config::CsiConfig, logging::logging::init_logger, CSINode, EspNowConfig, WifiSnifferConfig,
+    WifiStationConfig,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
 use esp_radio::{
-    wifi::{ClientConfig, Interfaces, WifiController},
+    wifi::{ClientConfig, Interfaces, Protocol, WifiController},
     Controller,
 };
 use {esp_backtrace as _, esp_println as _};
 
-extern crate alloc;
-
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
     static_cell::StaticCell::new();
+
+extern crate alloc;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -40,6 +45,8 @@ macro_rules! mk_static {
     }};
 }
 
+use esp_csi_rs::log_ln;
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     // generator version: 1.1.0
@@ -57,52 +64,41 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting ESP-NOW Central Node");
 
     let radio_init = mk_static!(
         Controller<'static>,
         esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
-
+    // let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
     let (wifi_controller, interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
 
-    let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow((EspNowConfig::default()))),
-        CollectionMode::Collector,
+    let controller = WIFI_CONTROLLER.init(wifi_controller);
+
+    // Create a Wifi Sniffer Node
+    let mut sniffer_node = CSINode::new(
+        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(
+            WifiSnifferConfig::default(),
+        )),
+        esp_csi_rs::CollectionMode::Collector,
         Some(CsiConfig::default()),
-        Some(1000),
+        Some(100),
     )
     .await;
 
-    let controller = WIFI_CONTROLLER.init(wifi_controller);
+    sniffer_node.init(interfaces, spawner, controller).await;
 
-    use embassy_time::{Duration, Instant}; // Or use std::time::Instant if running on PC
-
-    // ... (your init code) ...
-    node.init(interfaces, spawner, controller).await;
-
-    let mut last_log_time = Instant::now();
-
-    with_timeout(Duration::from_secs(1000), async {
+    with_timeout(Duration::from_secs(10), async {
         loop {
-            node.get_csi_data().await;
-            if last_log_time.elapsed() >= Duration::from_secs(1) {
-                log_ln!(
-                    "Total Packets: {}, Average PPS: {}, Dropped Packets: {}",
-                    get_total_packets(),
-                    get_avg_pps(),
-                    get_dropped_packets()
-                );
-                last_log_time = Instant::now();
-            }
+            sniffer_node.print_csi_w_metadata().await;
         }
     })
     .await
     .unwrap_err();
+    Timer::after(Duration::from_secs(10)).await;
 
-    node.stop();
+    sniffer_node.stop();
 
     loop {
         log_ln!("Hello world!");
