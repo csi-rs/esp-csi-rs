@@ -124,14 +124,14 @@ async fn main(spawner: Spawner) -> ! {
     sniffer_node.init(interfaces, spawner, controller).await;
 
     // Collect for 5 Seconds
-    with_timeout(Duration::from_secs(5), async {
+    with_timeout(Duration::from_secs(5000), async {
         loop {
             sniffer_node.print_csi_w_metadata().await;
         }
     })
     .await
     .unwrap_err();
-    Timer::after(Duration::from_secs(5)).await;
+    Timer::after(Duration::from_secs(5000)).await;
 
     sniffer_node.stop();
 

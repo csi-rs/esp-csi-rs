@@ -379,26 +379,26 @@ async fn write_text_packet(packet: CSIDataPacket, driver: &mut LogOutput) -> Res
 
         write_line(driver, "sequence number", packet.sequence_number).await?;
         write_line(driver, "rssi", packet.rssi).await?;
-        write_line(driver, "rate: {}", packet.rate).await?;
-        write_line(driver, "noise floor: {}", packet.noise_floor).await?;
-        write_line(driver, "channel: {}", packet.channel).await?;
-        write_line(driver, "timestamp: {}", packet.timestamp).await?;
-        write_line(driver, "sig len: {}", packet.sig_len).await?;
-        write_line(driver, "rx state: {}", packet.rx_state).await?;
-        write_line(driver, "secondary channel: {}", packet.secondary_channel).await?;
-        write_line(driver, "sgi: {}", packet.sgi).await?;
-        write_line(driver, "ant: {}", packet.antenna).await?;
-        write_line(driver, "ampdu cnt: {}", packet.ampdu_cnt).await?;
-        write_line(driver, "sig_mode: {}", packet.sig_mode).await?;
-        write_line(driver, "mcs: {}", packet.mcs).await?;
-        write_line(driver, "cwb: {}", packet.bandwidth).await?;
-        write_line(driver, "smoothing: {}", packet.smoothing).await?;
-        write_line(driver, "not sounding: {}", packet.not_sounding).await?;
-        write_line(driver, "aggregation: {}", packet.aggregation).await?;
-        write_line(driver, "stbc: {}", packet.stbc).await?;
-        write_line(driver, "fec coding: {}", packet.fec_coding).await?;
-        write_line(driver, "sig_len: {}", packet.sig_len).await?;
-        write_line(driver, "data length: {}", packet.csi_data_len).await?;
+        write_line(driver, "rate", packet.rate).await?;
+        write_line(driver, "noise floor", packet.noise_floor).await?;
+        write_line(driver, "channel", packet.channel).await?;
+        write_line(driver, "timestamp", packet.timestamp).await?;
+        write_line(driver, "sig len", packet.sig_len).await?;
+        write_line(driver, "rx state", packet.rx_state).await?;
+        write_line(driver, "secondary channel", packet.secondary_channel).await?;
+        write_line(driver, "sgi", packet.sgi).await?;
+        write_line(driver, "ant", packet.antenna).await?;
+        write_line(driver, "ampdu cnt", packet.ampdu_cnt).await?;
+        write_line(driver, "sig_mode", packet.sig_mode).await?;
+        write_line(driver, "mcs", packet.mcs).await?;
+        write_line(driver, "cwb", packet.bandwidth).await?;
+        write_line(driver, "smoothing", packet.smoothing).await?;
+        write_line(driver, "not sounding", packet.not_sounding).await?;
+        write_line(driver, "aggregation", packet.aggregation).await?;
+        write_line(driver, "stbc", packet.stbc).await?;
+        write_line(driver, "fec coding", packet.fec_coding).await?;
+        write_line(driver, "sig_len", packet.sig_len).await?;
+        write_line(driver, "data length", packet.csi_data_len).await?;
 
         Ok::<(), ()>(())
     }
