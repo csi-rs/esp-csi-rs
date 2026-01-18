@@ -423,6 +423,8 @@ pub struct CSIDataPacket {
 impl CSIDataPacket {
     pub fn print_csi_w_metadata(&self) {
         // Calculate Elapsed time here and add offset to date_time then call to calculate new time
+
+        use crate::logging::logging::log_csi;
         if let Some(date_time) = &self.date_time {
             log_ln!(
                 "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
@@ -435,37 +437,7 @@ impl CSIDataPacket {
                 date_time.millisecond
             );
         }
-        log_ln!(
-            "mac: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-            self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5]
-        );
-        log_ln!("sequence number: {}", self.sequence_number);
-        log_ln!("rssi: {}", self.rssi);
-        log_ln!("rate: {}", self.rate);
-        log_ln!("noise floor: {}", self.noise_floor);
-        log_ln!("channel: {}", self.channel);
-        log_ln!("timestamp: {}", self.timestamp);
-        log_ln!("rx state: {}", self.rx_state);
-        log_ln!("dump len: {}", self.dump_len);
-        log_ln!("he sigb len: {}", self.he_sigb_len);
-        log_ln!("cur single mpdu: {}", self.cur_single_mpdu);
-        log_ln!("cur bb format: {}", self.cur_bb_format);
-        log_ln!(
-            "rx channel estimate info vld: {}",
-            self.rx_channel_estimate_info_vld
-        );
-        log_ln!("rx channel estimate len: {}", self.rx_channel_estimate_len);
-        log_ln!("second: {}", self.second);
-        log_ln!("is group: {}", self.is_group);
-        log_ln!("rxend state: {}", self.rxend_state);
-        log_ln!("rxmatch3: {}", self.rxmatch3);
-        log_ln!("rxmatch2: {}", self.rxmatch2);
-        log_ln!("rxmatch1: {}", self.rxmatch1);
-        log_ln!("rxmatch0: {}", self.rxmatch0);
-        log_ln!("sig len: {}", self.sig_len);
-        log_ln!("data length: {}", self.csi_data_len);
-        log_ln!("csi raw data:");
-        log_ln!("{:?}", self.csi_data);
+        log_csi(packet);
     }
     pub fn csi_fmt_from_params(&mut self) {
         self.data_format = RxCSIFmt::Undefined;

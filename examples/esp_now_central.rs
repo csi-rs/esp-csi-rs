@@ -70,9 +70,9 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut node = CSINode::new(
         esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow((EspNowConfig::default()))),
-        CollectionMode::Listener,
+        CollectionMode::Collector,
         Some(CsiConfig::default()),
-        Some(4000),
+        Some(1000),
     )
     .await;
 

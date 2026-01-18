@@ -1,4 +1,5 @@
 use crate::log_ln;
+use crate::CSI_PACKET;
 
 use esp_radio::esp_now::{EspNow, PeerInfo, BROADCAST_ADDRESS};
 
@@ -27,7 +28,7 @@ pub fn esp_now_peripheral_init(
 
 #[embassy_executor::task]
 async fn responder(mut esp_now: EspNow<'static>) {
-    let mut csi_data = PROCESSED_CSI_DATA.subscriber().unwrap();
+    let mut csi_data = CSI_PACKET.subscriber().unwrap();
 
     // Create a message buffer for the data to be sent back
 
@@ -46,76 +47,38 @@ async fn responder(mut esp_now: EspNow<'static>) {
                 // Stop signal received, exit the loop
                 break;
             }
-            Either::Second(proc_csi_data) => {
-                // log_ln!(
-                //     "Sending Back CSI Data with Seq No: {}",
-                //     proc_csi_data.sequence_number
-                // );
+            Either::Second(raw_csi_data) => {
+                // Build message from raw CSI packet
+                message_u8.clear();
 
-                // Append the sequence number to the message
-                match message_u8.extend_from_slice(&proc_csi_data.sequence_number.to_be_bytes()) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        log_ln!("Failed to append sequence number: {:?}", e);
-                    }
+                // sequence number
+                let _ = message_u8.extend_from_slice(&raw_csi_data.sequence_number.to_be_bytes());
+
+                // data format (may be Undefined in raw mode)
+                let _ = message_u8.push(raw_csi_data.data_format as u8);
+
+                // timestamp
+                let _ = message_u8.extend_from_slice(&raw_csi_data.timestamp.to_be_bytes());
+
+                // MAC
+                let _ = message_u8.extend_from_slice(&raw_csi_data.mac);
+
+                // CSI payload (raw)
+                for x in raw_csi_data.csi_data.iter() {
+                    let _ = message_u8.push(*x as u8);
                 }
 
-                // Append the data format to the message
-                match message_u8.push(proc_csi_data.data_format as u8) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        log_ln!("Failed to append data format: {:?}", e);
-                    }
-                }
-
-                // Append the timestamp to the message
-                match message_u8.extend_from_slice(&proc_csi_data.timestamp.to_be_bytes()) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        log_ln!("Failed to append timestamp: {:?}", e);
-                    }
-                }
-
-                // Append the MAC Address
-                match message_u8.extend_from_slice(&proc_csi_data.mac) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        log_ln!("Failed to append MAC Address: {:?}", e);
-                    }
-                }
-
-                // Append the CSI data to the message
-                for x in proc_csi_data.csi_data.iter() {
-                    match message_u8.push(*x as u8) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            log_ln!("Failed to append CSI data: {:?}", e);
-                        }
-                    }
-                }
-
-                if !esp_now.peer_exists(&proc_csi_data.mac) {
-                    let peer_res = esp_now.add_peer(PeerInfo {
+                if !esp_now.peer_exists(&raw_csi_data.mac) {
+                    let _ = esp_now.add_peer(PeerInfo {
                         interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
-                        peer_address: proc_csi_data.mac,
+                        peer_address: raw_csi_data.mac,
                         lmk: None,
                         channel: None,
                         encrypt: false,
                     });
-                    match peer_res {
-                        Ok(()) => log_ln!("Added new peer: {:?}", proc_csi_data.mac),
-                        Err(e) => log_ln!("Failed to add peer: {:?}", e),
-                    }
                 }
-                // let status = esp_now.send_async(&proc_csi_data.mac, &message_u8).await;
-                // match status {
-                //     Ok(()) => log_ln!("Sent CSI data to {:?}", proc_csi_data.mac),
-                //     Err(e) => log_ln!("Failed to send CSI data: {:?}", e),
-                // }
-                let _ = esp_now.send_async(&proc_csi_data.mac, &message_u8).await;
 
-                // Clear Buffer for next use
-                message_u8.clear();
+                let _ = esp_now.send_async(&raw_csi_data.mac, &message_u8).await;
             }
         };
     }

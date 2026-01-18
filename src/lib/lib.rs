@@ -18,13 +18,12 @@ use heapless::Vec;
 extern crate alloc;
 use alloc::collections::BTreeMap;
 
-
 pub mod central;
 pub mod config;
 pub mod csi;
+pub mod logging;
 pub mod peripheral;
 pub mod time;
-pub mod logging;
 
 use crate::central::esp_now::esp_now_central_init;
 use crate::central::sta::{sta_connect, sta_init};
@@ -45,7 +44,7 @@ static CSI_PACKET: PubSubChannel<
     CriticalSectionRawMutex,
     CSIDataPacket,
     PROC_CSI_CH_CAPACITY,
-    1,
+    2,
     1,
 > = PubSubChannel::new();
 static PROCESSED_CSI_DATA: PubSubChannel<
@@ -60,7 +59,7 @@ static PROCESSED_CSI_DATA: PubSubChannel<
 static TX_STOP_SIGNAL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 static RX_STOP_SIGNAL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 
-const PROC_CSI_CH_CAPACITY: usize = 120;
+const PROC_CSI_CH_CAPACITY: usize = 200;
 const PROC_CSI_CH_SUBS: usize = 2;
 
 // macro_rules! mk_static {
@@ -118,7 +117,7 @@ pub enum PeripheralOpMode {
 
 pub enum Node {
     Peripheral(PeripheralOpMode), // Mode is implicit (only EspNow), directly holds config.
-    Central(CentralOpMode), // Uses the sub-enum for mode selection.
+    Central(CentralOpMode),       // Uses the sub-enum for mode selection.
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -188,8 +187,8 @@ impl CSINode {
         Self {
             kind: Node::Central(op_mode),
             collection_mode,
-            csi_config: None,
-            traffic_freq_hz: None,
+            csi_config,
+            traffic_freq_hz,
             csi_data_rx,
         }
     }
@@ -223,8 +222,7 @@ impl CSINode {
         controller: &'static mut WifiController<'static>,
     ) {
         // Tasks Necessary for Central Station & Sniffer
-        let sta_stack = if let Node::Central(CentralOpMode::WifiStation(config)) = &self.kind
-        {
+        let sta_stack = if let Node::Central(CentralOpMode::WifiStation(config)) = &self.kind {
             Some(sta_init(interfaces.sta, config, controller, spawner))
         } else {
             None
@@ -271,7 +269,7 @@ impl CSINode {
                     set_csi(controller, config, spawner, is_collector);
                     // Initialize as Wifi Sniffer Collector with WifiSnifferConfig
                 }
-            }
+            },
             Node::Central(op_mode) => match op_mode {
                 CentralOpMode::EspNow(esp_now_config) => {
                     set_csi(controller, config, spawner, is_collector);
@@ -378,8 +376,12 @@ fn build_csi_config(csi_config: &CsiConfiguration) -> CsiConfig {
 /// Sets CSI Configuration.
 /// - If `spawn_processor` is true (Collector Mode), it starts the processing task.
 /// - If `spawn_processor` is false (Listener Mode), it enables hardware but ignores data processing.
-fn set_csi(controller: &mut WifiController, config: CsiConfig, spawner: Spawner, spawn_processor: bool,)
-{
+fn set_csi(
+    controller: &mut WifiController,
+    config: CsiConfig,
+    spawner: Spawner,
+    spawn_processor: bool,
+) {
     // Set CSI Configuration with callback
     controller
         .set_csi(config, |info: esp_radio::wifi::wifi_csi_info_t| {
@@ -502,6 +504,22 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
 use portable_atomic::{AtomicU32, AtomicU64, Ordering};
 // Global counter for all drops across all MAC addresses
 static GLOBAL_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
+static GLOBAL_PACKET_COUNT: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_PROCESS_START_TIME: AtomicU64 = AtomicU64::new(0);
+
+pub fn get_total_packets() -> u64 {
+    GLOBAL_PACKET_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn get_avg_pps() -> u64 {
+    let start_time = Instant::from_ticks(GLOBAL_PROCESS_START_TIME.load(Ordering::Relaxed));
+    let elapsed_secs = start_time.elapsed().as_secs() as u64;
+    let total_packets = GLOBAL_PACKET_COUNT.load(Ordering::Relaxed);
+    if elapsed_secs == 0 {
+        return total_packets;
+    }
+    total_packets / elapsed_secs
+}
 
 // Function to process the CSI info
 #[embassy_executor::task]
@@ -509,14 +527,14 @@ pub async fn process_csi_packet() {
     // Subscribe to CSI packet capture updates
     let mut csi_packet_sub = CSI_PACKET.subscriber().unwrap();
     let proc_csi_packet_sender = PROCESSED_CSI_DATA.publisher().unwrap();
-
     // Map to track sequence numbers per MAC address
     let mut peer_tracker: BTreeMap<[u8; 6], u16> = BTreeMap::new();
-
+    GLOBAL_PROCESS_START_TIME.store(Instant::now().as_ticks(), Ordering::Relaxed);
     // Loop that will process CSI data as soon as it arrives
     loop {
         // Get the unprocessed CSI data packet from the channel
         let mut csi_packet = csi_packet_sub.next_message_pure().await;
+        GLOBAL_PACKET_COUNT.fetch_add(1, Ordering::Relaxed);
 
         // --- DROP DETECTION LOGIC START ---
         let current_seq = csi_packet.sequence_number;
@@ -530,17 +548,17 @@ pub async fn process_csi_packet() {
 
             if diff > 1 {
                 let lost = (diff - 1) as u32;
-                
+
                 // Sanity check for huge gaps (e.g. router reset)
                 if lost < 500 {
                     GLOBAL_DROP_COUNT.fetch_add(lost, Ordering::Relaxed);
                 }
             }
         }
-        
+
         // Update tracker with new sequence
         peer_tracker.insert(csi_packet.mac, current_seq);
-        
+
         // Assign the calculated global drop count to the packet
         csi_packet.packet_drop_count = GLOBAL_DROP_COUNT.load(Ordering::Relaxed);
         // --- DROP DETECTION LOGIC END ---

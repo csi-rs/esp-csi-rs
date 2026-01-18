@@ -68,7 +68,7 @@ async fn main(spawner: Spawner) -> ! {
         esp_csi_rs::Node::Peripheral(PeripheralOpMode::EspNow(EspNowConfig::default())),
         esp_csi_rs::CollectionMode::Collector,
         Some(CsiConfig::default()),
-        Some(4000)).await;
+        Some(1000)).await;
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
