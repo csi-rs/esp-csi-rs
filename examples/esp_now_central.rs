@@ -3,14 +3,18 @@
 
 use embassy_executor::Spawner;
 use embassy_time::{with_timeout, Duration, Timer};
+use esp_csi_rs::log_ln;
+use esp_csi_rs::{
+    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
+    PeripheralOpMode,
+};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
+use esp_println::println;
 use esp_radio::{
     wifi::{ClientConfig, Interfaces, WifiController},
     Controller,
 };
-use esp_csi_rs::{CSINode, CollectionMode, EspNowConfig, PeripheralOpMode, config::CsiConfig, logging::logging::init_logger};
-use esp_csi_rs::log_ln;
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
@@ -68,16 +72,39 @@ async fn main(spawner: Spawner) -> ! {
         esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow((EspNowConfig::default()))),
         CollectionMode::Listener,
         Some(CsiConfig::default()),
-        Some(100)
-    ).await;
+        Some(4000),
+    )
+    .await;
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
+    use embassy_time::{Duration, Instant}; // Or use std::time::Instant if running on PC
+
+    // ... (your init code) ...
     node.init(interfaces, spawner, controller).await;
+
+    let mut last_log_time = Instant::now();
+    let mut start_time = Instant::now();
+    let mut total_packets: u64 = 0;
 
     with_timeout(Duration::from_secs(1000), async {
         loop {
-            node.print_csi_w_metadata().await;
+            node.get_csi_data().await;
+            total_packets += 1;
+            if last_log_time.elapsed() >= Duration::from_secs(1) {
+                let elapsed_secs = start_time.elapsed().as_secs();
+                let avg_packets: u64 = if elapsed_secs == 0 {
+                    total_packets
+                } else {
+                    total_packets / elapsed_secs
+                };
+                log_ln!(
+                    "Total Packets: {}, Average PPS: {}",
+                    total_packets,
+                    avg_packets
+                );
+                last_log_time = Instant::now();
+            }
         }
     })
     .await

@@ -71,48 +71,9 @@ async fn main(spawner: Spawner) -> ! {
         esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
 
-    // let (mut wifi_controller, interfaces) = mk_static!(
-    //     (WifiController, Interfaces),
-    //     esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
-    //         .expect("Failed to initialize Wi-Fi controller")
-    // );
-
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    // let node = CSINode::new(
-    //     testup::Node::Collector(testup::CollectorMode::EspNow),
-    //     Some(CsiConfig::default()),
-    //     Some(1),
-    // )
-    // .await;
-
-    // // Create a Sniffer Node
-    // let mut sniffer_node = CSINode::new(
-    //     testup::Node::Collector(testup::CollectorMode::WifiSniffer(
-    //         WifiSnifferConfig::default(),
-    //     )),
-    //     Some(CsiConfig::default()),
-    //     Some(1),
-    // )
-    // .await;
-
-    // sniffer_node.init(interfaces, spawner, controller).await;
-
-    // // Create a Station Node
-    // let mut sta_node = CSINode::new(
-    //     testup::Node::Collector(testup::CollectorMode::WifiStation(WifiStationConfig {
-    //         ntp_sync: false,
-    //         client_config: ClientConfig::default()
-    //             .with_ssid("Connected Motion ".into())
-    //             .with_password("automotion@123".into())
-    //             .with_auth_method(esp_radio::wifi::AuthMethod::Wpa2Personal),
-    //     })),
-    //     Some(CsiConfig::default()),
-    //     Some(1),
-    // )
-    // .await;
-
-    // Create a ESP NOW Node
+    // Create a Wifi Sniffer Node
     let mut sniffer_node = CSINode::new(
         esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(WifiSnifferConfig::default())),
         esp_csi_rs::CollectionMode::Collector,

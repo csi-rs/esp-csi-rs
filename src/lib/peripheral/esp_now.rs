@@ -47,10 +47,10 @@ async fn responder(mut esp_now: EspNow<'static>) {
                 break;
             }
             Either::Second(proc_csi_data) => {
-                log_ln!(
-                    "Sending Back CSI Data with Seq No: {}",
-                    proc_csi_data.sequence_number
-                );
+                // log_ln!(
+                //     "Sending Back CSI Data with Seq No: {}",
+                //     proc_csi_data.sequence_number
+                // );
 
                 // Append the sequence number to the message
                 match message_u8.extend_from_slice(&proc_csi_data.sequence_number.to_be_bytes()) {
@@ -107,11 +107,12 @@ async fn responder(mut esp_now: EspNow<'static>) {
                         Err(e) => log_ln!("Failed to add peer: {:?}", e),
                     }
                 }
-                let status = esp_now.send_async(&proc_csi_data.mac, &message_u8).await;
-                match status {
-                    Ok(()) => log_ln!("Sent CSI data to {:?}", proc_csi_data.mac),
-                    Err(e) => log_ln!("Failed to send CSI data: {:?}", e),
-                }
+                // let status = esp_now.send_async(&proc_csi_data.mac, &message_u8).await;
+                // match status {
+                //     Ok(()) => log_ln!("Sent CSI data to {:?}", proc_csi_data.mac),
+                //     Err(e) => log_ln!("Failed to send CSI data: {:?}", e),
+                // }
+                let _ = esp_now.send_async(&proc_csi_data.mac, &message_u8).await;
 
                 // Clear Buffer for next use
                 message_u8.clear();

@@ -4,6 +4,7 @@ use embassy_executor::Spawner;
 
 use embassy_sync::pubsub::{PubSubBehavior, Subscriber};
 
+use embassy_time::Instant;
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::{ClientConfig, CsiConfig, Interfaces, WifiController};
 
@@ -59,7 +60,7 @@ static PROCESSED_CSI_DATA: PubSubChannel<
 static TX_STOP_SIGNAL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 static RX_STOP_SIGNAL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 
-const PROC_CSI_CH_CAPACITY: usize = 20;
+const PROC_CSI_CH_CAPACITY: usize = 120;
 const PROC_CSI_CH_SUBS: usize = 2;
 
 // macro_rules! mk_static {
@@ -397,6 +398,9 @@ fn set_csi(controller: &mut WifiController, config: CsiConfig, spawner: Spawner,
 
 // Function to capture CSI info from callback and publish to channel
 fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
+    if CSI_PACKET.is_full() {
+        return;
+    }
     let rssi = if info.rx_ctrl.rssi() > 127 {
         info.rx_ctrl.rssi() - 256
     } else {
@@ -492,14 +496,10 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
         csi_data: csi_data,
     };
 
-    if CSI_PACKET.is_full() {
-        log_ln!("CSI Packet Channel Full. Dropping Packet.");
-    } else {
-        CSI_PACKET.publish_immediate(csi_packet);
-    }
+    CSI_PACKET.publish_immediate(csi_packet);
 }
 
-use portable_atomic::{AtomicU32, Ordering};
+use portable_atomic::{AtomicU32, AtomicU64, Ordering};
 // Global counter for all drops across all MAC addresses
 static GLOBAL_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
 
