@@ -1,3 +1,4 @@
+use crate::STOP_SIGNAL;
 use crate::log_ln;
 use crate::CSI_PACKET;
 
@@ -9,12 +10,10 @@ use embassy_futures::select::select;
 use embassy_futures::select::Either;
 
 use crate::EspNowConfig;
-use crate::TX_STOP_SIGNAL;
 
-pub fn esp_now_peripheral_init(
-    esp_now: EspNow<'static>,
+pub async fn run_esp_now_peripheral(
+    esp_now: &mut EspNow<'static>,
     config: &EspNowConfig,
-    spawner: embassy_executor::Spawner,
 ) {
     esp_now.set_channel(config.channel).unwrap();
     log_ln!("esp-now version {}", esp_now.version().unwrap());
@@ -22,11 +21,10 @@ pub fn esp_now_peripheral_init(
         .set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi)
         .unwrap();
 
-    spawner.spawn(responder(esp_now)).ok();
+    responder(esp_now).await;
 }
 
-#[embassy_executor::task]
-async fn responder(mut esp_now: EspNow<'static>) {
+async fn responder(esp_now: &mut EspNow<'static>) {
     let mut csi_data = CSI_PACKET.subscriber().unwrap();
 
     // Create a message buffer for the data to be sent back
@@ -41,7 +39,7 @@ async fn responder(mut esp_now: EspNow<'static>) {
     // Width of message (625) = 2 bytes for seq_no + 1 byte for format + 4 bytes for timestamp + 6 bytes for MAC + 612 bytes for CSI data
     let mut message_u8: Vec<u8, 625> = Vec::new();
     loop {
-        match select(TX_STOP_SIGNAL.wait(), csi_data.next_message_pure()).await {
+        match select(STOP_SIGNAL.wait(), csi_data.next_message_pure()).await {
             Either::First(_) => {
                 // Stop signal received, exit the loop
                 break;
@@ -81,6 +79,5 @@ async fn responder(mut esp_now: EspNow<'static>) {
             }
         };
     }
-    TX_STOP_SIGNAL.reset();
     log_ln!("Node Stopped. Halting CSI Sending.");
 }

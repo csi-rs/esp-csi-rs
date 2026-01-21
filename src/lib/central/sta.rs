@@ -1,5 +1,6 @@
 use core::{net::Ipv4Addr, str::FromStr};
 use embassy_executor::Spawner;
+use embassy_futures::join::{self, join};
 use embassy_futures::select::{select, Either};
 use embassy_net::raw::{IpProtocol, IpVersion, PacketMetadata, RawSocket};
 use embassy_net::{Ipv4Address, Ipv4Cidr, Runner, Stack, StackResources};
@@ -12,8 +13,8 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal}
 
 use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, Ipv4Packet, Ipv4Repr};
 
-use crate::WifiStationConfig;
 use crate::log_ln;
+use crate::{WifiStationConfig, STOP_SIGNAL};
 
 static DHCP_CLIENT_INFO: Signal<CriticalSectionRawMutex, IpInfo> = Signal::new();
 
@@ -32,18 +33,17 @@ struct IpInfo {
     pub gateway_address: Ipv4Address,
 }
 
-pub fn sta_init(
-    interfaces: WifiDevice<'static>,
+pub fn sta_init<'a>(
+    interfaces: &mut WifiDevice<'static>,
     config: &WifiStationConfig,
-    controller: &mut WifiController,
-    spawner: Spawner,
+    controller: &mut WifiController<'a>,
 ) -> Stack<'static> {
     // Station IP Configuration - DHCP
     let sta_ip_config = embassy_net::Config::dhcpv4(Default::default());
     let seed = 123456_u64;
 
     // Create STA Network Stack
-    let (sta_stack, sta_runner) = embassy_net::new(
+    let (sta_stack, mut sta_runner) = embassy_net::new(
         interfaces,
         sta_ip_config,
         mk_static!(StackResources<6>, StackResources::<6>::new()),
@@ -51,7 +51,7 @@ pub fn sta_init(
     );
 
     // Spawn the network runner task
-    spawner.spawn(net_task(sta_runner)).ok();
+    async { sta_runner.run().await };
     log_ln!("Network Task Running");
 
     // Configure WiFi Client/Station Connection
@@ -68,11 +68,10 @@ pub fn sta_init(
     sta_stack
 }
 
-pub async fn sta_connect(
-    controller: &'static mut WifiController<'static>,
+pub async fn run_sta_connect(
+    controller: &mut WifiController<'_>,
     freq: Option<u16>,
     sta_stack: Stack<'static>,
-    spawner: Spawner,
 ) {
     // Connect WiFi
     match controller.connect_async().await {
@@ -89,14 +88,7 @@ pub async fn sta_connect(
     //     run_ntp_sync(sta_stack).await;
     // }
 
-    spawner.spawn(sta_connection(controller)).ok();
-    spawner.spawn(sta_network_ops(sta_stack, freq)).ok();
-}
-
-#[embassy_executor::task]
-pub async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
-    // log_ln!("Network Task Running");
-    runner.run().await
+    join(sta_connection(controller), sta_network_ops(sta_stack, freq)).await;
 }
 
 async fn run_dhcp_client(sta_stack: Stack<'static>) {
@@ -139,8 +131,7 @@ async fn run_dhcp_client(sta_stack: Stack<'static>) {
     DHCP_CLIENT_INFO.signal(ip_info);
 }
 
-#[embassy_executor::task]
-pub async fn sta_connection(controller: &'static mut WifiController<'static>) {
+pub async fn sta_connection(controller: &mut WifiController<'_>) {
     // let mut start_collection_watch = match START_COLLECTION.receiver() {
     //     Some(r) => r,
     //     None => panic!("Maximum number of recievers reached"),
@@ -155,40 +146,72 @@ pub async fn sta_connection(controller: &'static mut WifiController<'static>) {
         // // Stop Collection Future
         // let stop_coll_fut = start_collection_watch.changed();
         // // Events Future
-        let mut wait_event_fut = controller.wait_for_events(sta_events, true).await;
-
-        // MAYBE JUST DO A STOP COLLECTION & DEINIT WHERE WE RETURN FROM ALL TASKS
-
-        // // If either future completes, handle accordingly
-        // match select(wait_event_fut, stop_coll_fut).await {
-        //     // Wait event future cases
-        //     Either::First(mut event) => {
-        if wait_event_fut.contains(WifiEvent::StaDisconnected) {
-            log_ln!("STA Disconnected");
+        // let mut wait_event_fut = controller.wait_for_events(sta_events, true);
+        match select(STOP_SIGNAL.wait(), controller.wait_for_events(sta_events, true)).await {
+            Either::First(_) => {
+                break;
+            }
+            Either::Second(mut wait_event_fut) => {
+                if wait_event_fut.contains(WifiEvent::StaDisconnected) {
+                    log_ln!("STA Disconnected");
+                }
+                if wait_event_fut.contains(WifiEvent::StaStop) {
+                    log_ln!("STA Stopped");
+                }
+                wait_event_fut.clear();
+            }
         }
-        if wait_event_fut.contains(WifiEvent::StaStop) {
-            log_ln!("STA Stopped");
-        }
-        wait_event_fut.clear();
-        //     }
-        //     // Stop collection future case
-        //     Either::Second(sig) => {
-        //         // Stop Signal
-        //         if !sig {
-        //             log_ln!("Halting CSI Collection...");
-        //             // Send the controller back before exiting loop
-        //             // CONTROLLER_CH.send(controller).await;
-        //             // CONTROLLER_HALTED_SIGNAL.signal(true);
-        //             break;
-        //         }
-        //     }
-        // }
     }
 }
 
+// #[embassy_executor::task]
+// pub async fn sta_connection(controller: &'static mut WifiController<'static>) {
+//     // let mut start_collection_watch = match START_COLLECTION.receiver() {
+//     //     Some(r) => r,
+//     //     None => panic!("Maximum number of recievers reached"),
+//     // };
+
+//     // Define Events to Listen for
+//     let sta_events =
+//         enum_set!(WifiEvent::StaDisconnected | WifiEvent::StaStop | WifiEvent::StaConnected);
+
+//     // Monitoring/stop loop
+//     loop {
+//         // // Stop Collection Future
+//         // let stop_coll_fut = start_collection_watch.changed();
+//         // // Events Future
+//         let mut wait_event_fut = controller.wait_for_events(sta_events, true).await;
+
+//         // MAYBE JUST DO A STOP COLLECTION & DEINIT WHERE WE RETURN FROM ALL TASKS
+
+//         // // If either future completes, handle accordingly
+//         // match select(wait_event_fut, stop_coll_fut).await {
+//         //     // Wait event future cases
+//         //     Either::First(mut event) => {
+//         if wait_event_fut.contains(WifiEvent::StaDisconnected) {
+//             log_ln!("STA Disconnected");
+//         }
+//         if wait_event_fut.contains(WifiEvent::StaStop) {
+//             log_ln!("STA Stopped");
+//         }
+//         wait_event_fut.clear();
+//         //     }
+//         //     // Stop collection future case
+//         //     Either::Second(sig) => {
+//         //         // Stop Signal
+//         //         if !sig {
+//         //             log_ln!("Halting CSI Collection...");
+//         //             // Send the controller back before exiting loop
+//         //             // CONTROLLER_CH.send(controller).await;
+//         //             // CONTROLLER_HALTED_SIGNAL.signal(true);
+//         //             break;
+//         //         }
+//         //     }
+//         // }
+//     }
+// }
 
 // This task manages network operations for the station
-#[embassy_executor::task]
 pub async fn sta_network_ops(sta_stack: Stack<'static>, freq: Option<u16>) {
     // Retrieve acquired IP information from DHCP
     let ip_info = DHCP_CLIENT_INFO.wait().await;
@@ -232,56 +255,63 @@ pub async fn sta_network_ops(sta_stack: Stack<'static>, freq: Option<u16>) {
 
     // Start sending trigger packets
     loop {
-        // Trigger Interval Future
-        Timer::after(Duration::from_millis(trigger_interval)).await;
+        match select(
+            STOP_SIGNAL.wait(),
+            Timer::after(Duration::from_millis(trigger_interval)),
+        )
+        .await
+        {
+            Either::First(_) => {
+                // Stop signal received, exit the loop
+                break;
+            }
+            Either::Second(_) => {
+                // Increment sequence number for this packet
+                seq_counter = seq_counter.wrapping_add(1);
 
-        // Increment sequence number for this packet
-        seq_counter = seq_counter.wrapping_add(1);
+                // --- PACKET CONSTRUCTION START ---
+                // We reconstruct the packet inside the loop to update the 'seq_no'
 
-        // --- PACKET CONSTRUCTION START ---
-        // We reconstruct the packet inside the loop to update the 'seq_no'
-        
-        // Create ICMP Packet wrapper around the existing buffer
-        let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
+                // Create ICMP Packet wrapper around the existing buffer
+                let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
 
-        // Create an ICMPv4 Echo Request with dynamic Sequence Number
-        let icmp_repr = Icmpv4Repr::EchoRequest {
-            ident: 0x22b,
-            seq_no: seq_counter, // <--- Updated per loop iteration
-            data: &[0xDE, 0xAD, 0xBE, 0xEF],
-        };
+                // Create an ICMPv4 Echo Request with dynamic Sequence Number
+                let icmp_repr = Icmpv4Repr::EchoRequest {
+                    ident: 0x22b,
+                    seq_no: seq_counter, // <--- Updated per loop iteration
+                    data: &[0xDE, 0xAD, 0xBE, 0xEF],
+                };
 
-        // Serialize the ICMP representation into the packet
-        icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
+                // Serialize the ICMP representation into the packet
+                icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
 
-        // Define the IPv4 representation
-        let ipv4_repr = Ipv4Repr {
-            src_addr: ip_info.local_address.address(),
-            dst_addr: ip_info.gateway_address,
-            payload_len: icmp_repr.buffer_len(),
-            hop_limit: 64, // Time-to-live value
-            next_header: IpProtocol::Icmp,
-        };
+                // Define the IPv4 representation
+                let ipv4_repr = Ipv4Repr {
+                    src_addr: ip_info.local_address.address(),
+                    dst_addr: ip_info.gateway_address,
+                    payload_len: icmp_repr.buffer_len(),
+                    hop_limit: 64, // Time-to-live value
+                    next_header: IpProtocol::Icmp,
+                };
 
-        // Create the IPv4 packet wrapper around the existing buffer
-        let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut tx_ipv4_buffer);
+                // Create the IPv4 packet wrapper around the existing buffer
+                let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut tx_ipv4_buffer);
 
-        // Serialize the IPv4 representation into the packet
-        ipv4_repr.emit(&mut ipv4_packet, &ChecksumCapabilities::default());
+                // Serialize the IPv4 representation into the packet
+                ipv4_repr.emit(&mut ipv4_packet, &ChecksumCapabilities::default());
 
-        // Copy the ICMP packet into the IPv4 packet's payload
-        ipv4_packet
-            .payload_mut()
-            .copy_from_slice(icmp_packet.into_inner());
+                // Copy the ICMP packet into the IPv4 packet's payload
+                ipv4_packet
+                    .payload_mut()
+                    .copy_from_slice(icmp_packet.into_inner());
 
-        // IP Packet buffer that will be sent
-        let ipv4_packet_buffer = ipv4_packet.into_inner();
-        // --- PACKET CONSTRUCTION END ---
+                // IP Packet buffer that will be sent
+                let ipv4_packet_buffer = ipv4_packet.into_inner();
+                // --- PACKET CONSTRUCTION END ---
 
-        // Send raw packet
-        raw_socket.send(ipv4_packet_buffer).await;
-
-        // Stop Trigger Future logic (commented out in original)
-        // ...
+                // Send raw packet
+                raw_socket.send(ipv4_packet_buffer).await;
+            }
+        }
     }
 }

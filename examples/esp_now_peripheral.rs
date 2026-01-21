@@ -2,15 +2,22 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_futures::join::join;
+use embassy_time::{Duration, Instant, Timer, with_timeout};
+use esp_csi_rs::{
+    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
+    PeripheralOpMode,
+};
+use esp_csi_rs::{
+    CSINodeBuilder, CSIClient, CSINodeHardware, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
+};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
+use esp_println::println;
 use esp_radio::{
     wifi::{ClientConfig, Interfaces, WifiController},
     Controller,
 };
-use esp_csi_rs::{CSINode, EspNowConfig, PeripheralOpMode, config::CsiConfig, logging::logging::init_logger};
-use esp_csi_rs::log_ln;
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
@@ -34,6 +41,19 @@ macro_rules! mk_static {
         let x = STATIC_CELL.uninit().write(($val));
         x
     }};
+}
+
+async fn node_task(mut client: CSIClient) {
+    let mut last_log_time = Instant::now();
+
+    with_timeout(Duration::from_secs(1000), async {
+            loop {
+                Timer::after(Duration::from_millis(10)).await;
+            }
+        })
+    .await
+    .unwrap_err();
+    client.send_stop().await;
 }
 
 #[esp_rtos::main]
@@ -60,33 +80,27 @@ async fn main(spawner: Spawner) -> ! {
         esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
 
-    let (wifi_controller, interfaces) =
+    let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
 
-    let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(PeripheralOpMode::EspNow(EspNowConfig::default())),
-        esp_csi_rs::CollectionMode::Listener,
-        Some(CsiConfig::default()),
-        Some(1000)).await;
-
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    node.init(interfaces, spawner, controller).await;
+    let mut node_builder = CSINodeBuilder::new(
+        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow((EspNowConfig::default()))),
+        CollectionMode::Listener,
+        Some(CsiConfig::default()),
+        Some(1000),
+    );
+    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+    let mut node = node_builder.build(csi_hardware);
+    let node_handle = node.get_handle();
 
-    // with_timeout(Duration::from_secs(1000), async {
-    //     loop {
-    //         node.print_csi_w_metadata().await;
-    //     }
-    // })
-    // .await
-    // .unwrap_err();
-
-    loop {
-        Timer::after(Duration::from_secs(1)).await;
-    }
-
-    node.stop();
+    join(
+        node.run(),
+        node_task(node_handle),
+    )
+    .await;
 
     loop {
         log_ln!("Hello world!");

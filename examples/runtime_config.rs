@@ -1,31 +1,30 @@
 #![no_std]
 #![no_main]
-#![deny(
-    clippy::mem_forget,
-    reason = "mem::forget is generally not safe to do with esp_hal types, especially those \
-    holding buffers for the duration of a data transfer."
-)]
-#![deny(clippy::large_stack_frames)]
 
 use embassy_executor::Spawner;
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_futures::join::join;
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, EspNowConfig, WifiSnifferConfig,
-    WifiStationConfig,
+    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
+    PeripheralOpMode,
+};
+use esp_csi_rs::{
+    get_avg_pps, get_dropped_packets, get_total_packets, log_ln, CSIClient, CSINodeBuilder,
+    CSINodeHardware,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
 use esp_radio::{
-    wifi::{ClientConfig, Interfaces, Protocol, WifiController},
+    wifi::{ClientConfig, Interfaces, WifiController},
     Controller,
 };
 use {esp_backtrace as _, esp_println as _};
 
+extern crate alloc;
+
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
     static_cell::StaticCell::new();
-
-extern crate alloc;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -45,7 +44,33 @@ macro_rules! mk_static {
     }};
 }
 
-use esp_csi_rs::log_ln;
+async fn node_task_listener(mut client: &mut CSIClient) {
+    log_ln!("Starting Listener Task");
+    let mut last_log_time = Instant::now();
+
+    with_timeout(Duration::from_secs(10), async {
+        loop {
+            Timer::after(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_err();
+    client.send_stop().await;
+}
+
+async fn node_task_collector(mut client: &mut CSIClient) {
+    log_ln!("Starting Collector Task");
+    let mut last_log_time = Instant::now();
+
+    with_timeout(Duration::from_secs(10), async {
+        loop {
+            client.print_csi_w_metadata().await;
+        }
+    })
+    .await
+    .unwrap_err();
+    client.send_stop().await;
+}
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -64,41 +89,38 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0);
 
     log_ln!("Embassy initialized!");
+    log_ln!("Starting Runtime Config Node");
 
     let radio_init = mk_static!(
         Controller<'static>,
         esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
-    // let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
-    let (wifi_controller, interfaces) =
+
+    let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    // Create a Wifi Sniffer Node
-    let mut sniffer_node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(
-            WifiSnifferConfig::default(),
-        )),
-        esp_csi_rs::CollectionMode::Collector,
-        Some(CsiConfig::default()),
-        Some(100),
-    )
-    .await;
-
-    sniffer_node.init(interfaces, spawner, controller).await;
-
-    with_timeout(Duration::from_secs(10), async {
-        loop {
-            sniffer_node.print_csi_w_metadata().await;
-        }
-    })
-    .await
-    .unwrap_err();
-    Timer::after(Duration::from_secs(10)).await;
-
-    sniffer_node.stop();
+    let mut node_handle = CSIClient::new();
+    let mut csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+    {
+        let mut node_builder = CSINodeBuilder::new(
+            esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
+                (EspNowConfig::default()),
+            )),
+            CollectionMode::Listener,
+            Some(CsiConfig::default()),
+            Some(1000),
+        );
+        let mut node = node_builder.build(csi_hardware);
+        join(node.run(), node_task_listener(&mut node_handle)).await;
+    }
+    {
+        node_builder.set_collection_mode(CollectionMode::Collector);
+        let mut node = node_builder.build(csi_hardware);
+        join(node.run(), node_task_collector(&mut node_handle)).await;
+    }
 
     loop {
         log_ln!("Hello world!");
