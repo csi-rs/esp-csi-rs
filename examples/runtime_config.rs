@@ -9,7 +9,7 @@ use esp_csi_rs::{
     PeripheralOpMode,
 };
 use esp_csi_rs::{
-    get_avg_pps, get_dropped_packets, get_total_packets, log_ln, CSIClient, CSINodeBuilder,
+    get_avg_pps, get_dropped_packets, get_total_packets, log_ln, CSIClient,
     CSINodeHardware,
 };
 use esp_hal::clock::CpuClock;
@@ -104,23 +104,18 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut node_handle = CSIClient::new();
     let mut csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
-    {
-        let mut node_builder = CSINodeBuilder::new(
-            esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
-                (EspNowConfig::default()),
-            )),
-            CollectionMode::Listener,
-            Some(CsiConfig::default()),
-            Some(1000),
-        );
-        let mut node = node_builder.build(csi_hardware);
-        join(node.run(), node_task_listener(&mut node_handle)).await;
-    }
-    {
-        node_builder.set_collection_mode(CollectionMode::Collector);
-        let mut node = node_builder.build(csi_hardware);
-        join(node.run(), node_task_collector(&mut node_handle)).await;
-    }
+    let mut node = CSINode::new(
+        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
+            (EspNowConfig::default()),
+        )),
+        CollectionMode::Listener,
+        Some(CsiConfig::default()),
+        Some(1000),
+        csi_hardware,
+    );
+    join(node.run(), node_task_listener(&mut node_handle)).await;
+    node.set_collection_mode(CollectionMode::Collector);
+    join(node.run(), node_task_collector(&mut node_handle)).await;
 
     loop {
         log_ln!("Hello world!");

@@ -9,7 +9,7 @@ use esp_csi_rs::{
     PeripheralOpMode,
 };
 use esp_csi_rs::{
-    CSINodeBuilder, CSIClient, CSINodeHardware, WifiSnifferConfig, WifiStationConfig, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
+    CSIClient, CSINodeHardware, WifiSnifferConfig, WifiStationConfig, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -19,6 +19,7 @@ use esp_radio::{
     Controller,
 };
 use {esp_backtrace as _, esp_println as _};
+use crate::alloc::string::ToString;
 
 extern crate alloc;
 
@@ -43,12 +44,12 @@ macro_rules! mk_static {
     }};
 }
 
-async fn node_task(mut client: CSIClient) {
+async fn node_task(mut client: &mut CSIClient) {
     let mut last_log_time = Instant::now();
 
     with_timeout(Duration::from_secs(1000), async {
             loop {
-                client.print_csi_w_metadata().await;
+                Timer::after(Duration::from_millis(10)).await;
             }
         })
     .await
@@ -73,44 +74,41 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting Wi-Fi Station Central Node");
+    log_ln!("Starting Wifi Station Node");
 
     let radio_init = mk_static!(
         Controller<'static>,
         esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
-    // let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
+
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    use alloc::string::ToString;
     let client_config = ClientConfig::default()
         .with_ssid("SSID".to_string())
         .with_password("PASS".to_string())
         .with_auth_method(esp_radio::wifi::AuthMethod::Wpa2Personal);
 
-    // 2. Create the WifiStationConfig
-    // WifiStationConfig has public fields, so we can use struct syntax.
     let station_config = WifiStationConfig {
         ntp_sync: true, // Set to true if you want NTP time sync
         client_config,  // Pass the config we created above
     };
-    let mut node_builder = CSINodeBuilder::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::WifiStation(station_config)),
+    let mut node_handle = CSIClient::new();
+    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+    let mut node = CSINode::new(
+        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::WifiStation((station_config))),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
         Some(1000),
+        csi_hardware
     );
-    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
-    let mut node = node_builder.build(csi_hardware);
-    let node_handle = node.get_handle();
 
     join(
         node.run(),
-        node_task(node_handle),
+        node_task(&mut node_handle),
     )
     .await;
 

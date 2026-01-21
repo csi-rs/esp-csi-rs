@@ -9,7 +9,7 @@ use esp_csi_rs::{
     PeripheralOpMode,
 };
 use esp_csi_rs::{
-    CSINodeBuilder, CSIClient, CSINodeHardware, WifiSnifferConfig, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
+    CSIClient, CSINodeHardware, WifiSnifferConfig, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -43,7 +43,7 @@ macro_rules! mk_static {
     }};
 }
 
-async fn node_task(mut client: CSIClient) {
+async fn node_task(mut client: &mut CSIClient) {
     let mut last_log_time = Instant::now();
 
     with_timeout(Duration::from_secs(1000), async {
@@ -86,19 +86,19 @@ async fn main(spawner: Spawner) -> ! {
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    let mut node_builder = CSINodeBuilder::new(
+    let mut node_handle = CSIClient::new();
+    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+    let mut node = CSINode::new(
         esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer((WifiSnifferConfig::default()))),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
         Some(1000),
+        csi_hardware
     );
-    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
-    let mut node = node_builder.build(csi_hardware);
-    let node_handle = node.get_handle();
 
     join(
         node.run(),
-        node_task(node_handle),
+        node_task(&mut node_handle),
     )
     .await;
 

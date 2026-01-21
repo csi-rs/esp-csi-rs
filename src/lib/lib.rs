@@ -180,39 +180,32 @@ impl CSIClient {
     }
 }
 
-pub struct CSINodeBuilder {
+pub struct CSINode<'a> {
     kind: Node,
     collection_mode: CollectionMode,
+    /// CSI Configuration
     csi_config: Option<CsiConfiguration>,
+    /// Traffic Generation Frequency
     traffic_freq_hz: Option<u16>,
+    /// Receiver for Processed CSI Data Packets
+    hardware: CSINodeHardware<'a>,
 }
 
-impl CSINodeBuilder {
+impl<'a> CSINode<'a> {
     pub fn new(
         kind: Node,
         collection_mode: CollectionMode,
         csi_config: Option<CsiConfiguration>,
         traffic_freq_hz: Option<u16>,
+        hardware: CSINodeHardware<'a>,
     ) -> Self {
+        let csi_data_rx = PROCESSED_CSI_DATA.subscriber().unwrap();
         Self {
             kind,
             collection_mode,
             csi_config,
             traffic_freq_hz,
-        }
-    }
-
-    pub fn new_peripheral_node(
-        op_mode: PeripheralOpMode,
-        collection_mode: CollectionMode,
-        csi_config: Option<CsiConfiguration>,
-        traffic_freq_hz: Option<u16>,
-    ) -> Self {
-        Self {
-            kind: Node::Peripheral(op_mode),
-            collection_mode,
-            csi_config,
-            traffic_freq_hz,
+            hardware,
         }
     }
 
@@ -221,12 +214,14 @@ impl CSINodeBuilder {
         collection_mode: CollectionMode,
         csi_config: Option<CsiConfiguration>,
         traffic_freq_hz: Option<u16>,
+        hardware: CSINodeHardware<'a>,
     ) -> Self {
         Self {
             kind: Node::Central(op_mode),
             collection_mode,
             csi_config,
             traffic_freq_hz,
+            hardware,
         }
     }
 
@@ -272,77 +267,6 @@ impl CSINodeBuilder {
 
     pub fn set_op_mode(&mut self, mode: Node) {
         self.kind = mode;
-    }
-
-    pub fn build(self, hardware: CSINodeHardware) -> CSINode {
-        CSINode::new(
-            self.kind,
-            self.collection_mode,
-            self.csi_config,
-            self.traffic_freq_hz,
-            hardware,
-        )
-    }
-}
-
-pub struct CSINode<'a> {
-    kind: Node,
-    collection_mode: CollectionMode,
-    /// CSI Configuration
-    csi_config: Option<CsiConfiguration>,
-    /// Traffic Generation Frequency
-    traffic_freq_hz: Option<u16>,
-    /// Receiver for Processed CSI Data Packets
-    hardware: CSINodeHardware<'a>,
-    csi_data_rx: Subscriber<
-        'static,
-        CriticalSectionRawMutex,
-        CSIDataPacket,
-        PROC_CSI_CH_CAPACITY,
-        PROC_CSI_CH_SUBS,
-        2,
-    >,
-}
-
-impl<'a> CSINode<'a> {
-    pub fn new(
-        kind: Node,
-        collection_mode: CollectionMode,
-        csi_config: Option<CsiConfiguration>,
-        traffic_freq_hz: Option<u16>,
-        hardware: CSINodeHardware<'a>,
-    ) -> Self {
-        let csi_data_rx = PROCESSED_CSI_DATA.subscriber().unwrap();
-        Self {
-            kind,
-            collection_mode,
-            csi_config,
-            traffic_freq_hz,
-            csi_data_rx,
-            hardware,
-        }
-    }
-
-    pub fn get_node_type(&self) -> &Node {
-        &self.kind
-    }
-
-    pub fn get_collection_mode(&self) -> CollectionMode {
-        self.collection_mode
-    }
-
-    pub fn get_central_op_mode(&self) -> Option<&CentralOpMode> {
-        match &self.kind {
-            Node::Central(mode) => Some(mode),
-            Node::Peripheral(_) => None,
-        }
-    }
-
-    pub fn get_peripheral_op_mode(&self) -> Option<&PeripheralOpMode> {
-        match &self.kind {
-            Node::Peripheral(mode) => Some(mode),
-            Node::Central(_) => None,
-        }
     }
 
     pub async fn run(&mut self) {
