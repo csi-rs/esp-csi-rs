@@ -164,53 +164,6 @@ pub async fn sta_connection(controller: &mut WifiController<'_>) {
     }
 }
 
-// #[embassy_executor::task]
-// pub async fn sta_connection(controller: &'static mut WifiController<'static>) {
-//     // let mut start_collection_watch = match START_COLLECTION.receiver() {
-//     //     Some(r) => r,
-//     //     None => panic!("Maximum number of recievers reached"),
-//     // };
-
-//     // Define Events to Listen for
-//     let sta_events =
-//         enum_set!(WifiEvent::StaDisconnected | WifiEvent::StaStop | WifiEvent::StaConnected);
-
-//     // Monitoring/stop loop
-//     loop {
-//         // // Stop Collection Future
-//         // let stop_coll_fut = start_collection_watch.changed();
-//         // // Events Future
-//         let mut wait_event_fut = controller.wait_for_events(sta_events, true).await;
-
-//         // MAYBE JUST DO A STOP COLLECTION & DEINIT WHERE WE RETURN FROM ALL TASKS
-
-//         // // If either future completes, handle accordingly
-//         // match select(wait_event_fut, stop_coll_fut).await {
-//         //     // Wait event future cases
-//         //     Either::First(mut event) => {
-//         if wait_event_fut.contains(WifiEvent::StaDisconnected) {
-//             log_ln!("STA Disconnected");
-//         }
-//         if wait_event_fut.contains(WifiEvent::StaStop) {
-//             log_ln!("STA Stopped");
-//         }
-//         wait_event_fut.clear();
-//         //     }
-//         //     // Stop collection future case
-//         //     Either::Second(sig) => {
-//         //         // Stop Signal
-//         //         if !sig {
-//         //             log_ln!("Halting CSI Collection...");
-//         //             // Send the controller back before exiting loop
-//         //             // CONTROLLER_CH.send(controller).await;
-//         //             // CONTROLLER_HALTED_SIGNAL.signal(true);
-//         //             break;
-//         //         }
-//         //     }
-//         // }
-//     }
-// }
-
 // This task manages network operations for the station
 pub async fn sta_network_ops(sta_stack: Stack<'static>, freq: Option<u16>) {
     // Retrieve acquired IP information from DHCP
