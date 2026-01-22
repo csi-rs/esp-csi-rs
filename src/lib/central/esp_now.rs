@@ -81,17 +81,10 @@ pub async fn run_esp_now_central(
                     Either::First(_) => {
                         // let elapsed = current_timestamp.elapsed().as_micros();
                         // log_ln!("Send Broadcast at {:?}", elapsed);
-                        let status = esp_now.send_async(&BROADCAST_ADDRESS, b"H").await;
+                        let _ = esp_now.send_async(&BROADCAST_ADDRESS, b"H").await;
                         // log_ln!("Send broadcast status: {:?}", status);
                     }
                     Either::Second(r) => {
-                        let csi_packet = reconstruct_raw_csi(r.data()).await;
-                        if csi_packet.is_some() {
-                            let mut packet = csi_packet.unwrap();
-                            packet.mac = r.info.src_address;
-                            let _ = proc_csi_data.publish_immediate(packet);
-                        }
-
                         if r.info.dst_address == BROADCAST_ADDRESS {
                             if !esp_now.peer_exists(&r.info.src_address) {
                                 esp_now

@@ -43,12 +43,12 @@ macro_rules! mk_static {
     }};
 }
 
-async fn node_task(mut client: &mut CSIClient) {
+async fn node_task(client: &mut CSIClient) {
     let mut last_log_time = Instant::now();
 
     with_timeout(Duration::from_secs(1000), async {
             loop {
-                client.get_csi_data().await;
+                Timer::after_millis(10).await;
                 if last_log_time.elapsed() >= Duration::from_secs(1) {
                     log_ln!(
                         "Total Packets: {}, Average PPS: {}, Dropped Packets: {}",
@@ -98,7 +98,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut node_handle = CSIClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow((EspNowConfig::default()))),
+        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow((EspNowConfig::default()))),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
         Some(1000),
