@@ -300,15 +300,17 @@ impl<'a> CSINode<'a> {
 
         let is_collector = self.collection_mode == CollectionMode::Collector;
 
+        // Set Peripheral/Central to Collect CSI
+        if is_collector {
+            set_csi(controller, config);
+        }
         // Initialize Nodes
         match &self.kind {
             Node::Peripheral(op_mode) => match op_mode {
                 PeripheralOpMode::EspNow(esp_now_config) => {
-                    // Set Peripheral to Collect CSI
-                    set_csi(controller, config);
                     // Initialize as Peripheral node with EspNowConfig
                     let main_task = run_esp_now_peripheral(&mut interfaces.esp_now, esp_now_config);
-                    if (is_collector) {
+                    if is_collector {
                         join(main_task, process_csi_packet()).await;
                     } else {
                         main_task.await;
@@ -318,11 +320,8 @@ impl<'a> CSINode<'a> {
                 PeripheralOpMode::WifiSniffer(sniffer_config) => {
                     let sniffer = &interfaces.sniffer;
                     sniffer.set_promiscuous_mode(true).unwrap();
-                    // Set Sniffer to Collect CSI
-                    set_csi(controller, config);
-                    // Initialize as Wifi Sniffer Collector with WifiSnifferConfig
 
-                    if (is_collector) {
+                    if is_collector {
                         process_csi_packet().await;
                     } else {
                         STOP_SIGNAL.wait().await;
@@ -333,7 +332,6 @@ impl<'a> CSINode<'a> {
             },
             Node::Central(op_mode) => match op_mode {
                 CentralOpMode::EspNow(esp_now_config) => {
-                    set_csi(controller, config);
                     let main_task = run_esp_now_central(
                         &mut interfaces.esp_now,
                         esp_now_config,
@@ -347,8 +345,6 @@ impl<'a> CSINode<'a> {
                     STOP_SIGNAL.reset();
                 }
                 CentralOpMode::WifiStation(sta_config) => {
-                    // Set Station to collect CSI
-                    set_csi(controller, config);
 
                     // Initialize as Wifi Station Collector with WifiStationConfig
                     // 1. Connect to Wi-Fi network, etc.

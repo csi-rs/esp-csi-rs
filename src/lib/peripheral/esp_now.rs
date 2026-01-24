@@ -1,6 +1,6 @@
-use crate::STOP_SIGNAL;
 use crate::log_ln;
-use crate::CSI_PACKET;
+use crate::reconstruct_raw_csi;
+use crate::STOP_SIGNAL;
 
 use esp_radio::esp_now::{EspNow, PeerInfo};
 
@@ -11,10 +11,7 @@ use embassy_futures::select::Either;
 
 use crate::EspNowConfig;
 
-pub async fn run_esp_now_peripheral(
-    esp_now: &mut EspNow<'static>,
-    config: &EspNowConfig,
-) {
+pub async fn run_esp_now_peripheral(esp_now: &mut EspNow<'static>, config: &EspNowConfig) {
     esp_now.set_channel(config.channel).unwrap();
     log_ln!("esp-now version {}", esp_now.version().unwrap());
     esp_now
@@ -25,8 +22,6 @@ pub async fn run_esp_now_peripheral(
 }
 
 async fn responder(esp_now: &mut EspNow<'static>) {
-    let mut csi_data = CSI_PACKET.subscriber().unwrap();
-
     // Create a message buffer for the data to be sent back
 
     // Message format w/ seq_no:
@@ -39,43 +34,48 @@ async fn responder(esp_now: &mut EspNow<'static>) {
     // Width of message (625) = 2 bytes for seq_no + 1 byte for format + 4 bytes for timestamp + 6 bytes for MAC + 612 bytes for CSI data
     let mut message_u8: Vec<u8, 625> = Vec::new();
     loop {
-        match select(STOP_SIGNAL.wait(), csi_data.next_message_pure()).await {
+        match select(STOP_SIGNAL.wait(), esp_now.receive_async()).await {
             Either::First(_) => {
                 // Stop signal received, exit the loop
                 break;
             }
-            Either::Second(raw_csi_data) => {
+            Either::Second(r) => {
                 // Build message from raw CSI packet
-                message_u8.clear();
+                let csi_option = reconstruct_raw_csi(r.data()).await;
+                if csi_option.is_some() {
+                    let mut csi_packet = csi_option.unwrap();
+                    csi_packet.mac = r.info.src_address;
+                    message_u8.clear();
 
-                // sequence number
-                let _ = message_u8.extend_from_slice(&raw_csi_data.sequence_number.to_be_bytes());
+                    // sequence number
+                    let _ = message_u8.extend_from_slice(&csi_packet.sequence_number.to_be_bytes());
 
-                // data format (may be Undefined in raw mode)
-                let _ = message_u8.push(raw_csi_data.data_format as u8);
+                    // data format (may be Undefined in raw mode)
+                    let _ = message_u8.push(csi_packet.data_format as u8);
 
-                // timestamp
-                let _ = message_u8.extend_from_slice(&raw_csi_data.timestamp.to_be_bytes());
+                    // timestamp
+                    let _ = message_u8.extend_from_slice(&csi_packet.timestamp.to_be_bytes());
 
-                // MAC
-                let _ = message_u8.extend_from_slice(&raw_csi_data.mac);
+                    // MAC
+                    let _ = message_u8.extend_from_slice(&csi_packet.mac);
 
-                // CSI payload (raw)
-                for x in raw_csi_data.csi_data.iter() {
-                    let _ = message_u8.push(*x as u8);
+                    // CSI payload (raw)
+                    for x in csi_packet.csi_data.iter() {
+                        let _ = message_u8.push(*x as u8);
+                    }
+
+                    let _ = esp_now.send_async(&csi_packet.mac, &message_u8).await;
                 }
 
-                if !esp_now.peer_exists(&raw_csi_data.mac) {
+                if !esp_now.peer_exists(&r.info.src_address) {
                     let _ = esp_now.add_peer(PeerInfo {
                         interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
-                        peer_address: raw_csi_data.mac,
+                        peer_address: r.info.src_address,
                         lmk: None,
                         channel: None,
                         encrypt: false,
                     });
                 }
-
-                let _ = esp_now.send_async(&raw_csi_data.mac, &message_u8).await;
             }
         };
     }
