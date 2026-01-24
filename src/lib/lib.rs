@@ -35,11 +35,6 @@ use crate::config::CsiConfig as CsiConfiguration;
 use crate::csi::{CSIDataPacket, RxCSIFmt};
 use crate::peripheral::esp_now::{run_esp_now_peripheral};
 
-// Channels
-static CONTROLLER_CH: Channel<CriticalSectionRawMutex, WifiController<'static>, 1> = Channel::new();
-static INTERFACES_CH: Channel<CriticalSectionRawMutex, Interfaces<'static>, 1> = Channel::new();
-// static CSI_RAW_CH: Channel<CriticalSectionRawMutex, Vec<u8, 625>, 2> = Channel::new();
-
 // Watches
 // static PROCESSED_CSI_DATA: Watch<CriticalSectionRawMutex, CSIDataPacket, 3> = Watch::new();
 
