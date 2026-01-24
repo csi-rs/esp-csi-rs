@@ -58,9 +58,7 @@ pub async fn run_esp_now_central(
         Some(freq) => freq as u64,
         None => u16::MAX as u64,
     };
-
-    let proc_csi_data = PROCESSED_CSI_DATA.publisher().unwrap();
-
+    
     loop {
         // let current_timestamp = embassy_time::Instant::now();
         match select(
