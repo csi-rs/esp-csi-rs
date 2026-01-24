@@ -45,9 +45,20 @@ macro_rules! mk_static {
 }
 
 async fn node_task(client: &mut CSIClient) {
+    let mut last_log_time = Instant::now();
+
     with_timeout(Duration::from_secs(1000), async {
             loop {
-                client.print_csi_w_metadata().await;
+                Timer::after_millis(10).await;
+                if last_log_time.elapsed() >= Duration::from_secs(1) {
+                    log_ln!(
+                        "Total Packets: {}, Average PPS: {}, Dropped Packets: {}",
+                        get_total_packets(),
+                        get_avg_pps(),
+                        get_dropped_packets()
+                    );
+                    last_log_time = Instant::now();
+                }
             }
         })
     .await

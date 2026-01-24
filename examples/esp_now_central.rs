@@ -82,7 +82,7 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting EspNow Peripheral Node");
+    log_ln!("Starting EspNow Central Node");
 
     let radio_init = mk_static!(
         Controller<'static>,

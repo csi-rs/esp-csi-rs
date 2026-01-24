@@ -301,9 +301,7 @@ impl<'a> CSINode<'a> {
         let is_collector = self.collection_mode == CollectionMode::Collector;
 
         // Set Peripheral/Central to Collect CSI
-        if is_collector {
-            set_csi(controller, config);
-        }
+        set_csi(controller, config);
         // Initialize Nodes
         match &self.kind {
             Node::Peripheral(op_mode) => match op_mode {
