@@ -1,12 +1,12 @@
 use core::{net::Ipv4Addr, str::FromStr};
 use embassy_executor::Spawner;
-use embassy_futures::join::{self, join};
+use embassy_futures::join::{self, join, join3, join4};
 use embassy_futures::select::{select, Either};
 use embassy_net::raw::{IpProtocol, IpVersion, PacketMetadata, RawSocket};
 use embassy_net::{Ipv4Address, Ipv4Cidr, Runner, Stack, StackResources};
 use embassy_time::{Duration, Timer};
 use enumset::enum_set;
-use esp_radio::wifi::{ModeConfig, WifiController, WifiDevice, WifiEvent};
+use esp_radio::wifi::{Interfaces, ModeConfig, WifiController, WifiDevice, WifiEvent};
 use smoltcp::phy::ChecksumCapabilities;
 
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
@@ -34,25 +34,20 @@ struct IpInfo {
 }
 
 pub fn sta_init<'a>(
-    interfaces: &mut WifiDevice<'static>,
+    interfaces: &'a mut WifiDevice<'static>,
     config: &WifiStationConfig,
-    controller: &mut WifiController<'a>,
-) -> Stack<'static> {
-    // Station IP Configuration - DHCP
+    controller: &mut WifiController<'static>,
+) -> (Stack<'a>, Runner<'a, &'a mut WifiDevice<'static>>) {
     let sta_ip_config = embassy_net::Config::dhcpv4(Default::default());
     let seed = 123456_u64;
 
-    // Create STA Network Stack
-    let (sta_stack, mut sta_runner) = embassy_net::new(
+    // Create STA Network Stack and Runner
+    let (sta_stack, sta_runner) = embassy_net::new(
         interfaces,
         sta_ip_config,
         mk_static!(StackResources<6>, StackResources::<6>::new()),
         seed,
     );
-
-    // Spawn the network runner task
-    async { sta_runner.run().await };
-    log_ln!("Network Task Running");
 
     // Configure WiFi Client/Station Connection
     let station_config = ModeConfig::Client(config.client_config.clone());
@@ -65,13 +60,14 @@ pub fn sta_init<'a>(
         }
     }
 
-    sta_stack
+    (sta_stack, sta_runner)
 }
 
 pub async fn run_sta_connect(
     controller: &mut WifiController<'_>,
     freq: Option<u16>,
-    sta_stack: Stack<'static>,
+    sta_stack: Stack<'_>,
+    sta_runner: Runner<'_, &mut WifiDevice<'_>>
 ) {
     // Connect WiFi
     match controller.connect_async().await {
@@ -81,17 +77,27 @@ pub async fn run_sta_connect(
         }
     }
 
-    // Run DHCP Client to acquire IP
-    run_dhcp_client(sta_stack).await;
-    // Run NTP Sync to synchronize time
-    // if self.sync_time {
-    //     run_ntp_sync(sta_stack).await;
-    // }
-
-    join(sta_connection(controller), sta_network_ops(sta_stack, freq)).await;
+    join4(
+        sta_connection(controller),
+        sta_network_ops(sta_stack, freq),
+        run_net_task(sta_runner),
+        run_dhcp_client(sta_stack)
+    )
+    .await;
 }
 
-async fn run_dhcp_client(sta_stack: Stack<'static>) {
+async fn run_net_task(mut sta_runner: Runner<'_, &mut WifiDevice<'_>>) {
+    loop {
+        match select(STOP_SIGNAL.wait(), sta_runner.run()).await {
+            Either::First(_) => {
+                break;
+            }
+            Either::Second(_) => {}
+        }
+    }
+}
+
+async fn run_dhcp_client(sta_stack: Stack<'_>) {
     log_ln!("Running DHCP Client");
 
     // Acquire and store IP information for gateway and client after configuration is up
@@ -147,7 +153,12 @@ pub async fn sta_connection(controller: &mut WifiController<'_>) {
         // let stop_coll_fut = start_collection_watch.changed();
         // // Events Future
         // let mut wait_event_fut = controller.wait_for_events(sta_events, true);
-        match select(STOP_SIGNAL.wait(), controller.wait_for_events(sta_events, true)).await {
+        match select(
+            STOP_SIGNAL.wait(),
+            controller.wait_for_events(sta_events, true),
+        )
+        .await
+        {
             Either::First(_) => {
                 break;
             }
@@ -165,7 +176,7 @@ pub async fn sta_connection(controller: &mut WifiController<'_>) {
 }
 
 // This task manages network operations for the station
-pub async fn sta_network_ops(sta_stack: Stack<'static>, freq: Option<u16>) {
+pub async fn sta_network_ops(sta_stack: Stack<'_>, freq: Option<u16>) {
     // Retrieve acquired IP information from DHCP
     let ip_info = DHCP_CLIENT_INFO.wait().await;
 

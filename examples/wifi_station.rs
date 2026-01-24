@@ -44,12 +44,10 @@ macro_rules! mk_static {
     }};
 }
 
-async fn node_task(mut client: &mut CSIClient) {
-    let mut last_log_time = Instant::now();
-
+async fn node_task(client: &mut CSIClient) {
     with_timeout(Duration::from_secs(1000), async {
             loop {
-                Timer::after(Duration::from_millis(10)).await;
+                client.print_csi_w_metadata().await;
             }
         })
     .await
@@ -88,8 +86,8 @@ async fn main(spawner: Spawner) -> ! {
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let client_config = ClientConfig::default()
-        .with_ssid("SSID".to_string())
-        .with_password("PASS".to_string())
+        .with_ssid("OrangeFiber_2.4".to_string())
+        .with_password("Omar200@".to_string())
         .with_auth_method(esp_radio::wifi::AuthMethod::Wpa2Personal);
 
     let station_config = WifiStationConfig {

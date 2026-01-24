@@ -274,7 +274,7 @@ impl<'a> CSINode<'a> {
         let controller = &mut self.hardware.controller;
 
         // Tasks Necessary for Central Station & Sniffer
-        let sta_stack = if let Node::Central(CentralOpMode::WifiStation(config)) = &self.kind {
+        let sta_interface = if let Node::Central(CentralOpMode::WifiStation(config)) = &self.kind {
             Some(sta_init(&mut interfaces.sta, config, controller))
         } else {
             None
@@ -344,7 +344,7 @@ impl<'a> CSINode<'a> {
                         esp_now_config,
                         self.traffic_freq_hz,
                     );
-                    if (is_collector) {
+                    if is_collector {
                         join(main_task, process_csi_packet()).await;
                     } else {
                         main_task.await;
@@ -360,10 +360,11 @@ impl<'a> CSINode<'a> {
                     // 2. Run DHCP, NTP sync if enabled in config, etc.
                     // 3. Spawn STA Connection Handling Task
                     // 4. Spawn STA Network Operation Task
+                    let (sta_stack, sta_runner) = sta_interface.unwrap();
 
                     let main_task =
-                        run_sta_connect(controller, self.traffic_freq_hz, sta_stack.unwrap());
-                    if (is_collector) {
+                        run_sta_connect(controller, self.traffic_freq_hz, sta_stack, sta_runner);
+                    if is_collector {
                         join(main_task, process_csi_packet()).await;
                     } else {
                         main_task.await;
