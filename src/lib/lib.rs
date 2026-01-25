@@ -111,6 +111,7 @@ pub enum CentralOpMode {
 pub enum PeripheralOpMode {
     EspNow(EspNowConfig),
     WifiSniffer(WifiSnifferConfig),
+    EspNowMute(EspNowConfig)
 }
 
 pub enum Node {
@@ -324,6 +325,21 @@ impl<'a> CSINode<'a> {
                         STOP_SIGNAL.wait().await;
                     }
                     sniffer.set_promiscuous_mode(false).unwrap();
+                }
+                PeripheralOpMode::EspNowMute(esp_now_config) => {
+                    // Initialize as Peripheral node with EspNowConfig
+                    interfaces.esp_now.set_channel(esp_now_config.channel).unwrap();
+                    log_ln!("esp-now version {}", interfaces.esp_now.version().unwrap());
+                    interfaces.esp_now
+                        .set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi)
+                        .unwrap();
+                    if is_collector {
+                        process_csi_packet().await;
+                        // join(main_task, process_csi_packet()).await;
+                    } else {
+                        STOP_SIGNAL.wait().await;
+                        // main_task.await;
+                    }
                 }
             },
             Node::Central(op_mode) => match op_mode {

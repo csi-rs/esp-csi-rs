@@ -9,7 +9,7 @@ use esp_csi_rs::{
     PeripheralOpMode,
 };
 use esp_csi_rs::{
-    CSIClient, CSINodeHardware, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
+    CSIClient, CSINodeHardware, WifiSnifferConfig, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -49,15 +49,15 @@ async fn node_task(client: &mut CSIClient) {
     with_timeout(Duration::from_secs(1000), async {
             loop {
                 Timer::after_millis(10).await;
-                // if last_log_time.elapsed() >= Duration::from_secs(1) {
-                //     log_ln!(
-                //         "Total Packets: {}, Average PPS: {}, Dropped Packets: {}",
-                //         get_total_packets(),
-                //         get_avg_pps(),
-                //         get_dropped_packets()
-                //     );
-                //     last_log_time = Instant::now();
-                // }
+                if last_log_time.elapsed() >= Duration::from_secs(1) {
+                    log_ln!(
+                        "Total Packets: {}, Average PPS: {}, Dropped Packets: {}",
+                        get_total_packets(),
+                        get_avg_pps(),
+                        get_dropped_packets()
+                    );
+                    last_log_time = Instant::now();
+                }
             }
         })
     .await
@@ -82,7 +82,7 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting EspNow Central Node");
+    log_ln!("Starting EspNow Peripheral Node");
 
     let radio_init = mk_static!(
         Controller<'static>,
@@ -98,7 +98,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut node_handle = CSIClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow((EspNowConfig::default()))),
+        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNowMute((EspNowConfig::default()))),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
         Some(10000),
