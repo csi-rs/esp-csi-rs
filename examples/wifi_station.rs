@@ -97,8 +97,8 @@ async fn main(spawner: Spawner) -> ! {
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let client_config = ClientConfig::default()
-        .with_ssid("OrangeFiber_2.4".to_string())
-        .with_password("Omar200@".to_string())
+        .with_ssid("SSID".to_string())
+        .with_password("PASS".to_string())
         .with_auth_method(esp_radio::wifi::AuthMethod::Wpa2Personal);
 
     let station_config = WifiStationConfig {

@@ -313,7 +313,6 @@ impl<'a> CSINode<'a> {
                     } else {
                         main_task.await;
                     }
-                    STOP_SIGNAL.reset();
                 }
                 PeripheralOpMode::WifiSniffer(sniffer_config) => {
                     let sniffer = &interfaces.sniffer;
@@ -324,7 +323,6 @@ impl<'a> CSINode<'a> {
                     } else {
                         STOP_SIGNAL.wait().await;
                     }
-                    STOP_SIGNAL.reset();
                     sniffer.set_promiscuous_mode(false).unwrap();
                 }
             },
@@ -340,7 +338,6 @@ impl<'a> CSINode<'a> {
                     } else {
                         main_task.await;
                     }
-                    STOP_SIGNAL.reset();
                 }
                 CentralOpMode::WifiStation(sta_config) => {
 
@@ -358,10 +355,12 @@ impl<'a> CSINode<'a> {
                     } else {
                         main_task.await;
                     }
-                    STOP_SIGNAL.reset();
                 }
             },
         }
+        
+        STOP_SIGNAL.reset();
+        controller.stop_async().await;
     }
 }
 
