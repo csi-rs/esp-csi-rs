@@ -3,13 +3,14 @@
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_time::{Duration, Instant, Timer, with_timeout};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use esp_csi_rs::{
     config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
     PeripheralOpMode,
 };
 use esp_csi_rs::{
-    CSIClient, CSINodeHardware, WifiSnifferConfig, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
+    get_avg_pps, get_dropped_packets, get_total_packets, log_ln, CSIClient, CSINodeHardware,
+    WifiSnifferConfig,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -47,10 +48,10 @@ async fn node_task(mut client: &mut CSIClient) {
     let mut last_log_time = Instant::now();
 
     with_timeout(Duration::from_secs(1000), async {
-            loop {
-                client.print_csi_w_metadata().await;
-            }
-        })
+        loop {
+            client.print_csi_w_metadata().await;
+        }
+    })
     .await
     .unwrap_err();
     client.send_stop().await;
@@ -64,12 +65,16 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
     init_logger(spawner, false);
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    // esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    #[cfg(any(feature = "esp32c6", feature = "esp32c3"))]
+    {
+        let sw_interrupt =
+            esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+        esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    }
+    #[cfg(not(any(feature = "esp32c6", feature = "esp32c3")))]
     esp_rtos::start(timg0.timer0);
 
     log_ln!("Embassy initialized!");
@@ -89,18 +94,16 @@ async fn main(spawner: Spawner) -> ! {
     let mut node_handle = CSIClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer((WifiSnifferConfig::default()))),
+        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(
+            (WifiSnifferConfig::default()),
+        )),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
         Some(1000),
-        csi_hardware
+        csi_hardware,
     );
 
-    join(
-        node.run(),
-        node_task(&mut node_handle),
-    )
-    .await;
+    join(node.run(), node_task(&mut node_handle)).await;
 
     loop {
         log_ln!("Hello world!");

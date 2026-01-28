@@ -149,8 +149,6 @@ pub struct CSIDataPacket {
     pub date_time: Option<DateTime>,
     /// Sequence Number Associated with the Packet that triggered a CSI capture.
     pub sequence_number: u16,
-    /// NEW FIELD: Number of packets dropped since the last successful packet
-    pub packet_drop_count: u32,
     /// Data format of the recieved CSI.
     /// RxCSIFmt is a Compact Representation of the Different Recieved CSI Data Format Options as defined in the ESP WiFi Driver.
     pub data_format: RxCSIFmt,
@@ -423,21 +421,9 @@ pub struct CSIDataPacket {
 impl CSIDataPacket {
     pub fn print_csi_w_metadata(&self) {
         // Calculate Elapsed time here and add offset to date_time then call to calculate new time
-
         use crate::logging::logging::log_csi;
-        if let Some(date_time) = &self.date_time {
-            log_ln!(
-                "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-                date_time.year,
-                date_time.month,
-                date_time.day,
-                date_time.hour,
-                date_time.minute,
-                date_time.second,
-                date_time.millisecond
-            );
-        }
-        log_csi(packet);
+
+        log_csi(self.clone());
     }
     pub fn csi_fmt_from_params(&mut self) {
         self.data_format = RxCSIFmt::Undefined;

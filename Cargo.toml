@@ -82,17 +82,18 @@ esp32c3 = [
 ]
 
 # ## Support for the ESP32-C6 (WiFi 6)
-# esp32c6 = [
-#     "esp-hal/esp32c6",
-#     "esp-hal/rt",
-#     "esp-backtrace/esp32c6",
-#     "esp-wifi/esp32c6",
-#     "esp-bootloader-esp-idf/esp32c6",
-#     "esp-wifi/csi",
-#     "esp-wifi/sniffer",
-#     "esp-println/esp32c6",
-#     "esp-println/critical-section",
-# ]
+esp32c6 = [
+    "esp-hal/esp32c6",
+    "esp-hal/rt",
+    "esp-backtrace/esp32c6",
+    "esp-radio/esp32c6",
+    "esp-bootloader-esp-idf/esp32c6",
+    "esp-radio/csi",
+    "esp-radio/sniffer",
+    "esp-println/esp32c6",
+    "esp-println/critical-section",
+    "esp-rtos/esp32c6",
+]
 
 # ## Support for the ESP32-S3 (AIoT)
 esp32s3 = [

@@ -5,17 +5,15 @@ use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
-    PeripheralOpMode,
+    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode,
 };
 use esp_csi_rs::{
-    CSIClient, CSINodeHardware, WifiSnifferConfig, WifiStationConfig, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
+    CSIClient, CSINodeHardware, WifiStationConfig, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_println::println;
 use esp_radio::{
-    wifi::{ClientConfig, Interfaces, WifiController},
+    wifi::{ClientConfig, WifiController},
     Controller,
 };
 use {esp_backtrace as _, esp_println as _};
@@ -74,12 +72,16 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
     init_logger(spawner, false);
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    // esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    #[cfg(any(feature = "esp32c6", feature = "esp32c3"))]
+    {
+        let sw_interrupt =
+            esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+        esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    }
+    #[cfg(not(any(feature = "esp32c6", feature = "esp32c3")))]
     esp_rtos::start(timg0.timer0);
 
     log_ln!("Embassy initialized!");
@@ -97,8 +99,8 @@ async fn main(spawner: Spawner) -> ! {
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let client_config = ClientConfig::default()
-        .with_ssid("SSID".to_string())
-        .with_password("PASS".to_string())
+        .with_ssid("lol".to_string())
+        .with_password("lol@2048".to_string())
         .with_auth_method(esp_radio::wifi::AuthMethod::Wpa2Personal);
 
     let station_config = WifiStationConfig {
@@ -108,7 +110,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut node_handle = CSIClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::WifiStation((station_config))),
+        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::WifiStation(station_config)),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
         Some(1000),

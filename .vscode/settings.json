@@ -3,7 +3,7 @@
     "rust-analyzer.cargo.extraEnv": {
         "RUSTUP_TOOLCHAIN": "esp"
     },
-    "rust-analyzer.cargo.target": "xtensa-esp32s3-none-elf",
+    "rust-analyzer.cargo.target": "riscv32imac-unknown-none-elf",
     "rust-analyzer.cargo.features": [
         "no-std",
         "println",

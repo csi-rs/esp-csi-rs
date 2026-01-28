@@ -37,9 +37,9 @@ pub async fn run_esp_now_central(
     // Configure
     esp_now.set_channel(config.channel).unwrap();
     log_ln!("esp-now version {}", esp_now.version().unwrap());
-    esp_now
-        .set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi)
-        .unwrap();
+    // esp_now
+    //     .set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi)
+    //     .unwrap();
 
     // Setup Initial Peers
     if !esp_now.peer_exists(&BROADCAST_ADDRESS) {

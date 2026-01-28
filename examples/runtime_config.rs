@@ -80,12 +80,16 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
     init_logger(spawner, false);
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    // esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    #[cfg(any(feature = "esp32c6", feature = "esp32c3"))]
+    {
+        let sw_interrupt =
+            esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+        esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    }
+    #[cfg(not(any(feature = "esp32c6", feature = "esp32c3")))]
     esp_rtos::start(timg0.timer0);
 
     log_ln!("Embassy initialized!");

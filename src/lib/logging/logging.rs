@@ -88,52 +88,9 @@ mod defmt_impl {
     }
 }
 
-#[cfg(any(feature = "jtag-serial", feature = "auto"))]
-mod timeout_impl {
-    use embassy_time::{with_timeout, Duration};
-    use embedded_io_async::{ErrorKind, ErrorType, Write};
-
-    pub struct TimeoutWriter<W> {
-        inner: W,
-        timeout: Duration,
-    }
-
-    impl<W> TimeoutWriter<W> {
-        pub fn new(inner: W) -> Self {
-            Self {
-                inner,
-                timeout: Duration::from_millis(500),
-            }
-        }
-    }
-
-    impl<W: ErrorType> ErrorType for TimeoutWriter<W> {
-        type Error = ErrorKind;
-    }
-
-    impl<W: Write> Write for TimeoutWriter<W> {
-        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-            match with_timeout(self.timeout, self.inner.write_all(buf)).await {
-                Ok(Ok(())) => Ok(buf.len()),
-                Ok(Err(_)) => Err(ErrorKind::Other),
-                Err(_) => Err(ErrorKind::TimedOut),
-            }
-        }
-
-        async fn flush(&mut self) -> Result<(), Self::Error> {
-            match with_timeout(self.timeout, self.inner.flush()).await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(_)) => Err(ErrorKind::Other),
-                Err(_) => Err(ErrorKind::TimedOut),
-            }
-        }
-    }
-}
-
 #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
 mod logging_impl {
     #[cfg(any(feature = "jtag-serial", feature = "auto"))]
-    use crate::logging::logging::timeout_impl::TimeoutWriter;
     use embedded_io_async::{ErrorType, Write};
     #[cfg(any(feature = "jtag-serial", feature = "auto"))]
     use esp_hal::peripherals::Peripherals;
@@ -147,7 +104,7 @@ mod logging_impl {
         #[cfg(any(feature = "uart", feature = "auto"))]
         Uart(Uart<'static, Async>),
         #[cfg(any(feature = "jtag-serial", feature = "auto"))]
-        Jtag(TimeoutWriter<UsbSerialJtag<'static, Async>>),
+        Jtag(UsbSerialJtag<'static, Async>),
     }
 
     impl ErrorType for Backend {
@@ -210,9 +167,8 @@ mod logging_impl {
         #[cfg(any(feature = "jtag-serial", feature = "auto"))]
         pub fn new_jtag(periphs: Peripherals, serialization_enabled: bool) -> Self {
             let raw_driver = UsbSerialJtag::new(periphs.USB_DEVICE).into_async();
-            let safe_driver = TimeoutWriter::new(raw_driver);
             Self {
-                inner: Backend::Jtag(safe_driver),
+                inner: Backend::Jtag(raw_driver),
                 serialization_enabled,
             }
         }

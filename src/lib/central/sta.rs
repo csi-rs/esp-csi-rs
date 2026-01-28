@@ -176,7 +176,7 @@ pub async fn sta_connection(controller: &mut WifiController<'_>) {
 }
 
 // This task manages network operations for the station
-pub async fn sta_network_ops(sta_stack: Stack<'_>, freq: Option<u16>) {
+pub async fn sta_network_ops(sta_stack: Stack<'_>, frequency_hz: Option<u16>) {
     // Retrieve acquired IP information from DHCP
     let ip_info = DHCP_CLIENT_INFO.wait().await;
 
@@ -207,9 +207,9 @@ pub async fn sta_network_ops(sta_stack: Stack<'_>, freq: Option<u16>) {
     let mut tx_ipv4_buffer = [0u8; 64];
 
     // Determine trigger frequency
-    let trigger_interval = match freq {
-        Some(freq) => 1000_u64 / freq as u64,
-        None => u32::MAX as u64,
+    let freq = match frequency_hz {
+        Some(freq) => freq as u64,
+        None => u16::MAX as u64,
     };
 
     // Initialize sequence counter
@@ -221,7 +221,7 @@ pub async fn sta_network_ops(sta_stack: Stack<'_>, freq: Option<u16>) {
     loop {
         match select(
             STOP_SIGNAL.wait(),
-            Timer::after(Duration::from_millis(trigger_interval)),
+            Timer::after(Duration::from_hz(freq)),
         )
         .await
         {

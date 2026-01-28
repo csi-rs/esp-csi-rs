@@ -330,9 +330,9 @@ impl<'a> CSINode<'a> {
                     // Initialize as Peripheral node with EspNowConfig
                     interfaces.esp_now.set_channel(esp_now_config.channel).unwrap();
                     log_ln!("esp-now version {}", interfaces.esp_now.version().unwrap());
-                    interfaces.esp_now
-                        .set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi)
-                        .unwrap();
+                    // interfaces.esp_now
+                    //     .set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi)
+                    //     .unwrap();
                     if is_collector {
                         process_csi_packet().await;
                         // join(main_task, process_csi_packet()).await;
@@ -433,8 +433,6 @@ pub fn get_avg_pps() -> u64 {
 }
 
 /// Sets CSI Configuration.
-/// - If `spawn_processor` is true (Collector Mode), it starts the processing task.
-/// - If `spawn_processor` is false (Listener Mode), it enables hardware but ignores data processing.
 fn set_csi(controller: &mut WifiController, config: CsiConfig) {
     // Set CSI Configuration with callback
     controller
@@ -508,7 +506,6 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
         timestamp: info.rx_ctrl.timestamp(),
         rx_state: info.rx_ctrl.rx_state(),
         sig_len: info.rx_ctrl.sig_len(),
-        packet_drop_count: 0, // Initialize to 0. The listener task will calculate the real value later.
         csi_data_len: csi_buf_len,
         csi_data: csi_data,
     };
@@ -591,9 +588,6 @@ pub async fn process_csi_packet() {
 
                 // Update tracker with new sequence
                 peer_tracker.insert(csi_packet.mac, current_seq);
-
-                // Assign the calculated global drop count to the packet
-                csi_packet.packet_drop_count = GLOBAL_DROP_COUNT.load(Ordering::Relaxed);
                 // --- DROP DETECTION LOGIC END ---
 
                 // Update the CSI data format
@@ -754,7 +748,6 @@ async fn reconstruct_raw_csi(raw_csi_data: &[u8]) -> Option<CSIDataPacket> {
         date_time: None,
         sequence_number,
         data_format,
-        packet_drop_count: 0,
         csi_data_len: csi_len,
         csi_data,
     };
