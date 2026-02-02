@@ -1,8 +1,6 @@
 #![no_std]
 
-use core::future::ready;
-
-use embassy_executor::Spawner;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use embassy_futures::join::join;
 use embassy_futures::select::{select, Either};
@@ -29,11 +27,11 @@ pub mod logging;
 pub mod peripheral;
 pub mod time;
 
-use crate::central::esp_now::{run_esp_now_central};
+use crate::central::esp_now::run_esp_now_central;
 use crate::central::sta::{run_sta_connect, sta_init};
 use crate::config::CsiConfig as CsiConfiguration;
 use crate::csi::{CSIDataPacket, RxCSIFmt};
-use crate::peripheral::esp_now::{run_esp_now_peripheral};
+use crate::peripheral::esp_now::run_esp_now_peripheral;
 
 // Watches
 // static PROCESSED_CSI_DATA: Watch<CriticalSectionRawMutex, CSIDataPacket, 3> = Watch::new();
@@ -148,7 +146,7 @@ type CSIRxSubscriber = Subscriber<
     CSIDataPacket,
     PROC_CSI_CH_CAPACITY,
     PROC_CSI_CH_SUBS,
-    2
+    2,
 >;
 
 pub struct CSIClient {
@@ -165,7 +163,7 @@ impl CSIClient {
     pub async fn get_csi_data(&mut self) -> CSIDataPacket {
         self.csi_subscriber.next_message_pure().await
     }
-    
+
     pub async fn print_csi_w_metadata(&mut self) {
         let packet = self.get_csi_data().await;
         packet.print_csi_w_metadata();
@@ -173,6 +171,23 @@ impl CSIClient {
 
     pub async fn send_stop(&self) {
         STOP_SIGNAL.signal(());
+    }
+}
+
+#[derive(IntoBytes, FromBytes, KnownLayout, Immutable)]
+#[repr(C, packed)]
+struct ControlPacket {
+    magic_number: u32,
+    is_collector: u8,
+}
+
+impl ControlPacket {
+    pub fn new(is_collector: bool) -> Self {
+        let is_collector_u8 = is_collector as u8;
+        Self {
+            magic_number: 0xA8912BF0,
+            is_collector: is_collector_u8,
+        }
     }
 }
 
@@ -195,7 +210,6 @@ impl<'a> CSINode<'a> {
         traffic_freq_hz: Option<u16>,
         hardware: CSINodeHardware<'a>,
     ) -> Self {
-        let csi_data_rx = PROCESSED_CSI_DATA.subscriber().unwrap();
         Self {
             kind,
             collection_mode,
@@ -308,7 +322,11 @@ impl<'a> CSINode<'a> {
             Node::Peripheral(op_mode) => match op_mode {
                 PeripheralOpMode::EspNow(esp_now_config) => {
                     // Initialize as Peripheral node with EspNowConfig
-                    let main_task = run_esp_now_peripheral(&mut interfaces.esp_now, esp_now_config);
+                    let main_task = run_esp_now_peripheral(
+                        &mut interfaces.esp_now,
+                        esp_now_config,
+                        self.traffic_freq_hz,
+                    );
                     if is_collector {
                         join(main_task, process_csi_packet()).await;
                     } else {
@@ -348,6 +366,7 @@ impl<'a> CSINode<'a> {
                         &mut interfaces.esp_now,
                         esp_now_config,
                         self.traffic_freq_hz,
+                        is_collector,
                     );
                     if is_collector {
                         join(main_task, process_csi_packet()).await;
@@ -356,7 +375,6 @@ impl<'a> CSINode<'a> {
                     }
                 }
                 CentralOpMode::WifiStation(sta_config) => {
-
                     // Initialize as Wifi Station Collector with WifiStationConfig
                     // 1. Connect to Wi-Fi network, etc.
                     // 2. Run DHCP, NTP sync if enabled in config, etc.

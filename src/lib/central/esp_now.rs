@@ -1,23 +1,21 @@
-use embassy_futures::join::join;
 use embassy_time::Timer;
+use heapless::Vec;
+use zerocopy::IntoBytes;
 
+use crate::ControlPacket;
 use crate::log_ln;
 use crate::STOP_SIGNAL;
 use esp_radio::esp_now::{
-    EspNow, EspNowManager, EspNowReceiver, EspNowSender, EspNowWifiInterface, PeerInfo,
+    EspNow,
     BROADCAST_ADDRESS,
 };
 
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
-
-use embassy_time::{Duration, Ticker};
+use embassy_time::{Duration};
 
 use embassy_futures::select::select;
 use embassy_futures::select::Either;
 
-use crate::reconstruct_raw_csi;
 use crate::EspNowConfig;
-use crate::PROCESSED_CSI_DATA;
 
 // macro to save a variable in static memory to stay forever in the program lifetime
 macro_rules! mk_static {
@@ -33,6 +31,7 @@ pub async fn run_esp_now_central(
     esp_now: &mut EspNow<'static>, // Borrow the hardware
     config: &EspNowConfig,
     frequency_hz: Option<u16>,
+    is_collector: bool,
 ) {
     // Configure
     esp_now.set_channel(config.channel).unwrap();
@@ -41,23 +40,12 @@ pub async fn run_esp_now_central(
     //     .set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi)
     //     .unwrap();
 
-    // Setup Initial Peers
-    if !esp_now.peer_exists(&BROADCAST_ADDRESS) {
-        esp_now
-            .add_peer(PeerInfo {
-                peer_address: BROADCAST_ADDRESS,
-                lmk: None,
-                channel: None,
-                encrypt: false,
-                interface: EspNowWifiInterface::Sta,
-            })
-            .unwrap();
-    }
-
     let freq = match frequency_hz {
         Some(freq) => freq as u64,
         None => u16::MAX as u64,
     };
+
+    let mut message_u8: Vec<u8, 9> = Vec::new();
     
     loop {
         // let current_timestamp = embassy_time::Instant::now();
@@ -77,26 +65,12 @@ pub async fn run_esp_now_central(
             Either::Second(inner_fut) => {
                 match inner_fut {
                     Either::First(_) => {
-                        // let elapsed = current_timestamp.elapsed().as_micros();
-                        // log_ln!("Send Broadcast at {:?}", elapsed);
-                        let _ = esp_now.send_async(&BROADCAST_ADDRESS, b"H").await;
-                        // log_ln!("Send broadcast status: {:?}", status);
+                        message_u8.clear();
+                        let control_packet = ControlPacket::new(is_collector);
+                        let _ = message_u8.extend_from_slice(control_packet.as_bytes());
+                        let _ = esp_now.send_async(&BROADCAST_ADDRESS, &message_u8).await;
                     }
                     Either::Second(r) => {
-                        if r.info.dst_address == BROADCAST_ADDRESS {
-                            if !esp_now.peer_exists(&r.info.src_address) {
-                                esp_now
-                                    .add_peer(PeerInfo {
-                                        interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
-                                        peer_address: r.info.src_address,
-                                        lmk: None,
-                                        channel: None,
-                                        encrypt: false,
-                                    })
-                                    .unwrap();
-                                log_ln!("Added peer {:?}", r.info.src_address);
-                            }
-                        }
                     }
                 }
             }
