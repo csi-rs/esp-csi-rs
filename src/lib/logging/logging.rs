@@ -7,16 +7,16 @@ mod csi_interface {
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
     use portable_atomic::AtomicU32;
     pub static CSI_CHANNEL: Channel<CriticalSectionRawMutex, CSIDataPacket, 10> = Channel::new();
-    pub static DROPPED_PACKETS: AtomicU32 = AtomicU32::new(0);
+    pub static LOG_DROPPED_PACKETS: AtomicU32 = AtomicU32::new(0);
 }
 
 #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
-pub use csi_interface::{CSI_CHANNEL, DROPPED_PACKETS};
+pub use csi_interface::{CSI_CHANNEL, LOG_DROPPED_PACKETS};
 use portable_atomic::Ordering;
 use postcard::experimental::max_size::MaxSize;
 
 pub fn get_log_packet_drops() -> u32 {
-    DROPPED_PACKETS.load(Ordering::Relaxed)
+    LOG_DROPPED_PACKETS.load(Ordering::Relaxed)
 }
 
 #[cfg(feature = "println")]
@@ -222,7 +222,7 @@ pub fn log_csi(packet: CSIDataPacket) {
         match CSI_CHANNEL.try_send(packet) {
             Ok(_) => {}
             Err(_) => {
-                DROPPED_PACKETS.fetch_add(1, Ordering::Relaxed);
+                LOG_DROPPED_PACKETS.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -341,18 +341,40 @@ async fn write_text_packet(packet: CSIDataPacket, driver: &mut LogOutput) -> Res
         write_line(driver, "timestamp", packet.timestamp).await?;
         write_line(driver, "sig len", packet.sig_len).await?;
         write_line(driver, "rx state", packet.rx_state).await?;
-        write_line(driver, "secondary channel", packet.secondary_channel).await?;
-        write_line(driver, "sgi", packet.sgi).await?;
-        write_line(driver, "ant", packet.antenna).await?;
-        write_line(driver, "ampdu cnt", packet.ampdu_cnt).await?;
-        write_line(driver, "sig_mode", packet.sig_mode).await?;
-        write_line(driver, "mcs", packet.mcs).await?;
-        write_line(driver, "cwb", packet.bandwidth).await?;
-        write_line(driver, "smoothing", packet.smoothing).await?;
-        write_line(driver, "not sounding", packet.not_sounding).await?;
-        write_line(driver, "aggregation", packet.aggregation).await?;
-        write_line(driver, "stbc", packet.stbc).await?;
-        write_line(driver, "fec coding", packet.fec_coding).await?;
+        #[cfg(not(feature = "esp32c6"))]
+        {
+            write_line(driver, "secondary channel", packet.secondary_channel).await?;
+            write_line(driver, "sgi", packet.sgi).await?;
+            write_line(driver, "ant", packet.antenna).await?;
+            write_line(driver, "ampdu cnt", packet.ampdu_cnt).await?;
+            write_line(driver, "sig_mode", packet.sig_mode).await?;
+            write_line(driver, "mcs", packet.mcs).await?;
+            write_line(driver, "cwb", packet.bandwidth).await?;
+            write_line(driver, "smoothing", packet.smoothing).await?;
+            write_line(driver, "not sounding", packet.not_sounding).await?;
+            write_line(driver, "aggregation", packet.aggregation).await?;
+            write_line(driver, "stbc", packet.stbc).await?;
+            write_line(driver, "fec coding", packet.fec_coding).await?;
+        }
+        #[cfg(feature = "esp32c6")]
+        {
+            write_line(driver, "dump len", packet.dump_len).await?;
+            write_line(driver, "he sigb len", packet.he_sigb_len).await?;
+            write_line(driver, "cur single mpdu", packet.cur_single_mpdu).await?;
+            write_line(driver, "cur bb format", packet.cur_bb_format).await?;
+            write_line(driver, "rx channel estimate info vld", packet.rx_channel_estimate_info_vld).await?;
+            write_line(driver, "rx channel estimate len", packet.rx_channel_estimate_len).await?;
+            write_line(driver, "time seconds", packet.second).await?;
+            write_line(driver, "channel", packet.channel).await?;
+            write_line(driver, "is group", packet.is_group).await?;
+            write_line(driver, "rxend state", packet.rxend_state).await?;
+            write_line(driver, "rxmatch3", packet.rxmatch3).await?;
+            write_line(driver, "rxmatch2", packet.rxmatch2).await?;
+            write_line(driver, "rxmatch1", packet.rxmatch1).await?;
+            write_line(driver, "rxmatch0", packet.rxmatch0).await?;
+            write_line(driver, "", packet.rxmatch0).await?;
+        }
+
         write_line(driver, "sig_len", packet.sig_len).await?;
         write_line(driver, "data length", packet.csi_data_len).await?;
 
@@ -436,7 +458,7 @@ pub async fn logger_backend(mut driver: LogOutput) {
                 match res {
                     Ok(_) => {}
                     Err(_) => {
-                        DROPPED_PACKETS.fetch_add(1, Ordering::Relaxed);
+                        LOG_DROPPED_PACKETS.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }

@@ -90,6 +90,7 @@ async fn run_net_task(mut sta_runner: Runner<'_, &mut WifiDevice<'_>>) {
     loop {
         match select(STOP_SIGNAL.wait(), sta_runner.run()).await {
             Either::First(_) => {
+                STOP_SIGNAL.signal(());
                 break;
             }
             Either::Second(_) => {}
@@ -160,6 +161,7 @@ pub async fn sta_connection(controller: &mut WifiController<'_>) {
         .await
         {
             Either::First(_) => {
+                STOP_SIGNAL.signal(());
                 break;
             }
             Either::Second(mut wait_event_fut) => {
@@ -227,6 +229,7 @@ pub async fn sta_network_ops(sta_stack: Stack<'_>, frequency_hz: Option<u16>) {
         {
             Either::First(_) => {
                 // Stop signal received, exit the loop
+                STOP_SIGNAL.signal(());
                 break;
             }
             Either::Second(_) => {

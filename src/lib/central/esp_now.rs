@@ -1,16 +1,14 @@
 use embassy_time::Timer;
+use esp_radio::esp_now::PeerInfo;
 use heapless::Vec;
 use zerocopy::IntoBytes;
 
-use crate::ControlPacket;
 use crate::log_ln;
+use crate::ControlPacket;
 use crate::STOP_SIGNAL;
-use esp_radio::esp_now::{
-    EspNow,
-    BROADCAST_ADDRESS,
-};
+use esp_radio::esp_now::{EspNow, BROADCAST_ADDRESS};
 
-use embassy_time::{Duration};
+use embassy_time::Duration;
 
 use embassy_futures::select::select;
 use embassy_futures::select::Either;
@@ -29,6 +27,7 @@ macro_rules! mk_static {
 
 pub async fn run_esp_now_central(
     esp_now: &mut EspNow<'static>, // Borrow the hardware
+    mac_addr: [u8; 6],
     config: &EspNowConfig,
     frequency_hz: Option<u16>,
     is_collector: bool,
@@ -36,9 +35,6 @@ pub async fn run_esp_now_central(
     // Configure
     esp_now.set_channel(config.channel).unwrap();
     log_ln!("esp-now version {}", esp_now.version().unwrap());
-    // esp_now
-    //     .set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi)
-    //     .unwrap();
 
     let freq = match frequency_hz {
         Some(freq) => freq as u64,
@@ -46,7 +42,7 @@ pub async fn run_esp_now_central(
     };
 
     let mut message_u8: Vec<u8, 9> = Vec::new();
-    
+
     loop {
         // let current_timestamp = embassy_time::Instant::now();
         match select(
@@ -60,20 +56,32 @@ pub async fn run_esp_now_central(
         {
             Either::First(_) => {
                 // Stop signal received, exit the loop
+                STOP_SIGNAL.signal(());
                 break;
             }
-            Either::Second(inner_fut) => {
-                match inner_fut {
-                    Either::First(_) => {
-                        message_u8.clear();
-                        let control_packet = ControlPacket::new(is_collector);
-                        let _ = message_u8.extend_from_slice(control_packet.as_bytes());
-                        let _ = esp_now.send_async(&BROADCAST_ADDRESS, &message_u8).await;
-                    }
-                    Either::Second(r) => {
+            Either::Second(inner_fut) => match inner_fut {
+                Either::First(_) => {
+                    message_u8.clear();
+                    let control_packet = ControlPacket::new(is_collector);
+                    let _ = message_u8.extend_from_slice(control_packet.as_bytes());
+                    let _ = esp_now.send_async(&BROADCAST_ADDRESS, &message_u8).await;
+                }
+                Either::Second(r) => {
+                    if r.info.dst_address == mac_addr {
+                        if !esp_now.peer_exists(&r.info.src_address) {
+                            esp_now
+                                .add_peer(PeerInfo {
+                                    interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
+                                    peer_address: r.info.src_address,
+                                    lmk: None,
+                                    channel: Some(11),
+                                    encrypt: false,
+                                })
+                                .unwrap();
+                        }
                     }
                 }
-            }
+            },
         }
     }
 

@@ -1,5 +1,6 @@
 #![no_std]
 
+use postcard::experimental::max_size::MaxSize;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use embassy_futures::join::join;
@@ -8,7 +9,7 @@ use embassy_sync::pubsub::{PubSubBehavior, Subscriber};
 
 use embassy_time::Instant;
 use esp_radio::esp_now::WifiPhyRate;
-use esp_radio::wifi::{ClientConfig, CsiConfig, Interfaces, WifiController};
+use esp_radio::wifi::{ClientConfig, CsiConfig, Interfaces, Protocol, WifiController};
 
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch};
 
@@ -33,30 +34,29 @@ use crate::config::CsiConfig as CsiConfiguration;
 use crate::csi::{CSIDataPacket, RxCSIFmt};
 use crate::peripheral::esp_now::run_esp_now_peripheral;
 
-// Watches
-// static PROCESSED_CSI_DATA: Watch<CriticalSectionRawMutex, CSIDataPacket, 3> = Watch::new();
+const PROC_CSI_CH_CAPACITY: usize = 20;
+const PROC_CSI_CH_SUBS: usize = 2;
 
 // PubSub Channels
 static CSI_PACKET: PubSubChannel<
     CriticalSectionRawMutex,
     CSIDataPacket,
     PROC_CSI_CH_CAPACITY,
-    2,
-    1,
-> = PubSubChannel::new();
-static PROCESSED_CSI_DATA: PubSubChannel<
-    CriticalSectionRawMutex,
-    CSIDataPacket,
-    PROC_CSI_CH_CAPACITY,
     PROC_CSI_CH_SUBS,
     2,
 > = PubSubChannel::new();
+// static PROCESSED_CSI_DATA: PubSubChannel<
+//     CriticalSectionRawMutex,
+//     CSIDataPacket,
+//     PROC_CSI_CH_CAPACITY,
+//     PROC_CSI_CH_SUBS,
+//     2,
+// > = PubSubChannel::new();
+static IS_COLLECTOR: AtomicBool = AtomicBool::new(false);
+static COLLECTION_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 // Signals
 static STOP_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-
-const PROC_CSI_CH_CAPACITY: usize = 20;
-const PROC_CSI_CH_SUBS: usize = 2;
 
 // macro_rules! mk_static {
 //     ($t:ty,$val:expr) => {{
@@ -66,6 +66,11 @@ const PROC_CSI_CH_SUBS: usize = 2;
 //         x
 //     }};
 // }
+
+fn set_runtime_collection_mode(is_collector: bool) {
+    IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
+    COLLECTION_MODE_CHANGED.signal(());
+}
 
 pub struct EspNowConfig {
     phy_rate: WifiPhyRate,
@@ -109,7 +114,6 @@ pub enum CentralOpMode {
 pub enum PeripheralOpMode {
     EspNow(EspNowConfig),
     WifiSniffer(WifiSnifferConfig),
-    EspNowMute(EspNowConfig)
 }
 
 pub enum Node {
@@ -156,7 +160,7 @@ pub struct CSIClient {
 impl CSIClient {
     pub fn new() -> Self {
         Self {
-            csi_subscriber: PROCESSED_CSI_DATA.subscriber().unwrap(),
+            csi_subscriber: CSI_PACKET.subscriber().unwrap(),
         }
     }
 
@@ -183,10 +187,9 @@ struct ControlPacket {
 
 impl ControlPacket {
     pub fn new(is_collector: bool) -> Self {
-        let is_collector_u8 = is_collector as u8;
         Self {
             magic_number: 0xA8912BF0,
-            is_collector: is_collector_u8,
+            is_collector: is_collector as u8,
         }
     }
 }
@@ -198,7 +201,6 @@ pub struct CSINode<'a> {
     csi_config: Option<CsiConfiguration>,
     /// Traffic Generation Frequency
     traffic_freq_hz: Option<u16>,
-    /// Receiver for Processed CSI Data Packets
     hardware: CSINodeHardware<'a>,
 }
 
@@ -279,6 +281,14 @@ impl<'a> CSINode<'a> {
         self.kind = mode;
     }
 
+    pub fn set_protocol(&mut self, protocol: Protocol) -> Result<(), esp_radio::wifi::WifiError> {
+        self.hardware.controller.set_protocol(protocol.into())
+    }
+
+    pub fn set_rate(&mut self, rate: WifiPhyRate) -> Result<(), esp_radio::esp_now::EspNowError> {
+        self.hardware.interfaces.esp_now.set_rate(rate)
+    }
+
     pub async fn run(&mut self) {
         let interfaces = &mut self.hardware.interfaces;
         let controller = &mut self.hardware.controller;
@@ -314,10 +324,13 @@ impl<'a> CSINode<'a> {
         log_ln!("Wi-Fi Controller Started");
 
         let is_collector = self.collection_mode == CollectionMode::Collector;
+        IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
 
         // Set Peripheral/Central to Collect CSI
         set_csi(controller, config);
-        // Initialize Nodes
+        let sniffer: &esp_radio::wifi::Sniffer<'_> = &interfaces.sniffer;
+
+        // Initialize Nodes based on type
         match &self.kind {
             Node::Peripheral(op_mode) => match op_mode {
                 PeripheralOpMode::EspNow(esp_now_config) => {
@@ -327,52 +340,25 @@ impl<'a> CSINode<'a> {
                         esp_now_config,
                         self.traffic_freq_hz,
                     );
-                    if is_collector {
-                        join(main_task, process_csi_packet()).await;
-                    } else {
-                        main_task.await;
-                    }
+                    join(main_task, run_process_csi_packet()).await;
                 }
                 PeripheralOpMode::WifiSniffer(sniffer_config) => {
                     let sniffer = &interfaces.sniffer;
                     sniffer.set_promiscuous_mode(true).unwrap();
-
-                    if is_collector {
-                        process_csi_packet().await;
-                    } else {
-                        STOP_SIGNAL.wait().await;
-                    }
+                    run_process_csi_packet().await;
                     sniffer.set_promiscuous_mode(false).unwrap();
-                }
-                PeripheralOpMode::EspNowMute(esp_now_config) => {
-                    // Initialize as Peripheral node with EspNowConfig
-                    interfaces.esp_now.set_channel(esp_now_config.channel).unwrap();
-                    log_ln!("esp-now version {}", interfaces.esp_now.version().unwrap());
-                    // interfaces.esp_now
-                    //     .set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi)
-                    //     .unwrap();
-                    if is_collector {
-                        process_csi_packet().await;
-                        // join(main_task, process_csi_packet()).await;
-                    } else {
-                        STOP_SIGNAL.wait().await;
-                        // main_task.await;
-                    }
                 }
             },
             Node::Central(op_mode) => match op_mode {
                 CentralOpMode::EspNow(esp_now_config) => {
                     let main_task = run_esp_now_central(
                         &mut interfaces.esp_now,
+                        interfaces.sta.mac_address(),
                         esp_now_config,
                         self.traffic_freq_hz,
                         is_collector,
                     );
-                    if is_collector {
-                        join(main_task, process_csi_packet()).await;
-                    } else {
-                        main_task.await;
-                    }
+                    join(main_task, run_process_csi_packet()).await;
                 }
                 CentralOpMode::WifiStation(sta_config) => {
                     // Initialize as Wifi Station Collector with WifiStationConfig
@@ -384,17 +370,16 @@ impl<'a> CSINode<'a> {
 
                     let main_task =
                         run_sta_connect(controller, self.traffic_freq_hz, sta_stack, sta_runner);
-                    if is_collector {
-                        join(main_task, process_csi_packet()).await;
-                    } else {
-                        main_task.await;
-                    }
+                    join(main_task, run_process_csi_packet()).await;
                 }
             },
         }
-        
+
         STOP_SIGNAL.reset();
-        controller.stop_async().await;
+        let _ = controller.stop_async().await;
+        GLOBAL_PACKET_COUNT.store(0, Ordering::Relaxed);
+        GLOBAL_DROP_COUNT.store(0, Ordering::Relaxed);
+        LOG_DROPPED_PACKETS.store(0, Ordering::Relaxed);
     }
 }
 
@@ -430,7 +415,7 @@ fn build_csi_config(csi_config: &CsiConfiguration) -> CsiConfig {
     }
 }
 
-use portable_atomic::{AtomicU32, AtomicU64, Ordering};
+use portable_atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 // Global counter for all drops across all MAC addresses
 static GLOBAL_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
 static GLOBAL_PACKET_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -462,11 +447,10 @@ fn set_csi(controller: &mut WifiController, config: CsiConfig) {
 
 // Function to capture CSI info from callback and publish to channel
 fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
-    GLOBAL_PACKET_COUNT.fetch_add(1, Ordering::Relaxed);
-    if CSI_PACKET.is_full() {
-        GLOBAL_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+    if IS_COLLECTOR.load(Ordering::Relaxed) == false {
         return;
     }
+
     let rssi = if info.rx_ctrl.rssi() > 127 {
         info.rx_ctrl.rssi() - 256
     } else {
@@ -485,12 +469,6 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
             return;
         }
     }
-    // for data in 0..csi_buf_len {
-    //     unsafe {
-    //         let value = *csi_buf.add(data as usize);
-    //         csi_data.push(value).expect("Exceeded maximum capacity");
-    //     }
-    // }
 
     #[cfg(not(feature = "esp32c6"))]
     let csi_packet = CSIDataPacket {
@@ -566,95 +544,76 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
     };
 
     CSI_PACKET.publish_immediate(csi_packet);
+    GLOBAL_PACKET_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
-pub async fn process_csi_packet() {
+pub async fn run_process_csi_packet() {
     // Initialize CSI process start time
     GLOBAL_CAPTURE_START_TIME.store(Instant::now().as_ticks(), Ordering::Relaxed);
     // Subscribe to CSI packet capture updates
     let mut csi_packet_sub = CSI_PACKET.subscriber().unwrap();
-    let proc_csi_packet_sender = PROCESSED_CSI_DATA.publisher().unwrap();
     // Map to track sequence numbers per MAC address
     let mut peer_tracker: BTreeMap<[u8; 6], u16> = BTreeMap::new();
-    // Loop that will process CSI data as soon as it arrives
+    let mut is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
+
     loop {
-        match select(STOP_SIGNAL.wait(), csi_packet_sub.next_message_pure()).await {
+        match select(
+            STOP_SIGNAL.wait(),
+            select(
+                COLLECTION_MODE_CHANGED.wait(),
+                csi_packet_sub.next_message_pure(),
+            ),
+        )
+        .await
+        {
             Either::First(_) => {
-                // Stop signal received, exit the loop
+                STOP_SIGNAL.signal(());
                 break;
             }
-            Either::Second(mut csi_packet) => {
-                // --- DROP DETECTION LOGIC START ---
-                let current_seq = csi_packet.sequence_number;
+            Either::Second(inner) => {
+                match inner {
+                    Either::First(_) => {
+                        COLLECTION_MODE_CHANGED.reset();
+                        is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
+                        GLOBAL_PACKET_COUNT.store(0, Ordering::Relaxed);
+                        GLOBAL_DROP_COUNT.store(0, Ordering::Relaxed);
+                        LOG_DROPPED_PACKETS.store(0, Ordering::Relaxed);
+                        GLOBAL_CAPTURE_START_TIME
+                            .store(Instant::now().as_ticks(), Ordering::Relaxed);
+                    }
+                    Either::Second(csi_packet) => {
+                        if is_collector {
+                            let current_seq = csi_packet.sequence_number;
 
-                // Check if we have seen this MAC before
-                if let Some(&last_seq) = peer_tracker.get(&csi_packet.mac) {
-                    // Station Mode / Hardware Sequence Number Fix:
-                    // WiFi hardware sequence numbers (802.11) are 12-bit (0-4095).
-                    // We use '& 0x0FFF' to handle the wraparound from 4095 -> 0 correctly.
-                    let diff = (current_seq.wrapping_sub(last_seq)) & 0x0FFF;
+                            // Check if we have seen this MAC before
+                            if let Some(&last_seq) = peer_tracker.get(&csi_packet.mac) {
+                                // Station Mode / Hardware Sequence Number Fix:
+                                // WiFi hardware sequence numbers (802.11) are 12-bit (0-4095).
+                                // We use '& 0x0FFF' to handle the wraparound from 4095 -> 0 correctly.
+                                let diff = (current_seq.wrapping_sub(last_seq)) & 0x0FFF;
 
-                    if diff > 1 {
-                        let lost = (diff - 1) as u32;
+                                if diff > 1 {
+                                    let lost = (diff - 1) as u32;
 
-                        // Sanity check for huge gaps (e.g. router reset)
-                        if lost < 500 {
-                            GLOBAL_DROP_COUNT.fetch_add(lost, Ordering::Relaxed);
+                                    // Sanity check for huge gaps (e.g. router reset)
+                                    if lost < 500 {
+                                        GLOBAL_DROP_COUNT.fetch_add(lost, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+
+                            // Update tracker with new sequence
+                            peer_tracker.insert(csi_packet.mac, current_seq);
+                            // --- DROP DETECTION LOGIC END ---
                         }
                     }
                 }
-
-                // Update tracker with new sequence
-                peer_tracker.insert(csi_packet.mac, current_seq);
-                // --- DROP DETECTION LOGIC END ---
-
-                // Update the CSI data format
-                #[cfg(not(feature = "esp32c6"))]
-                {
-                    csi_packet.csi_fmt_from_params();
-                }
-
-                // Process Date/Time if Date Time is valid/supported
-                // if DATE_TIME_VALID.load(core::sync::atomic::Ordering::Relaxed) {
-                //     let dt_cap = DATE_TIME.get().await;
-                //     let elapsed_time = Instant::now()
-                //         .checked_duration_since(dt_cap.captured_at)
-                //         .unwrap_or(Duration::from_secs(0));
-                //     // Add seconds and adjust for overflow from milliseconds
-                //     let total_time_secs = dt_cap.captured_secs + elapsed_time.as_secs();
-
-                //     // Add milliseconds and adjust if they exceed 1000
-                //     let total_millis = dt_cap.captured_millis + elapsed_time.as_millis();
-                //     let extra_secs = total_millis / 1000; // 1000ms = 1 second
-                //     let final_millis = total_millis % 1000; // Remainder in milliseconds
-
-                //     // Add extra seconds from milliseconds overflow to total seconds
-                //     let total_time_secs = total_time_secs + extra_secs;
-
-                //     // Now call the date-time conversion function
-                //     let (year, month, day, hour, minute, second, millisecond) =
-                //         unix_to_date_time(total_time_secs, final_millis);
-
-                //     let dt = DateTime {
-                //         year,
-                //         month,
-                //         day,
-                //         hour,
-                //         minute,
-                //         second,
-                //         millisecond,
-                //     };
-
-                //     csi_packet.date_time = Some(dt);
-                // }
-                // Update the Watch with the processed CSI
-                proc_csi_packet_sender.publish_immediate(csi_packet);
             }
         }
     }
 }
 
-use crate::logging::logging::get_log_packet_drops;
+use crate::logging::logging::{get_log_packet_drops, LOG_DROPPED_PACKETS};
 
 pub fn get_dropped_packets() -> u32 {
     GLOBAL_DROP_COUNT.load(Ordering::Relaxed) + get_log_packet_drops()

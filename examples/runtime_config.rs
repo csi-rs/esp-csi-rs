@@ -60,11 +60,16 @@ async fn node_task_listener(mut client: &mut CSIClient) {
 
 async fn node_task_collector(mut client: &mut CSIClient) {
     log_ln!("Starting Collector Task");
-    let mut last_log_time = Instant::now();
 
     with_timeout(Duration::from_secs(10), async {
         loop {
-            client.print_csi_w_metadata().await;
+            Timer::after_secs(1).await;
+            log_ln!(
+                "Total Packets: {}, Average PPS: {}, Dropped Packets: {}",
+                get_total_packets(),
+                get_avg_pps(),
+                get_dropped_packets()
+            )
         }
     })
     .await
@@ -109,17 +114,20 @@ async fn main(spawner: Spawner) -> ! {
     let mut node_handle = CSIClient::new();
     let mut csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
+        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(
             (EspNowConfig::default()),
         )),
-        CollectionMode::Listener,
+        CollectionMode::Collector,
         Some(CsiConfig::default()),
         Some(1000),
         csi_hardware,
     );
-    join(node.run(), node_task_listener(&mut node_handle)).await;
-    node.set_collection_mode(CollectionMode::Collector);
+    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR).unwrap();
+    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi).unwrap();
+    
     join(node.run(), node_task_collector(&mut node_handle)).await;
+    node.set_collection_mode(CollectionMode::Listener);
+    join(node.run(), node_task_listener(&mut node_handle)).await;
 
     loop {
         log_ln!("Hello world!");

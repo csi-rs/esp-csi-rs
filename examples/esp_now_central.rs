@@ -3,13 +3,13 @@
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_time::{Duration, Instant, Timer, with_timeout};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use esp_csi_rs::{
     config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
     PeripheralOpMode,
 };
 use esp_csi_rs::{
-    CSIClient, CSINodeHardware, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
+    get_avg_pps, get_dropped_packets, get_total_packets, log_ln, CSIClient, CSINodeHardware,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -44,22 +44,17 @@ macro_rules! mk_static {
 }
 
 async fn node_task(client: &mut CSIClient) {
-    let mut last_log_time = Instant::now();
-
     with_timeout(Duration::from_secs(1000), async {
-            loop {
-                Timer::after_millis(10).await;
-                // if last_log_time.elapsed() >= Duration::from_secs(1) {
-                //     log_ln!(
-                //         "Total Packets: {}, Average PPS: {}, Dropped Packets: {}",
-                //         get_total_packets(),
-                //         get_avg_pps(),
-                //         get_dropped_packets()
-                //     );
-                //     last_log_time = Instant::now();
-                // }
-            }
-        })
+        loop {
+            Timer::after_secs(1).await;
+            log_ln!(
+                "Total Packets: {}, Average PPS: {}, Dropped Packets: {}",
+                get_total_packets(),
+                get_avg_pps(),
+                get_dropped_packets()
+            )
+        }
+    })
     .await
     .unwrap_err();
     client.send_stop().await;
@@ -105,15 +100,13 @@ async fn main(spawner: Spawner) -> ! {
         esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow((EspNowConfig::default()))),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
-        Some(10000),
-        csi_hardware
+        Some(1000),
+        csi_hardware,
     );
+    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR).unwrap();
+    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi).unwrap();
 
-    join(
-        node.run(),
-        node_task(&mut node_handle),
-    )
-    .await;
+    join(node.run(), node_task(&mut node_handle)).await;
 
     loop {
         log_ln!("Hello world!");
