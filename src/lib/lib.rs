@@ -1,21 +1,21 @@
 #![no_std]
 
-use postcard::experimental::max_size::MaxSize;
+use portable_atomic::AtomicI64;
+
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use embassy_futures::join::join;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select3, Either3};
 use embassy_sync::pubsub::{PubSubBehavior, Subscriber};
 
 use embassy_time::Instant;
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::{ClientConfig, CsiConfig, Interfaces, Protocol, WifiController};
 
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, watch::Watch};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_sync::signal::Signal;
-// use embassy_sync::watch::Receiver;
 
 use heapless::Vec;
 extern crate alloc;
@@ -45,27 +45,15 @@ static CSI_PACKET: PubSubChannel<
     PROC_CSI_CH_SUBS,
     2,
 > = PubSubChannel::new();
-// static PROCESSED_CSI_DATA: PubSubChannel<
-//     CriticalSectionRawMutex,
-//     CSIDataPacket,
-//     PROC_CSI_CH_CAPACITY,
-//     PROC_CSI_CH_SUBS,
-//     2,
-// > = PubSubChannel::new();
+
 static IS_COLLECTOR: AtomicBool = AtomicBool::new(false);
 static COLLECTION_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+static CENTRAL_MAGIC_NUMBER: u32 = 0xA8912BF0;
+static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
+static AVG_LATENCY: AtomicI64 = AtomicI64::new(0);
 
 // Signals
 static STOP_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-
-// macro_rules! mk_static {
-//     ($t:ty,$val:expr) => {{
-//         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-//         #[deny(unused_attributes)]
-//         let x = STATIC_CELL.uninit().write(($val));
-//         x
-//     }};
-// }
 
 fn set_runtime_collection_mode(is_collector: bool) {
     IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
@@ -179,17 +167,39 @@ impl CSIClient {
 }
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable)]
-#[repr(C, packed)]
-struct ControlPacket {
-    magic_number: u32,
-    is_collector: u8,
+#[repr(C)]
+pub struct ControlPacket {
+    magic_number: u32,        // Magic number to identify packet type
+    is_collector: u8,         // 1 = Collector, 0 = Listener
+    _padding: [u8; 3],        // Align t1 to 8-byte boundary
+    central_send_uptime: u64, // When Central sent this Control Packet
 }
 
 impl ControlPacket {
     pub fn new(is_collector: bool) -> Self {
         Self {
-            magic_number: 0xA8912BF0,
+            magic_number: CENTRAL_MAGIC_NUMBER,
             is_collector: is_collector as u8,
+            _padding: [0u8; 3],
+            central_send_uptime: Instant::now().as_micros(),
+        }
+    }
+}
+
+#[derive(IntoBytes, FromBytes, KnownLayout, Immutable)]
+#[repr(C)]
+pub struct PeripheralPacket {
+    magic_number: u32,        // Magic number to identify packet type
+    _padding: [u8; 4],        // Align timestamps to 8-byte boundary
+    central_send_uptime: u64, // When Central sent the Control Packet
+}
+
+impl PeripheralPacket {
+    pub fn new(central_send_uptime: u64) -> Self {
+        Self {
+            magic_number: PERIPHERAL_MAGIC_NUMBER,
+            _padding: [0u8; 4],
+            central_send_uptime,
         }
     }
 }
@@ -202,6 +212,8 @@ pub struct CSINode<'a> {
     /// Traffic Generation Frequency
     traffic_freq_hz: Option<u16>,
     hardware: CSINodeHardware<'a>,
+    protocol: Option<Protocol>,
+    rate: Option<WifiPhyRate>,
 }
 
 impl<'a> CSINode<'a> {
@@ -218,6 +230,8 @@ impl<'a> CSINode<'a> {
             csi_config,
             traffic_freq_hz,
             hardware,
+            protocol: Some(Protocol::P802D11BGNLR),
+            rate: Some(WifiPhyRate::RateMcs0Lgi),
         }
     }
 
@@ -234,6 +248,8 @@ impl<'a> CSINode<'a> {
             csi_config,
             traffic_freq_hz,
             hardware,
+            protocol: Some(Protocol::P802D11BGNLR),
+            rate: Some(WifiPhyRate::RateMcs0Lgi),
         }
     }
 
@@ -281,12 +297,12 @@ impl<'a> CSINode<'a> {
         self.kind = mode;
     }
 
-    pub fn set_protocol(&mut self, protocol: Protocol) -> Result<(), esp_radio::wifi::WifiError> {
-        self.hardware.controller.set_protocol(protocol.into())
+    pub fn set_protocol(&mut self, protocol: Protocol) {
+        self.protocol = Some(protocol);
     }
 
-    pub fn set_rate(&mut self, rate: WifiPhyRate) -> Result<(), esp_radio::esp_now::EspNowError> {
-        self.hardware.interfaces.esp_now.set_rate(rate)
+    pub fn set_rate(&mut self, rate: WifiPhyRate) {
+        self.rate = Some(rate);
     }
 
     pub async fn run(&mut self) {
@@ -319,6 +335,13 @@ impl<'a> CSINode<'a> {
             }
         };
 
+        // Apply Protocol if specified
+        if let Some(protocol) = self.protocol.take() {
+            let old_protocol = reconstruct_protocol(&protocol);
+            controller.set_protocol(protocol.into()).unwrap();
+            self.protocol = Some(old_protocol);
+        }
+
         // Start the controller
         controller.start_async().await.unwrap();
         log_ln!("Wi-Fi Controller Started");
@@ -335,11 +358,13 @@ impl<'a> CSINode<'a> {
             Node::Peripheral(op_mode) => match op_mode {
                 PeripheralOpMode::EspNow(esp_now_config) => {
                     // Initialize as Peripheral node with EspNowConfig
-                    let main_task = run_esp_now_peripheral(
-                        &mut interfaces.esp_now,
-                        esp_now_config,
-                        self.traffic_freq_hz,
-                    );
+                    if let Some(rate) = self.rate.take() {
+                        let old_rate = reconstruct_wifi_rate(&rate);
+                        let _ = interfaces.esp_now.set_rate(rate);
+                        self.rate = Some(old_rate);
+                    }
+
+                    let main_task = run_esp_now_peripheral(&mut interfaces.esp_now, esp_now_config);
                     join(main_task, run_process_csi_packet()).await;
                 }
                 PeripheralOpMode::WifiSniffer(sniffer_config) => {
@@ -351,6 +376,13 @@ impl<'a> CSINode<'a> {
             },
             Node::Central(op_mode) => match op_mode {
                 CentralOpMode::EspNow(esp_now_config) => {
+                    // Initialize as Central node with EspNowConfig
+                    if let Some(rate) = self.rate.take() {
+                        let old_rate = reconstruct_wifi_rate(&rate);
+                        let _ = interfaces.esp_now.set_rate(rate);
+                        self.rate = Some(old_rate);
+                    }
+
                     let main_task = run_esp_now_central(
                         &mut interfaces.esp_now,
                         interfaces.sta.mac_address(),
@@ -379,7 +411,7 @@ impl<'a> CSINode<'a> {
         let _ = controller.stop_async().await;
         GLOBAL_PACKET_COUNT.store(0, Ordering::Relaxed);
         GLOBAL_DROP_COUNT.store(0, Ordering::Relaxed);
-        LOG_DROPPED_PACKETS.store(0, Ordering::Relaxed);
+        reset_global_log_drops();
     }
 }
 
@@ -557,207 +589,112 @@ pub async fn run_process_csi_packet() {
     let mut is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
 
     loop {
-        match select(
+        match select3(
             STOP_SIGNAL.wait(),
-            select(
-                COLLECTION_MODE_CHANGED.wait(),
-                csi_packet_sub.next_message_pure(),
-            ),
+            COLLECTION_MODE_CHANGED.wait(),
+            csi_packet_sub.next_message_pure(),
         )
         .await
         {
-            Either::First(_) => {
+            Either3::First(_) => {
                 STOP_SIGNAL.signal(());
                 break;
             }
-            Either::Second(inner) => {
-                match inner {
-                    Either::First(_) => {
-                        COLLECTION_MODE_CHANGED.reset();
-                        is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
-                        GLOBAL_PACKET_COUNT.store(0, Ordering::Relaxed);
-                        GLOBAL_DROP_COUNT.store(0, Ordering::Relaxed);
-                        LOG_DROPPED_PACKETS.store(0, Ordering::Relaxed);
-                        GLOBAL_CAPTURE_START_TIME
-                            .store(Instant::now().as_ticks(), Ordering::Relaxed);
-                    }
-                    Either::Second(csi_packet) => {
-                        if is_collector {
-                            let current_seq = csi_packet.sequence_number;
+            Either3::Second(_) => {
+                COLLECTION_MODE_CHANGED.reset();
+                is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
+                GLOBAL_PACKET_COUNT.store(0, Ordering::Relaxed);
+                GLOBAL_DROP_COUNT.store(0, Ordering::Relaxed);
+                reset_global_log_drops();
+                GLOBAL_CAPTURE_START_TIME.store(Instant::now().as_ticks(), Ordering::Relaxed);
+            }
+            Either3::Third(csi_packet) => {
+                if is_collector {
+                    let current_seq = csi_packet.sequence_number;
 
-                            // Check if we have seen this MAC before
-                            if let Some(&last_seq) = peer_tracker.get(&csi_packet.mac) {
-                                // Station Mode / Hardware Sequence Number Fix:
-                                // WiFi hardware sequence numbers (802.11) are 12-bit (0-4095).
-                                // We use '& 0x0FFF' to handle the wraparound from 4095 -> 0 correctly.
-                                let diff = (current_seq.wrapping_sub(last_seq)) & 0x0FFF;
+                    // Check if we have seen this MAC before
+                    if let Some(&last_seq) = peer_tracker.get(&csi_packet.mac) {
+                        // Station Mode / Hardware Sequence Number Fix:
+                        // WiFi hardware sequence numbers (802.11) are 12-bit (0-4095).
+                        // We use '& 0x0FFF' to handle the wraparound from 4095 -> 0 correctly.
+                        let diff = (current_seq.wrapping_sub(last_seq)) & 0x0FFF;
 
-                                if diff > 1 {
-                                    let lost = (diff - 1) as u32;
+                        if diff > 1 {
+                            let lost = (diff - 1) as u32;
 
-                                    // Sanity check for huge gaps (e.g. router reset)
-                                    if lost < 500 {
-                                        GLOBAL_DROP_COUNT.fetch_add(lost, Ordering::Relaxed);
-                                    }
-                                }
+                            // Sanity check for huge gaps (e.g. router reset)
+                            if lost < 500 {
+                                GLOBAL_DROP_COUNT.fetch_add(lost, Ordering::Relaxed);
                             }
-
-                            // Update tracker with new sequence
-                            peer_tracker.insert(csi_packet.mac, current_seq);
-                            // --- DROP DETECTION LOGIC END ---
                         }
                     }
+
+                    // Update tracker with new sequence
+                    peer_tracker.insert(csi_packet.mac, current_seq);
+                    // --- DROP DETECTION LOGIC END ---
                 }
             }
         }
     }
 }
 
-use crate::logging::logging::{get_log_packet_drops, LOG_DROPPED_PACKETS};
+use crate::logging::logging::{get_log_packet_drops, reset_global_log_drops};
 
 pub fn get_dropped_packets() -> u32 {
     GLOBAL_DROP_COUNT.load(Ordering::Relaxed) + get_log_packet_drops()
 }
 
-/// Reconstructs a `CSIDataPacket` from a raw message buffer received in collector mode.
-///
-/// The expected format of `raw_csi_data` is:
-/// - Bytes 0-1: u16 sequence_number (big-endian)
-/// - Byte 2: u8 data_format (as repr of RxCSIFmt)
-/// - Bytes 3-6: u32 timestamp (big-endian)
-/// - Bytes 7..end: CSI data (u8 cast from original i8, up to 612 bytes)
-///
-/// Fields not transmitted (e.g., MAC, RSSI, rate, etc.) are set to default values:
-/// - u32/i32 fields: 0
-/// - mac: [0; 6]
-/// - date_time: None
-/// - sig_len: 0 (cannot be reliably reconstructed without additional data)
-/// - rx_state: 0 (assumes no error)
-///
-/// Returns an error if the buffer length is invalid (<7 bytes or CSI data >612 bytes).
-async fn reconstruct_raw_csi(raw_csi_data: &[u8]) -> Option<CSIDataPacket> {
-    // Retrive the new CSI raw data from UDP channel
-    // let raw_csi_data = CSI_RAW_CH.receive().await;
+pub fn get_avg_latency() -> i64 {
+    AVG_LATENCY.load(Ordering::Relaxed)
+}
 
-    if raw_csi_data.len() < 7 {
-        return None;
+fn reconstruct_wifi_rate(rate: &WifiPhyRate) -> WifiPhyRate {
+    match rate {
+        WifiPhyRate::Rate1mL => WifiPhyRate::Rate1mL,
+        WifiPhyRate::Rate2m => WifiPhyRate::Rate2m,
+        WifiPhyRate::Rate5mL => WifiPhyRate::Rate5mL,
+        WifiPhyRate::Rate11mL => WifiPhyRate::Rate11mL,
+        WifiPhyRate::Rate2mS => WifiPhyRate::Rate2mS,
+        WifiPhyRate::Rate5mS => WifiPhyRate::Rate5mS,
+        WifiPhyRate::Rate11mS => WifiPhyRate::Rate11mS,
+        WifiPhyRate::Rate48m => WifiPhyRate::Rate48m,
+        WifiPhyRate::Rate24m => WifiPhyRate::Rate24m,
+        WifiPhyRate::Rate12m => WifiPhyRate::Rate12m,
+        WifiPhyRate::Rate6m => WifiPhyRate::Rate6m,
+        WifiPhyRate::Rate54m => WifiPhyRate::Rate54m,
+        WifiPhyRate::Rate36m => WifiPhyRate::Rate36m,
+        WifiPhyRate::Rate18m => WifiPhyRate::Rate18m,
+        WifiPhyRate::Rate9m => WifiPhyRate::Rate9m,
+        WifiPhyRate::RateMcs0Lgi => WifiPhyRate::RateMcs0Lgi,
+        WifiPhyRate::RateMcs1Lgi => WifiPhyRate::RateMcs1Lgi,
+        WifiPhyRate::RateMcs2Lgi => WifiPhyRate::RateMcs2Lgi,
+        WifiPhyRate::RateMcs3Lgi => WifiPhyRate::RateMcs3Lgi,
+        WifiPhyRate::RateMcs4Lgi => WifiPhyRate::RateMcs4Lgi,
+        WifiPhyRate::RateMcs5Lgi => WifiPhyRate::RateMcs5Lgi,
+        WifiPhyRate::RateMcs6Lgi => WifiPhyRate::RateMcs6Lgi,
+        WifiPhyRate::RateMcs7Lgi => WifiPhyRate::RateMcs7Lgi,
+        WifiPhyRate::RateMcs0Sgi => WifiPhyRate::RateMcs0Sgi,
+        WifiPhyRate::RateMcs1Sgi => WifiPhyRate::RateMcs1Sgi,
+        WifiPhyRate::RateMcs2Sgi => WifiPhyRate::RateMcs2Sgi,
+        WifiPhyRate::RateMcs3Sgi => WifiPhyRate::RateMcs3Sgi,
+        WifiPhyRate::RateMcs4Sgi => WifiPhyRate::RateMcs4Sgi,
+        WifiPhyRate::RateMcs5Sgi => WifiPhyRate::RateMcs5Sgi,
+        WifiPhyRate::RateMcs6Sgi => WifiPhyRate::RateMcs6Sgi,
+        WifiPhyRate::RateMcs7Sgi => WifiPhyRate::RateMcs7Sgi,
+        WifiPhyRate::RateLora250k => WifiPhyRate::RateLora250k,
+        WifiPhyRate::RateLora500k => WifiPhyRate::RateLora500k,
+        WifiPhyRate::RateMax => WifiPhyRate::RateMax,
     }
+}
 
-    let csi_data_start = 13;
-    let csi_len = (raw_csi_data.len() - csi_data_start) as u16;
-    if csi_len > 612 {
-        return None;
+fn reconstruct_protocol(protocol: &Protocol) -> Protocol {
+    match protocol {
+        Protocol::P802D11B => Protocol::P802D11B,
+        Protocol::P802D11BG => Protocol::P802D11BG,
+        Protocol::P802D11BGN => Protocol::P802D11BGN,
+        Protocol::P802D11BGNLR => Protocol::P802D11BGNLR,
+        Protocol::P802D11LR => Protocol::P802D11LR,
+        Protocol::P802D11BGNAX => Protocol::P802D11BGNAX,
+        _ => Protocol::P802D11BGNLR,
     }
-
-    // Extract sequence_number (u16 Big Endian)
-    let sequence_number = u16::from_be_bytes([raw_csi_data[0], raw_csi_data[1]]);
-
-    // Extract data_format (u8 -> RxCSIFmt)
-    #[cfg(not(feature = "esp32c6"))]
-    let fmt_u8 = raw_csi_data[2];
-    #[cfg(not(feature = "esp32c6"))]
-    let (data_format, bandwidth, sig_mode, stbc, secondary_channel) = match fmt_u8 {
-        0 => (RxCSIFmt::Bw20, 0, 0, 0, 0),
-        1 => (RxCSIFmt::HtBw20, 0, 1, 0, 0),
-        2 => (RxCSIFmt::HtBw20Stbc, 0, 1, 1, 0),
-        3 => (RxCSIFmt::SecbBw20, 0, 0, 0, 2),
-        4 => (RxCSIFmt::SecbHtBw20, 0, 1, 0, 2),
-        5 => (RxCSIFmt::SecbHtBw20Stbc, 0, 1, 1, 2),
-        6 => (RxCSIFmt::SecbHtBw40, 1, 1, 0, 2),
-        7 => (RxCSIFmt::SecbHtBw40Stbc, 1, 1, 1, 2),
-        8 => (RxCSIFmt::SecaBw20, 0, 0, 0, 1),
-        9 => (RxCSIFmt::SecaHtBw20, 0, 1, 0, 1),
-        10 => (RxCSIFmt::SecaHtBw20Stbc, 0, 1, 1, 1),
-        11 => (RxCSIFmt::SecaHtBw40, 1, 1, 0, 1),
-        12 => (RxCSIFmt::SecaHtBw40Stbc, 1, 1, 1, 1),
-        _ => (RxCSIFmt::Undefined, 0, 0, 0, 0),
-    };
-
-    // Extract timestamp (u32 BE)
-    let timestamp = u32::from_be_bytes([
-        raw_csi_data[3],
-        raw_csi_data[4],
-        raw_csi_data[5],
-        raw_csi_data[6],
-    ]);
-
-    let mac_address = [
-        raw_csi_data[7],
-        raw_csi_data[8],
-        raw_csi_data[9],
-        raw_csi_data[10],
-        raw_csi_data[11],
-        raw_csi_data[12],
-    ];
-
-    // Reconstruct CSI data (u8 -> i8, preserving sign via bit reinterpretation)
-    let mut csi_data = Vec::new();
-    for &b in &raw_csi_data[csi_data_start..] {
-        csi_data
-            .push(b as i8)
-            .map_err(|_| "Failed to push to Vec (capacity exceeded)")
-            .unwrap();
-    }
-
-    // Build CSIDataPacket with defaults for missing fields
-    #[cfg(not(feature = "esp32c6"))]
-    let data_packet = CSIDataPacket {
-        mac: mac_address,
-        rssi: 0,
-        timestamp,
-        rate: 0,
-        sgi: 0,
-        secondary_channel: secondary_channel,
-        channel: 0,
-        bandwidth: bandwidth,
-        antenna: 0,
-        sig_mode: sig_mode,
-        mcs: 0,
-        smoothing: 0,
-        not_sounding: 0,
-        aggregation: 0,
-        stbc: stbc,
-        fec_coding: 0,
-        ampdu_cnt: 0,
-        noise_floor: 0,
-        rx_state: 0,
-        sig_len: 0,
-        date_time: None,
-        sequence_number,
-        data_format,
-        csi_data_len: csi_len,
-        csi_data,
-    };
-
-    #[cfg(feature = "esp32c6")]
-    let data_packet = CSIDataPacket {
-        mac: mac_address,
-        rssi: 0,
-        timestamp,
-        rate: 0,
-        noise_floor: 0,
-        sig_len: 0,
-        rx_state: 0,
-        dump_len: 0,
-        he_sigb_len: 0,
-        cur_single_mpdu: 0,
-        cur_bb_format: 0,
-        rx_channel_estimate_info_vld: 0,
-        rx_channel_estimate_len: 0,
-        second: 0,
-        channel: 0,
-        is_group: 0,
-        rxend_state: 0,
-        rxmatch3: 0,
-        rxmatch2: 0,
-        rxmatch1: 0,
-        rxmatch0: 0,
-        date_time: None,
-        sequence_number,
-        data_format: RxCSIFmt::Undefined,
-        csi_data_len: csi_len,
-        csi_data,
-    };
-
-    Some(data_packet)
 }

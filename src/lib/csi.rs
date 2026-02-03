@@ -1,8 +1,6 @@
 use heapless::Vec;
 use postcard::experimental::max_size::MaxSize;
 use serde::{Deserialize, Serialize};
-
-use crate::log_ln;
 use crate::time::DateTime;
 
 /// A mapping of the different possible recieved CSI data formats supported by the Espressif WiFi driver.

@@ -40,6 +40,7 @@ println = [
 jtag-serial = ["esp-println/jtag-serial"]
 auto = ["esp-println/auto"]
 uart = ["esp-println/uart"]
+no-print = ["esp-println/no-op"]
 
 ## Support for the ESP32
 # esp32 = [
@@ -190,16 +191,18 @@ zerocopy = { version = "0.8.37", default-features = false, features = ["derive"]
 [profile.dev]
 # Rust debug is too slow.
 # For debug builds always builds with some optimization
+incremental = true
+debug = 2
 opt-level = "s"
 
 [profile.release]
 codegen-units = 1        # LLVM can perform better optimizations using a single thread
-debug = 2
 debug-assertions = false
 incremental = false
 lto = 'fat'
-opt-level = 's'
+opt-level = 'z'
 overflow-checks = false
+panic = "abort"
 
 [package.metadata.docs.rs]
 targets = ["riscv32imc-unknown-none-elf"]

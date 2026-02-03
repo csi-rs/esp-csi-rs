@@ -9,7 +9,7 @@ use esp_csi_rs::{
     PeripheralOpMode,
 };
 use esp_csi_rs::{
-    get_avg_pps, get_dropped_packets, get_total_packets, log_ln, CSIClient, CSINodeHardware,
+    CSIClient, CSINodeHardware, get_avg_latency, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -48,10 +48,11 @@ async fn node_task(client: &mut CSIClient) {
         loop {
             Timer::after_secs(1).await;
             log_ln!(
-                "Total Packets: {}, Average PPS: {}, Dropped Packets: {}",
+                "Total Packets: {}, Average PPS: {}, Dropped Packets: {}, Average Latency: {}",
                 get_total_packets(),
                 get_avg_pps(),
-                get_dropped_packets()
+                get_dropped_packets(),
+                get_avg_latency()
             )
         }
     })
@@ -97,14 +98,15 @@ async fn main(spawner: Spawner) -> ! {
     let mut node_handle = CSIClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow((EspNowConfig::default()))),
+        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(EspNowConfig::default())),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
         Some(1000),
         csi_hardware,
     );
-    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR).unwrap();
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi).unwrap();
+    #[cfg(feature = "esp32c6")]
+    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR);
+    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
 
     join(node.run(), node_task(&mut node_handle)).await;
 

@@ -1,12 +1,11 @@
-use core::{net::Ipv4Addr, str::FromStr};
-use embassy_executor::Spawner;
-use embassy_futures::join::{self, join, join3, join4};
+use core::{net::Ipv4Addr};
+use embassy_futures::join::{join4};
 use embassy_futures::select::{select, Either};
 use embassy_net::raw::{IpProtocol, IpVersion, PacketMetadata, RawSocket};
 use embassy_net::{Ipv4Address, Ipv4Cidr, Runner, Stack, StackResources};
 use embassy_time::{Duration, Timer};
 use enumset::enum_set;
-use esp_radio::wifi::{Interfaces, ModeConfig, WifiController, WifiDevice, WifiEvent};
+use esp_radio::wifi::{ModeConfig, WifiController, WifiDevice, WifiEvent};
 use smoltcp::phy::ChecksumCapabilities;
 
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
