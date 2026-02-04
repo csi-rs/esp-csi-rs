@@ -4,6 +4,7 @@
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
+use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
     config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode,
 };
@@ -47,16 +48,17 @@ async fn node_task(client: &mut CSIClient) {
 
     with_timeout(Duration::from_secs(1000), async {
             loop {
-                Timer::after_millis(10).await;
-                if last_log_time.elapsed() >= Duration::from_secs(1) {
-                    log_ln!(
-                        "Total Packets: {}, Average PPS: {}, Dropped Packets: {}",
-                        get_total_packets(),
-                        get_avg_pps(),
-                        get_dropped_packets()
-                    );
-                    last_log_time = Instant::now();
-                }
+                // Timer::after_millis(10).await;
+                // if last_log_time.elapsed() >= Duration::from_secs(1) {
+                //     log_ln!(
+                //         "Total Packets: {}, Average PPS: {}, Dropped Packets: {}",
+                //         get_total_packets(),
+                //         get_avg_pps(),
+                //         get_dropped_packets()
+                //     );
+                //     last_log_time = Instant::now();
+                // }
+                let _ = with_timeout(Duration::from_millis(10), client.print_csi_w_metadata()).await;
             }
         })
     .await
@@ -70,7 +72,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-    init_logger(spawner, false);
+    init_logger(spawner, LogMode::ArrayList);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
@@ -99,8 +101,8 @@ async fn main(spawner: Spawner) -> ! {
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let client_config = ClientConfig::default()
-        .with_ssid("lol".to_string())
-        .with_password("lol@2048".to_string())
+        .with_ssid("Connected Motion ".to_string())
+        .with_password("automotion@123".to_string())
         .with_auth_method(esp_radio::wifi::AuthMethod::Wpa2Personal);
 
     let station_config = WifiStationConfig {
