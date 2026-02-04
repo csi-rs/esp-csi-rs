@@ -110,7 +110,7 @@ async fn main(spawner: Spawner) -> ! {
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
+    node.set_rate(esp_radio::esp_now::WifiPhyRate::Rate6m);
 
     join(node.run(), node_task(&mut node_handle)).await;
 

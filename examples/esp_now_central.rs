@@ -90,8 +90,10 @@ async fn main(spawner: Spawner) -> ! {
         esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
 
+    let mut config_radio = esp_radio::wifi::Config::default();
+    config_radio = config_radio.with_power_save_mode(esp_radio::wifi::PowerSaveMode::None);
     let (wifi_controller, mut interfaces) =
-        esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
+        esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
@@ -107,7 +109,7 @@ async fn main(spawner: Spawner) -> ! {
     );
     #[cfg(feature = "esp32c6")]
     node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
+    node.set_rate(esp_radio::esp_now::WifiPhyRate::Rate6m);
 
     join(node.run(), node_task(&mut node_handle)).await;
 

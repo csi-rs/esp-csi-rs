@@ -36,6 +36,14 @@ pub async fn run_esp_now_central(
         None => u16::MAX as u64,
     };
 
+    let _ = esp_now.add_peer(esp_radio::esp_now::PeerInfo {
+        interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
+        peer_address: BROADCAST_ADDRESS,
+        lmk: None,
+        channel: Some(11),
+        encrypt: false,
+    });
+
     let mut message_u8: Vec<u8, 16> = Vec::new();
 
     loop {
@@ -64,10 +72,19 @@ pub async fn run_esp_now_central(
                 match res {
                     Ok(packet) => {
                         if packet.magic_number == PERIPHERAL_MAGIC_NUMBER {
+                            if !esp_now.peer_exists(&r.info.src_address) {
+                                let _ = esp_now.add_peer(esp_radio::esp_now::PeerInfo {
+                                    interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
+                                    peer_address: r.info.src_address,
+                                    lmk: None,
+                                    channel: Some(11),
+                                    encrypt: false,
+                                });
+                            }
                             let rtt = r_time - packet.central_send_uptime;
                             // Sanity check: ignore delays > 1s
                             if rtt > 0 && rtt < 1_000_000 {
-                                let latency = rtt as i64 / 2;
+                                let latency = rtt.get() as i64 / 2;
                                 // Update average latency using a simple moving average
                                 let current_avg = AVG_LATENCY.load(Ordering::Relaxed);
                                 let new_avg = if current_avg == 0 {

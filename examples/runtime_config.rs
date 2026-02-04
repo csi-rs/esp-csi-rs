@@ -105,8 +105,10 @@ async fn main(spawner: Spawner) -> ! {
         esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
 
+    let mut config_radio = esp_radio::wifi::Config::default();
+    config_radio = config_radio.with_power_save_mode(esp_radio::wifi::PowerSaveMode::None);
     let (wifi_controller, mut interfaces) =
-        esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
+        esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);

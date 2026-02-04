@@ -2,7 +2,8 @@
 
 use portable_atomic::AtomicI64;
 
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+use zerocopy::little_endian::{U32, U64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use embassy_futures::join::join;
 use embassy_futures::select::{select3, Either3};
@@ -166,40 +167,40 @@ impl CSIClient {
     }
 }
 
-#[derive(IntoBytes, FromBytes, KnownLayout, Immutable)]
+#[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub struct ControlPacket {
-    magic_number: u32,        // Magic number to identify packet type
+    magic_number: U32,        // Magic number to identify packet type
     is_collector: u8,         // 1 = Collector, 0 = Listener
     _padding: [u8; 3],        // Align t1 to 8-byte boundary
-    central_send_uptime: u64, // When Central sent this Control Packet
+    central_send_uptime: U64, // When Central sent this Control Packet
 }
 
 impl ControlPacket {
     pub fn new(is_collector: bool) -> Self {
         Self {
-            magic_number: CENTRAL_MAGIC_NUMBER,
+            magic_number: CENTRAL_MAGIC_NUMBER.into(),
             is_collector: is_collector as u8,
             _padding: [0u8; 3],
-            central_send_uptime: Instant::now().as_micros(),
+            central_send_uptime: Instant::now().as_micros().into(),
         }
     }
 }
 
-#[derive(IntoBytes, FromBytes, KnownLayout, Immutable)]
+#[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub struct PeripheralPacket {
-    magic_number: u32,        // Magic number to identify packet type
+    magic_number: U32,        // Magic number to identify packet type
     _padding: [u8; 4],        // Align timestamps to 8-byte boundary
-    central_send_uptime: u64, // When Central sent the Control Packet
+    central_send_uptime: U64, // When Central sent the Control Packet
 }
 
 impl PeripheralPacket {
     pub fn new(central_send_uptime: u64) -> Self {
         Self {
-            magic_number: PERIPHERAL_MAGIC_NUMBER,
+            magic_number: PERIPHERAL_MAGIC_NUMBER.into(),
             _padding: [0u8; 4],
-            central_send_uptime,
+            central_send_uptime: central_send_uptime.into(),
         }
     }
 }
@@ -230,7 +231,7 @@ impl<'a> CSINode<'a> {
             csi_config,
             traffic_freq_hz,
             hardware,
-            protocol: Some(Protocol::P802D11BGNLR),
+            protocol: None,
             rate: Some(WifiPhyRate::RateMcs0Lgi),
         }
     }
@@ -248,7 +249,7 @@ impl<'a> CSINode<'a> {
             csi_config,
             traffic_freq_hz,
             hardware,
-            protocol: Some(Protocol::P802D11BGNLR),
+            protocol: None,
             rate: Some(WifiPhyRate::RateMcs0Lgi),
         }
     }

@@ -1,15 +1,16 @@
 use core::sync::atomic::Ordering;
 
-use crate::CENTRAL_MAGIC_NUMBER;
-use crate::PeripheralPacket;
 use crate::log_ln;
 use crate::set_runtime_collection_mode;
 use crate::ControlPacket;
+use crate::PeripheralPacket;
+use crate::CENTRAL_MAGIC_NUMBER;
 use crate::IS_COLLECTOR;
 use crate::STOP_SIGNAL;
 
-use embassy_futures::select::Either;
 use embassy_futures::select::select;
+use embassy_futures::select::Either;
+use esp_radio::esp_now::BROADCAST_ADDRESS;
 use esp_radio::esp_now::{EspNow, PeerInfo};
 
 use heapless::Vec;
@@ -18,10 +19,7 @@ use zerocopy::IntoBytes;
 
 use crate::EspNowConfig;
 
-pub async fn run_esp_now_peripheral(
-    esp_now: &mut EspNow<'static>,
-    config: &EspNowConfig,
-) {
+pub async fn run_esp_now_peripheral(esp_now: &mut EspNow<'static>, config: &EspNowConfig) {
     esp_now.set_channel(config.channel).unwrap();
     log_ln!("esp-now version {}", esp_now.version().unwrap());
 
@@ -35,12 +33,7 @@ async fn responder(esp_now: &mut EspNow<'static>) {
     let mut message_u8: Vec<u8, 16> = Vec::new();
 
     loop {
-        match select(
-            STOP_SIGNAL.wait(),
-            esp_now.receive_async(),
-        )
-        .await
-        {
+        match select(STOP_SIGNAL.wait(), esp_now.receive_async()).await {
             Either::First(_) => {
                 STOP_SIGNAL.signal(());
                 break;
@@ -69,11 +62,16 @@ async fn responder(esp_now: &mut EspNow<'static>) {
                             }
 
                             message_u8.clear();
-                            let peripheral_packet = PeripheralPacket::new(packet.central_send_uptime);
-                            let _ = esp_now.send_async(&central_mac, peripheral_packet.as_bytes()).await;
+                            let peripheral_packet =
+                                PeripheralPacket::new(packet.central_send_uptime.into());
+                            let _ = esp_now
+                                .send_async(&central_mac, peripheral_packet.as_bytes())
+                                .await;
                         }
                     }
-                    Err(_) => {}
+                    Err(_) => {
+                        log_ln!("Received malformed control packet over ESP-NOW");
+                    }
                 }
             }
         }
