@@ -102,7 +102,7 @@ async fn main(spawner: Spawner) -> ! {
         esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(EspNowConfig::default())),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
-        Some(1000),
+        Some(10000),
         csi_hardware,
     );
     #[cfg(feature = "esp32c6")]

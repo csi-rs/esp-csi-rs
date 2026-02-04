@@ -43,31 +43,33 @@ uart = ["esp-println/uart"]
 no-print = ["esp-println/no-op"]
 
 ## Support for the ESP32
-# esp32 = [
-#     "esp-backtrace/esp32",
-#     "esp-hal/esp32",
-#     "esp-hal/rt",
-#     "esp-println/esp32",
-#     "esp-bootloader-esp-idf/esp32",
-#     "esp-println/critical-section",
-#     "esp-wifi/esp32",
-#     "esp-wifi/csi",
-#     "esp-wifi/sniffer",
-# ]
+esp32 = [
+    "esp-backtrace/esp32",
+    "esp-hal/esp32",
+    "esp-hal/rt",
+    "esp-println/esp32",
+    "esp-bootloader-esp-idf/esp32",
+    "esp-println/critical-section",
+    "esp-radio/esp32",
+    "esp-radio/csi",
+    "esp-radio/sniffer",
+    "esp-rtos/esp32",
+]
 
 # ## Support for the ESP32-C2
-# esp32c2 = [
-#     "esp-backtrace/esp32c2",
-#     "esp-bootloader-esp-idf/esp32c2",
-#     "esp-backtrace/println",
-#     "esp-hal/esp32c2",
-#     "esp-hal/rt",
-#     "esp-println/esp32c2",
-#     "esp-println/critical-section",
-#     "esp-wifi/esp32c2",
-#     "esp-wifi/csi",
-#     "esp-wifi/sniffer",
-# ]
+esp32c2 = [
+    "esp-backtrace/esp32c2",
+    "esp-bootloader-esp-idf/esp32c2",
+    "esp-backtrace/println",
+    "esp-hal/esp32c2",
+    "esp-hal/rt",
+    "esp-println/esp32c2",
+    "esp-println/critical-section",
+    "esp-radio/esp32c2",
+    "esp-radio/csi",
+    "esp-radio/sniffer",
+    "esp-rtos/esp32c2",
+]
 
 # ## Support for the ESP32-C3
 esp32c3 = [
