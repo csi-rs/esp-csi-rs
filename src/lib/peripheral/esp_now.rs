@@ -1,4 +1,5 @@
 use core::sync::atomic::Ordering;
+use core::time;
 
 use crate::log_ln;
 use crate::set_runtime_collection_mode;
@@ -10,6 +11,10 @@ use crate::STOP_SIGNAL;
 
 use embassy_futures::select::select;
 use embassy_futures::select::Either;
+use embassy_time::with_timeout;
+use embassy_time::Duration;
+use embassy_time::Timer;
+use embassy_time::WithTimeout;
 use esp_radio::esp_now::BROADCAST_ADDRESS;
 use esp_radio::esp_now::{EspNow, PeerInfo};
 
@@ -19,18 +24,27 @@ use zerocopy::IntoBytes;
 
 use crate::EspNowConfig;
 
-pub async fn run_esp_now_peripheral(esp_now: &mut EspNow<'static>, config: &EspNowConfig) {
+pub async fn run_esp_now_peripheral(
+    esp_now: &mut EspNow<'static>,
+    config: &EspNowConfig,
+    freq_hz: Option<u16>,
+) {
     esp_now.set_channel(config.channel).unwrap();
     log_ln!("esp-now version {}", esp_now.version().unwrap());
 
-    responder(esp_now).await;
+    let freq = match freq_hz {
+        Some(freq) => freq as u64,
+        None => u16::MAX as u64,
+    };
+
+    responder(esp_now, freq).await;
 }
 
-async fn responder(esp_now: &mut EspNow<'static>) {
+async fn responder(esp_now: &mut EspNow<'static>, frequency_hz: u64) {
     let mut is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
     let initial_is_collector = is_collector;
     let mut central_mac: [u8; 6] = [0; 6];
-    let mut message_u8: Vec<u8, 16> = Vec::new();
+    let mut is_connected = false;
 
     loop {
         match select(STOP_SIGNAL.wait(), esp_now.receive_async()).await {
@@ -39,11 +53,11 @@ async fn responder(esp_now: &mut EspNow<'static>) {
                 break;
             }
             Either::Second(r) => {
-                let res = ControlPacket::ref_from_bytes(r.data());
+                let res = postcard::from_bytes::<ControlPacket>(r.data());
                 match res {
                     Ok(packet) => {
                         if packet.magic_number == CENTRAL_MAGIC_NUMBER {
-                            if !esp_now.peer_exists(&r.info.src_address) {
+                            if !is_connected {
                                 let _ = esp_now.add_peer(PeerInfo {
                                     interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
                                     peer_address: r.info.src_address,
@@ -52,26 +66,23 @@ async fn responder(esp_now: &mut EspNow<'static>) {
                                     encrypt: false,
                                 });
                                 central_mac = r.info.src_address;
+                                is_connected = true;
                             }
                             if central_mac == r.info.src_address && !initial_is_collector {
-                                let is_collector_bool = packet.is_collector != 0;
-                                if is_collector_bool != !is_collector {
-                                    set_runtime_collection_mode(!is_collector_bool);
-                                    is_collector = !is_collector_bool;
+                                if packet.is_collector != !is_collector {
+                                    set_runtime_collection_mode(!is_collector);
+                                    is_collector = !is_collector;
                                 }
                             }
 
-                            message_u8.clear();
                             let peripheral_packet =
                                 PeripheralPacket::new(packet.central_send_uptime.into());
-                            let _ = esp_now
-                                .send_async(&central_mac, peripheral_packet.as_bytes())
-                                .await;
+                            let message_u8: Vec<u8, 16> =
+                                postcard::to_vec(&peripheral_packet).unwrap();
+                            let _ = esp_now.send_async(&central_mac, &message_u8).await;
                         }
                     }
-                    Err(_) => {
-                        log_ln!("Received malformed control packet over ESP-NOW");
-                    }
+                    Err(_) => {}
                 }
             }
         }

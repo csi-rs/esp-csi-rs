@@ -21,6 +21,7 @@ use embassy_sync::signal::Signal;
 use heapless::Vec;
 extern crate alloc;
 use alloc::collections::BTreeMap;
+use serde::{Deserialize, Serialize};
 
 pub mod central;
 pub mod config;
@@ -167,40 +168,34 @@ impl CSIClient {
     }
 }
 
-#[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Unaligned)]
-#[repr(C)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ControlPacket {
-    magic_number: U32,        // Magic number to identify packet type
-    is_collector: u8,         // 1 = Collector, 0 = Listener
-    _padding: [u8; 3],        // Align t1 to 8-byte boundary
-    central_send_uptime: U64, // When Central sent this Control Packet
+    magic_number: u32,
+    pub is_collector: bool,
+    pub central_send_uptime: u64,
 }
 
 impl ControlPacket {
     pub fn new(is_collector: bool) -> Self {
         Self {
             magic_number: CENTRAL_MAGIC_NUMBER.into(),
-            is_collector: is_collector as u8,
-            _padding: [0u8; 3],
-            central_send_uptime: Instant::now().as_micros().into(),
+            is_collector,
+            central_send_uptime: Instant::now().as_micros(),
         }
     }
 }
 
-#[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Unaligned)]
-#[repr(C)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct PeripheralPacket {
-    magic_number: U32,        // Magic number to identify packet type
-    _padding: [u8; 4],        // Align timestamps to 8-byte boundary
-    central_send_uptime: U64, // When Central sent the Control Packet
+    magic_number: u32,        // Magic number to identify packet type
+    central_send_uptime: u64, // When Central sent the Control Packet
 }
 
 impl PeripheralPacket {
     pub fn new(central_send_uptime: u64) -> Self {
         Self {
-            magic_number: PERIPHERAL_MAGIC_NUMBER.into(),
-            _padding: [0u8; 4],
-            central_send_uptime: central_send_uptime.into(),
+            magic_number: PERIPHERAL_MAGIC_NUMBER,
+            central_send_uptime: central_send_uptime,
         }
     }
 }
@@ -365,7 +360,11 @@ impl<'a> CSINode<'a> {
                         self.rate = Some(old_rate);
                     }
 
-                    let main_task = run_esp_now_peripheral(&mut interfaces.esp_now, esp_now_config);
+                    let main_task = run_esp_now_peripheral(
+                        &mut interfaces.esp_now,
+                        esp_now_config,
+                        self.traffic_freq_hz,
+                    );
                     join(main_task, run_process_csi_packet()).await;
                 }
                 PeripheralOpMode::WifiSniffer(sniffer_config) => {

@@ -202,7 +202,7 @@ codegen-units = 1        # LLVM can perform better optimizations using a single 
 debug-assertions = false
 incremental = false
 lto = 'fat'
-opt-level = 'z'
+opt-level = "s"
 overflow-checks = false
 panic = "abort"
 

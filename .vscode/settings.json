@@ -8,7 +8,7 @@
         "no-std",
         "println",
         "auto",
-        "esp32"
+        "esp32s3"
     ],
     "rust-analyzer.cargo.noDefaultFeatures": true
 }

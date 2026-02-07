@@ -35,7 +35,7 @@ mod log_impl {
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pipe::Pipe};
 
     #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
-    pub static LOG_PIPE: Pipe<CriticalSectionRawMutex, 2048> = Pipe::new();
+    pub static LOG_PIPE: Pipe<CriticalSectionRawMutex, 4096> = Pipe::new();
 
     struct EspLogger;
 
@@ -75,7 +75,7 @@ mod defmt_impl {
     use super::*;
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pipe::Pipe};
 
-    pub static DEFMT_PIPE: Pipe<CriticalSectionRawMutex, { 2048 }> = Pipe::new();
+    pub static DEFMT_PIPE: Pipe<CriticalSectionRawMutex, { 4096 }> = Pipe::new();
 
     #[defmt::global_logger]
     struct AsyncDefmtBackend;
@@ -540,7 +540,7 @@ pub async fn logger_backend(mut driver: LogOutput) {
     use embassy_futures::select::{select, Either};
     use embedded_io_async::Write;
 
-    let mut raw = [0u8; 512];
+    let mut raw = [0u8; 1024];
     loop {
         let csi_future = CSI_CHANNEL.receive();
 
@@ -551,55 +551,32 @@ pub async fn logger_backend(mut driver: LogOutput) {
         #[cfg(not(any(feature = "println", feature = "defmt")))]
         let log_future = embassy_futures::pending::<usize>();
 
-        let mut did_write = false;
-
         match select(csi_future, log_future).await {
             Either::First(packet) => {
-                let res: Result<(), ()>;
-                if driver.log_mode == LogMode::Serialized {
-                    res = write_serialized_packet(packet, &mut driver).await;
-                } else if driver.log_mode == LogMode::ArrayList {
-                    res = write_text_array_packet(packet, &mut driver).await;
-                } else {
-                    res = write_text_packet(packet, &mut driver).await;
-                }
-                match res {
-                    Ok(_) => {}
-                    Err(_) => {
-                        LOG_DROPPED_PACKETS.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
+                let _ = match driver.log_mode {
+                    LogMode::Serialized => write_serialized_packet(packet, &mut driver).await,
+                    LogMode::ArrayList => write_text_array_packet(packet, &mut driver).await,
+                    LogMode::Text => write_text_packet(packet, &mut driver).await,
+                };
             }
             Either::Second(n) => {
-                if driver.log_mode != LogMode::Serialized {
-                    if n > 0 {
-                        use embedded_io_async::Write;
-                        match driver.write(&raw[..n]).await {
-                            Ok(_) => {
-                                did_write = true;
-                            }
-                            Err(_) => {}
-                        }
+                if driver.log_mode != LogMode::Serialized && n > 0 {
+                    let _ = driver.write_all(&raw[..n]).await;
+
+                    #[cfg(feature = "println")]
+                    while let Ok(n_extra) = log_impl::LOG_PIPE.try_read(&mut raw) {
+                        let _ = driver.write_all(&raw[..n_extra]).await;
+                    }
+                    #[cfg(feature = "defmt")]
+                    while let Ok(n_extra) = defmt_impl::DEFMT_PIPE.try_read(&mut raw) {
+                        let _ = driver.write_all(&raw[..n_extra]).await;
                     }
                 }
             }
         }
-        let logs_empty = {
-            #[cfg(all(feature = "println", not(feature = "defmt")))]
-            {
-                log_impl::LOG_PIPE.is_empty()
-            }
-            #[cfg(feature = "defmt")]
-            {
-                defmt_impl::DEFMT_PIPE.is_empty()
-            }
-            #[cfg(not(any(feature = "println", feature = "defmt")))]
-            {
-                true
-            }
-        };
-
-        if did_write && CSI_CHANNEL.is_empty() && logs_empty {
+        
+        // Flush logic remains the same
+        if CSI_CHANNEL.is_empty() {
             let _ = driver.flush().await;
         }
     }

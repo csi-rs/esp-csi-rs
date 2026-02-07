@@ -2,6 +2,7 @@ use core::sync::atomic::Ordering;
 
 use embassy_futures::select::select3;
 use embassy_futures::select::Either3;
+use embassy_time::with_timeout;
 use embassy_time::Instant;
 use embassy_time::Timer;
 use heapless::Vec;
@@ -36,16 +37,6 @@ pub async fn run_esp_now_central(
         None => u16::MAX as u64,
     };
 
-    let _ = esp_now.add_peer(esp_radio::esp_now::PeerInfo {
-        interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
-        peer_address: BROADCAST_ADDRESS,
-        lmk: None,
-        channel: Some(11),
-        encrypt: false,
-    });
-
-    let mut message_u8: Vec<u8, 16> = Vec::new();
-
     loop {
         // let current_timestamp = embassy_time::Instant::now();
         match select3(
@@ -61,14 +52,13 @@ pub async fn run_esp_now_central(
                 break;
             }
             Either3::Second(_) => {
-                message_u8.clear();
                 let control_packet = ControlPacket::new(is_collector);
-                let _ = message_u8.extend_from_slice(control_packet.as_bytes());
+                let message_u8: Vec<u8, 16> = postcard::to_vec(&control_packet).unwrap();
                 let _ = esp_now.send_async(&BROADCAST_ADDRESS, &message_u8).await;
             }
             Either3::Third(r) => {
                 let r_time = Instant::now().as_micros();
-                let res = PeripheralPacket::ref_from_bytes(r.data());
+                let res = postcard::from_bytes::<PeripheralPacket>(r.data());
                 match res {
                     Ok(packet) => {
                         if packet.magic_number == PERIPHERAL_MAGIC_NUMBER {
@@ -84,7 +74,7 @@ pub async fn run_esp_now_central(
                             let rtt = r_time - packet.central_send_uptime;
                             // Sanity check: ignore delays > 1s
                             if rtt > 0 && rtt < 1_000_000 {
-                                let latency = rtt.get() as i64 / 2;
+                                let latency = rtt as i64 / 2;
                                 // Update average latency using a simple moving average
                                 let current_avg = AVG_LATENCY.load(Ordering::Relaxed);
                                 let new_avg = if current_avg == 0 {
