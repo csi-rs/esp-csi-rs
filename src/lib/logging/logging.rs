@@ -558,23 +558,40 @@ pub async fn logger_backend(mut driver: LogOutput) {
                     LogMode::ArrayList => write_text_array_packet(packet, &mut driver).await,
                     LogMode::Text => write_text_packet(packet, &mut driver).await,
                 };
+
+                if (CSI_CHANNEL.is_empty()) {
+                    let _ = driver.flush().await;
+                }
             }
             Either::Second(n) => {
                 if driver.log_mode != LogMode::Serialized && n > 0 {
-                    let _ = driver.write_all(&raw[..n]).await;
+                    let mut total_read = n;
 
-                    #[cfg(feature = "println")]
-                    while let Ok(n_extra) = log_impl::LOG_PIPE.try_read(&mut raw) {
-                        let _ = driver.write_all(&raw[..n_extra]).await;
+                    // Fill the rest of the 'raw' buffer using try_read
+                    // This loop continues until 'raw' is full OR the pipe is empty
+                    #[cfg(any(feature = "println", feature = "defmt"))]
+                    while total_read < raw.len() {
+                        #[cfg(all(feature = "println", not(feature = "defmt")))]
+                        let result = log_impl::LOG_PIPE.try_read(&mut raw[total_read..]);
+
+                        #[cfg(feature = "defmt")]
+                        let result = defmt_impl::DEFMT_PIPE.try_read(&mut raw[total_read..]);
+
+                        match result {
+                            Ok(n_extra) if n_extra > 0 => {
+                                total_read += n_extra;
+                            }
+                            _ => break, // Pipe is empty or error, stop filling
+                        }
                     }
-                    #[cfg(feature = "defmt")]
-                    while let Ok(n_extra) = defmt_impl::DEFMT_PIPE.try_read(&mut raw) {
-                        let _ = driver.write_all(&raw[..n_extra]).await;
-                    }
+
+                    // Perform a single, large write of everything we gathered
+                    let _ = driver.write_all(&raw[..total_read]).await;
+                    let _ = driver.flush().await;
                 }
             }
         }
-        
+
         // Flush logic remains the same
         if CSI_CHANNEL.is_empty() {
             let _ = driver.flush().await;
