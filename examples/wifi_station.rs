@@ -4,9 +4,9 @@
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
-use esp_csi_rs::logging::logging::LogMode;
+use esp_csi_rs::logging::logging::{LogMode, set_logging_mode};
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode,
+    config::CsiConfig, CSINode, CollectionMode,
 };
 use esp_csi_rs::{
     CSIClient, CSINodeHardware, WifiStationConfig, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
@@ -72,7 +72,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-    init_logger(spawner, LogMode::ArrayList);
+    set_logging_mode(LogMode::ArrayList);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 

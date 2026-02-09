@@ -4,8 +4,9 @@
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{with_timeout, Duration, Instant, Timer};
+use esp_csi_rs::logging::logging::set_logging_mode;
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
+    config::CsiConfig, CSINode, CollectionMode, EspNowConfig,
     PeripheralOpMode,
 };
 use esp_csi_rs::{
@@ -83,7 +84,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-    init_logger(spawner, LogMode::Text);
+    set_logging_mode(LogMode::Text);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 

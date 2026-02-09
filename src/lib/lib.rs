@@ -411,7 +411,6 @@ impl<'a> CSINode<'a> {
         let _ = controller.stop_async().await;
         GLOBAL_PACKET_COUNT.store(0, Ordering::Relaxed);
         GLOBAL_DROP_COUNT.store(0, Ordering::Relaxed);
-        reset_global_log_drops();
     }
 }
 
@@ -605,7 +604,6 @@ pub async fn run_process_csi_packet() {
                 is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
                 GLOBAL_PACKET_COUNT.store(0, Ordering::Relaxed);
                 GLOBAL_DROP_COUNT.store(0, Ordering::Relaxed);
-                reset_global_log_drops();
                 GLOBAL_CAPTURE_START_TIME.store(Instant::now().as_ticks(), Ordering::Relaxed);
             }
             Either3::Third(csi_packet) => {
@@ -638,10 +636,8 @@ pub async fn run_process_csi_packet() {
     }
 }
 
-use crate::logging::logging::{get_log_packet_drops, reset_global_log_drops};
-
 pub fn get_dropped_packets() -> u32 {
-    GLOBAL_DROP_COUNT.load(Ordering::Relaxed) + get_log_packet_drops()
+    GLOBAL_DROP_COUNT.load(Ordering::Relaxed)
 }
 
 pub fn get_avg_latency() -> i64 {
