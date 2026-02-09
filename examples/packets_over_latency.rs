@@ -50,7 +50,7 @@ async fn node_task(client: &mut CSIClient) {
             Timer::after(Duration::from_hz(100)).await;
             log_ln!(
                 "[{}, {}, {}]",
-                get_avg_pps(),
+                get_total_packets(),
                 get_avg_latency(),
                 Instant::now().as_millis()
             )
