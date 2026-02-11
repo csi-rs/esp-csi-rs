@@ -29,13 +29,11 @@ pub fn get_log_packet_drops() -> u32 {
 
 #[cfg(feature = "println")]
 mod log_impl {
+    use core::fmt::Write;
+    use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
     use heapless::String;
 
-    use core::fmt::Write;
-    use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pipe::Pipe};
-
-    #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
-    pub static LOG_PIPE: Pipe<CriticalSectionRawMutex, 4096> = Pipe::new();
+    pub static LOG_CHANNEL: Channel<CriticalSectionRawMutex, String<256>, 16> = Channel::new();
 
     struct EspLogger;
 
@@ -45,37 +43,32 @@ mod log_impl {
         }
 
         fn log(&self, record: &log::Record) {
-            #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
             if self.enabled(record.metadata()) {
-                let mut text: String<512> = String::new();
-
+                let mut text: String<256> = String::new();
+                // Format the log line
                 if write!(&mut text, "{}\r\n", record.args()).is_ok() {
-                    if text.len() <= LOG_PIPE.free_capacity() {
-                        let _ = LOG_PIPE.try_write(text.as_bytes());
-                    }
+                    // Try to send. If the channel is full, the log is dropped.
+                    // This is safe and non-blocking.
+                    let _ = LOG_CHANNEL.try_send(text);
                 }
             }
         }
-
         fn flush(&self) {}
     }
 
-    static LOG_INSTANCE: EspLogger = EspLogger;
-
     pub fn init_logger(level: log::LevelFilter) {
-        unsafe {
-            log::set_logger_racy(&LOG_INSTANCE).unwrap();
-            log::set_max_level_racy(level);
-        }
+        static LOGGER: EspLogger = EspLogger;
+        log::set_logger(&LOGGER).unwrap();
+        log::set_max_level(level);
     }
 }
 
 #[cfg(feature = "defmt")]
 mod defmt_impl {
     use super::*;
-    use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pipe::Pipe};
+    use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 
-    pub static DEFMT_PIPE: Pipe<CriticalSectionRawMutex, { 4096 }> = Pipe::new();
+    pub static DEFMT_CHANNEL: Channel<CriticalSectionRawMutex, [u8; 256], 16> = Channel::new();
 
     #[defmt::global_logger]
     struct AsyncDefmtBackend;
@@ -88,9 +81,7 @@ mod defmt_impl {
         unsafe fn write(bytes: &[u8]) {
             #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
             {
-                if bytes.len() <= DEFMT_PIPE.free_capacity() {
-                    let _ = DEFMT_PIPE.try_write(bytes);
-                }
+                let _ = DEFMT_CHANNEL.try_send(bytes.try_into().unwrap());
             }
         }
     }
@@ -540,14 +531,15 @@ pub async fn logger_backend(mut driver: LogOutput) {
     use embassy_futures::select::{select, Either};
     use embedded_io_async::Write;
 
-    let mut raw = [0u8; 1024];
     loop {
         let csi_future = CSI_CHANNEL.receive();
 
         #[cfg(all(feature = "println", not(feature = "defmt")))]
-        let log_future = log_impl::LOG_PIPE.read(&mut raw);
+        let log_future = log_impl::LOG_CHANNEL.receive();
+
         #[cfg(feature = "defmt")]
-        let log_future = defmt_impl::DEFMT_PIPE.read(&mut raw);
+        let log_future = defmt_impl::DEFMT_CHANNEL.receive();
+
         #[cfg(not(any(feature = "println", feature = "defmt")))]
         let log_future = embassy_futures::pending::<usize>();
 
@@ -559,42 +551,20 @@ pub async fn logger_backend(mut driver: LogOutput) {
                     LogMode::Text => write_text_packet(packet, &mut driver).await,
                 };
 
-                if (CSI_CHANNEL.is_empty()) {
+                if CSI_CHANNEL.is_empty() {
                     let _ = driver.flush().await;
                 }
             }
-            Either::Second(n) => {
-                if driver.log_mode != LogMode::Serialized && n > 0 {
-                    let mut total_read = n;
+            Either::Second(message) => {
+                // 'message' is a heapless::String.
+                // It is guaranteed to be a single linear chunk of memory.
+                let _ = driver.write_all(message.as_bytes()).await;
 
-                    // Fill the rest of the 'raw' buffer using try_read
-                    // This loop continues until 'raw' is full OR the pipe is empty
-                    #[cfg(any(feature = "println", feature = "defmt"))]
-                    while total_read < raw.len() {
-                        #[cfg(all(feature = "println", not(feature = "defmt")))]
-                        let result = log_impl::LOG_PIPE.try_read(&mut raw[total_read..]);
-
-                        #[cfg(feature = "defmt")]
-                        let result = defmt_impl::DEFMT_PIPE.try_read(&mut raw[total_read..]);
-
-                        match result {
-                            Ok(n_extra) if n_extra > 0 => {
-                                total_read += n_extra;
-                            }
-                            _ => break, // Pipe is empty or error, stop filling
-                        }
-                    }
-
-                    // Perform a single, large write of everything we gathered
-                    let _ = driver.write_all(&raw[..total_read]).await;
+                // Only flush if no more logs are pending
+                if log_impl::LOG_CHANNEL.is_empty() {
                     let _ = driver.flush().await;
                 }
             }
-        }
-
-        // Flush logic remains the same
-        if CSI_CHANNEL.is_empty() {
-            let _ = driver.flush().await;
         }
     }
 }
