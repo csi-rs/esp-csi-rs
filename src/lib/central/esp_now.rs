@@ -9,10 +9,11 @@ use heapless::Vec;
 use zerocopy::FromBytes;
 use zerocopy::IntoBytes;
 
+use crate::ONE_WAY_LATENCY;
+use crate::TWO_WAY_LATENCY;
 use crate::log_ln;
 use crate::ControlPacket;
 use crate::PeripheralPacket;
-use crate::AVG_LATENCY;
 use crate::PERIPHERAL_MAGIC_NUMBER;
 use crate::STOP_SIGNAL;
 use esp_radio::esp_now::{EspNow, BROADCAST_ADDRESS};
@@ -28,6 +29,7 @@ pub async fn run_esp_now_central(
     frequency_hz: Option<u16>,
     is_collector: bool,
 ) {
+    let mut latency_offset: i64 = -1;
     // Configure
     esp_now.set_channel(config.channel).unwrap();
     log_ln!("esp-now version {}", esp_now.version().unwrap());
@@ -52,7 +54,7 @@ pub async fn run_esp_now_central(
                 break;
             }
             Either3::Second(_) => {
-                let control_packet = ControlPacket::new(is_collector);
+                let control_packet = ControlPacket::new(is_collector, latency_offset);
                 let message_u8: Vec<u8, 16> = postcard::to_vec(&control_packet).unwrap();
                 let _ = esp_now.send_async(&BROADCAST_ADDRESS, &message_u8).await;
             }
@@ -74,16 +76,18 @@ pub async fn run_esp_now_central(
                             let rtt = r_time - packet.central_send_uptime;
                             // Sanity check: ignore delays > 1s
                             if rtt > 0 && rtt < 1_000_000 {
-                                let latency = rtt as i64 / 2;
-                                // Update average latency using a simple moving average
-                                let current_avg = AVG_LATENCY.load(Ordering::Relaxed);
-                                let new_avg = if current_avg == 0 {
-                                    latency
-                                } else {
-                                    // Math trick: (avg * 7 + latency) / 8 without floating point
-                                    ((current_avg << 3) - current_avg + latency) >> 3
-                                };
-                                AVG_LATENCY.store(new_avg, Ordering::Relaxed);
+                                if latency_offset == -1 {
+                                    latency_offset = packet.recv_uptime as i64
+                                        - (packet.central_send_uptime + rtt / 2) as i64;
+                                }
+                                let total_elapsed = r_time - packet.central_send_uptime;
+                                let b_processing_delay = packet.send_uptime - packet.recv_uptime;
+                                let two_way_latency = (total_elapsed - b_processing_delay) as i64;
+                                let one_way_latency = (r_time as i64
+                                    - (packet.send_uptime as i64 - latency_offset))
+                                    as i64;
+                                TWO_WAY_LATENCY.store(two_way_latency, Ordering::Relaxed);
+                                ONE_WAY_LATENCY.store(one_way_latency, Ordering::Relaxed);
                             }
                         }
                     }

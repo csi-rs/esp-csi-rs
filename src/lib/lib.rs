@@ -52,7 +52,8 @@ static IS_COLLECTOR: AtomicBool = AtomicBool::new(false);
 static COLLECTION_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static CENTRAL_MAGIC_NUMBER: u32 = 0xA8912BF0;
 static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
-static AVG_LATENCY: AtomicI64 = AtomicI64::new(0);
+static TWO_WAY_LATENCY: AtomicI64 = AtomicI64::new(0);
+static ONE_WAY_LATENCY: AtomicI64 = AtomicI64::new(0);
 
 // Signals
 static STOP_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -173,14 +174,16 @@ pub struct ControlPacket {
     magic_number: u32,
     pub is_collector: bool,
     pub central_send_uptime: u64,
+    pub latency_offset: i64,
 }
 
 impl ControlPacket {
-    pub fn new(is_collector: bool) -> Self {
+    pub fn new(is_collector: bool, latency_offset: i64) -> Self {
         Self {
             magic_number: CENTRAL_MAGIC_NUMBER.into(),
             is_collector,
             central_send_uptime: Instant::now().as_micros(),
+            latency_offset,
         }
     }
 }
@@ -188,14 +191,18 @@ impl ControlPacket {
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct PeripheralPacket {
     magic_number: u32,        // Magic number to identify packet type
+    recv_uptime: u64,        // When Peripheral received the Control Packet
+    send_uptime: u64,        // When Peripheral sent the Peripheral Packet (after receiving Control Packet)
     central_send_uptime: u64, // When Central sent the Control Packet
 }
 
 impl PeripheralPacket {
-    pub fn new(central_send_uptime: u64) -> Self {
+    pub fn new(recv_uptime: u64, central_send_uptime: u64) -> Self {
         Self {
             magic_number: PERIPHERAL_MAGIC_NUMBER,
-            central_send_uptime: central_send_uptime,
+            recv_uptime,
+            send_uptime: Instant::now().as_micros(),
+            central_send_uptime,
         }
     }
 }
@@ -644,8 +651,12 @@ pub fn get_dropped_packets() -> u32 {
     GLOBAL_DROP_COUNT.load(Ordering::Relaxed) + get_log_packet_drops()
 }
 
-pub fn get_avg_latency() -> i64 {
-    AVG_LATENCY.load(Ordering::Relaxed)
+pub fn get_one_way_latency() -> i64 {
+    ONE_WAY_LATENCY.load(Ordering::Relaxed)
+}
+
+pub fn get_two_way_latency() -> i64 {
+    TWO_WAY_LATENCY.load(Ordering::Relaxed)
 }
 
 fn reconstruct_wifi_rate(rate: &WifiPhyRate) -> WifiPhyRate {

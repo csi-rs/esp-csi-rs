@@ -1,6 +1,7 @@
 use core::sync::atomic::Ordering;
 use core::time;
 
+use crate::ONE_WAY_LATENCY;
 use crate::log_ln;
 use crate::set_runtime_collection_mode;
 use crate::ControlPacket;
@@ -11,6 +12,7 @@ use crate::STOP_SIGNAL;
 
 use embassy_futures::select::select;
 use embassy_futures::select::Either;
+use embassy_time::Instant;
 use embassy_time::with_timeout;
 use embassy_time::Duration;
 use embassy_time::Timer;
@@ -56,6 +58,7 @@ async fn responder(esp_now: &mut EspNow<'static>, frequency_hz: u64) {
                 let res = postcard::from_bytes::<ControlPacket>(r.data());
                 match res {
                     Ok(packet) => {
+                        let recv_time = Instant::now().as_micros();
                         if packet.magic_number == CENTRAL_MAGIC_NUMBER {
                             if !is_connected {
                                 let _ = esp_now.add_peer(PeerInfo {
@@ -68,18 +71,27 @@ async fn responder(esp_now: &mut EspNow<'static>, frequency_hz: u64) {
                                 central_mac = r.info.src_address;
                                 is_connected = true;
                             }
-                            if central_mac == r.info.src_address && !initial_is_collector {
+                            if central_mac == r.info.src_address {
                                 if packet.is_collector != !is_collector {
                                     set_runtime_collection_mode(!is_collector);
                                     is_collector = !is_collector;
                                 }
-                            }
 
-                            let peripheral_packet =
-                                PeripheralPacket::new(packet.central_send_uptime.into());
-                            let message_u8: Vec<u8, 16> =
-                                postcard::to_vec(&peripheral_packet).unwrap();
-                            let _ = esp_now.send_async(&central_mac, &message_u8).await;
+                                if packet.latency_offset != -1 {
+                                    let one_way_latency = (recv_time as i64
+                                        - (packet.central_send_uptime as i64 - packet.latency_offset))
+                                        as i64;
+                                    ONE_WAY_LATENCY.store(one_way_latency, Ordering::Relaxed);
+                                }
+
+                                let peripheral_packet = PeripheralPacket::new(
+                                    recv_time,
+                                    packet.central_send_uptime.into(),
+                                );
+                                let message_u8: Vec<u8, 16> =
+                                    postcard::to_vec(&peripheral_packet).unwrap();
+                                let _ = esp_now.send_async(&central_mac, &message_u8).await;
+                            }
                         }
                     }
                     Err(_) => {}
