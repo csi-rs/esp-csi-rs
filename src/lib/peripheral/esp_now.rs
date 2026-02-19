@@ -1,6 +1,8 @@
 use core::sync::atomic::Ordering;
 use core::time;
 
+use crate::GLOBAL_PACKET_RX_COUNT;
+use crate::GLOBAL_PACKET_TX_COUNT;
 use crate::ONE_WAY_LATENCY;
 use crate::log_ln;
 use crate::set_runtime_collection_mode;
@@ -72,6 +74,7 @@ async fn responder(esp_now: &mut EspNow<'static>, frequency_hz: u64) {
                                 is_connected = true;
                             }
                             if central_mac == r.info.src_address {
+                                GLOBAL_PACKET_RX_COUNT.fetch_add(1, Ordering::Relaxed);
                                 if packet.is_collector != !is_collector {
                                     set_runtime_collection_mode(!is_collector);
                                     is_collector = !is_collector;
@@ -79,7 +82,7 @@ async fn responder(esp_now: &mut EspNow<'static>, frequency_hz: u64) {
 
                                 if packet.latency_offset != -1 {
                                     let one_way_latency = (recv_time as i64
-                                        - (packet.central_send_uptime as i64 - packet.latency_offset))
+                                        - (packet.central_send_uptime as i64 + packet.latency_offset))
                                         as i64;
                                     ONE_WAY_LATENCY.store(one_way_latency, Ordering::Relaxed);
                                 }
@@ -88,9 +91,12 @@ async fn responder(esp_now: &mut EspNow<'static>, frequency_hz: u64) {
                                     recv_time,
                                     packet.central_send_uptime.into(),
                                 );
-                                let message_u8: Vec<u8, 16> =
+                                let message_u8: Vec<u8, 32> =
                                     postcard::to_vec(&peripheral_packet).unwrap();
-                                let _ = esp_now.send_async(&central_mac, &message_u8).await;
+                                let res = esp_now.send_async(&central_mac, &message_u8).await;
+                                if res.is_ok() {
+                                    GLOBAL_PACKET_TX_COUNT.fetch_add(1, Ordering::Relaxed);
+                                }
                             }
                         }
                     }

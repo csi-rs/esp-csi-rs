@@ -1,15 +1,14 @@
 #![no_std]
 #![no_main]
 
+use crate::alloc::string::ToString;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_time::{Duration, Instant, Timer, with_timeout};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::LogMode;
+use esp_csi_rs::{config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode};
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode,
-};
-use esp_csi_rs::{
-    CSIClient, CSINodeHardware, WifiStationConfig, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
+    CSIClient, CSINodeHardware, get_pps_rx, get_pps_tx, get_dropped_packets_rx, get_one_way_latency, get_two_way_latency, log_ln, WifiStationConfig
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -18,7 +17,6 @@ use esp_radio::{
     Controller,
 };
 use {esp_backtrace as _, esp_println as _};
-use crate::alloc::string::ToString;
 
 extern crate alloc;
 
@@ -49,15 +47,14 @@ async fn node_task(client: &mut CSIClient) {
     with_timeout(Duration::from_secs(1000), async {
             loop {
                 // Timer::after_millis(10).await;
-                // if last_log_time.elapsed() >= Duration::from_secs(1) {
-                //     log_ln!(
-                //         "Total Packets: {}, Average PPS: {}, Dropped Packets: {}",
-                //         get_total_packets(),
-                //         get_avg_pps(),
-                //         get_dropped_packets()
-                //     );
-                //     last_log_time = Instant::now();
-                // }
+                // log_ln!(
+                //     "RX PPS: {}, TX PPS: {}, RX Dropped Packets: {}, One Way Latency: {}, Two Way Latency: {}",
+                //     get_pps_rx(),
+                //     get_pps_tx(),
+                //     get_dropped_packets_rx(),
+                //     get_one_way_latency(),
+                //     get_two_way_latency()
+                // );
                 let _ = with_timeout(Duration::from_millis(10), client.print_csi_w_metadata()).await;
             }
         })
@@ -118,14 +115,10 @@ async fn main(spawner: Spawner) -> ! {
         CollectionMode::Collector,
         Some(CsiConfig::default()),
         Some(1000),
-        csi_hardware
+        csi_hardware,
     );
 
-    join(
-        node.run(),
-        node_task(&mut node_handle),
-    )
-    .await;
+    join(node.run(), node_task(&mut node_handle)).await;
 
     loop {
         log_ln!("Hello world!");

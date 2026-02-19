@@ -10,7 +10,7 @@ use esp_csi_rs::{
     PeripheralOpMode,
 };
 use esp_csi_rs::{
-    CSIClient, CSINodeHardware, get_avg_latency, get_avg_pps, get_dropped_packets, get_total_packets, log_ln
+    CSIClient, CSINodeHardware, get_pps_rx, get_pps_tx, get_dropped_packets_rx, get_one_way_latency, get_two_way_latency, log_ln
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -49,11 +49,12 @@ async fn node_task(client: &mut CSIClient) {
         loop {
             Timer::after_secs(1).await;
             log_ln!(
-                "Total Packets: {}, Average PPS: {}, Dropped Packets: {}, Average Latency: {}",
-                get_total_packets(),
-                get_avg_pps(),
-                get_dropped_packets(),
-                get_avg_latency()
+                "RX PPS: {}, TX PPS: {}, RX Dropped Packets: {}, One Way Latency: {}, Two Way Latency: {}",
+                get_pps_rx(),
+                get_pps_tx(),
+                get_dropped_packets_rx(),
+                get_one_way_latency(),
+                get_two_way_latency()
             )
         }
     })

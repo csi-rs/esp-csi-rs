@@ -55,6 +55,15 @@ static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
 static TWO_WAY_LATENCY: AtomicI64 = AtomicI64::new(0);
 static ONE_WAY_LATENCY: AtomicI64 = AtomicI64::new(0);
 
+use portable_atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+// Global counter for all drops across all MAC addresses
+static GLOBAL_PACKET_RX_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
+static GLOBAL_PACKET_TX_COUNT: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_PACKET_RX_COUNT: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_CAPTURE_START_TIME: AtomicU64 = AtomicU64::new(0);
+static TX_RATE_HZ: AtomicU32 = AtomicU32::new(0);
+static RX_RATE_HZ: AtomicU32 = AtomicU32::new(0);
+
 // Signals
 static STOP_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
@@ -205,6 +214,15 @@ impl PeripheralPacket {
             central_send_uptime,
         }
     }
+}
+
+fn reset_globals() {
+    GLOBAL_PACKET_RX_COUNT.store(0, Ordering::Relaxed);
+    GLOBAL_PACKET_RX_DROP_COUNT.store(0, Ordering::Relaxed);
+    GLOBAL_PACKET_TX_COUNT.store(0, Ordering::Relaxed);
+    TX_RATE_HZ.store(0, Ordering::Relaxed);
+    RX_RATE_HZ.store(0, Ordering::Relaxed);
+    reset_global_log_drops();
 }
 
 pub struct CSINode<'a> {
@@ -416,9 +434,7 @@ impl<'a> CSINode<'a> {
 
         STOP_SIGNAL.reset();
         let _ = controller.stop_async().await;
-        GLOBAL_PACKET_COUNT.store(0, Ordering::Relaxed);
-        GLOBAL_DROP_COUNT.store(0, Ordering::Relaxed);
-        reset_global_log_drops();
+        reset_globals();
     }
 }
 
@@ -454,24 +470,44 @@ fn build_csi_config(csi_config: &CsiConfiguration) -> CsiConfig {
     }
 }
 
-use portable_atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-// Global counter for all drops across all MAC addresses
-static GLOBAL_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
-static GLOBAL_PACKET_COUNT: AtomicU64 = AtomicU64::new(0);
-static GLOBAL_CAPTURE_START_TIME: AtomicU64 = AtomicU64::new(0);
-
-pub fn get_total_packets() -> u64 {
-    GLOBAL_PACKET_COUNT.load(Ordering::Relaxed)
+pub fn get_total_rx_packets() -> u64 {
+    GLOBAL_PACKET_RX_COUNT.load(Ordering::Relaxed)
 }
 
-pub fn get_avg_pps() -> u64 {
+pub fn get_total_tx_packets() -> u64 {
+    GLOBAL_PACKET_TX_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn get_rx_rate_hz() -> u32 {
+    RX_RATE_HZ.load(Ordering::Relaxed)
+}
+
+pub fn get_tx_rate_hz() -> u32 {
+    TX_RATE_HZ.load(Ordering::Relaxed)
+}
+
+pub fn get_pps_rx() -> u64 {
     let start_time = Instant::from_ticks(GLOBAL_CAPTURE_START_TIME.load(Ordering::Relaxed));
     let elapsed_secs = start_time.elapsed().as_secs() as u64;
-    let total_packets = GLOBAL_PACKET_COUNT.load(Ordering::Relaxed);
+    let total_packets = GLOBAL_PACKET_RX_COUNT.load(Ordering::Relaxed);
     if elapsed_secs == 0 {
         return total_packets;
     }
     total_packets / elapsed_secs
+}
+
+pub fn get_pps_tx() -> u64 {
+    let start_time = Instant::from_ticks(GLOBAL_CAPTURE_START_TIME.load(Ordering::Relaxed));
+    let elapsed_secs = start_time.elapsed().as_secs() as u64;
+    let total_packets = GLOBAL_PACKET_TX_COUNT.load(Ordering::Relaxed);
+    if elapsed_secs == 0 {
+        return total_packets;
+    }
+    total_packets / elapsed_secs
+}
+
+pub fn get_dropped_packets_rx() -> u32 {
+    GLOBAL_PACKET_RX_DROP_COUNT.load(Ordering::Relaxed)
 }
 
 /// Sets CSI Configuration.
@@ -504,7 +540,7 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
     match csi_data.extend_from_slice(csi_slice) {
         Ok(_) => {}
         Err(_) => {
-            GLOBAL_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+            GLOBAL_PACKET_RX_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
             return;
         }
     }
@@ -583,7 +619,7 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
     };
 
     CSI_PACKET.publish_immediate(csi_packet);
-    GLOBAL_PACKET_COUNT.fetch_add(1, Ordering::Relaxed);
+    GLOBAL_PACKET_RX_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 pub async fn run_process_csi_packet() {
@@ -610,9 +646,7 @@ pub async fn run_process_csi_packet() {
             Either3::Second(_) => {
                 COLLECTION_MODE_CHANGED.reset();
                 is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
-                GLOBAL_PACKET_COUNT.store(0, Ordering::Relaxed);
-                GLOBAL_DROP_COUNT.store(0, Ordering::Relaxed);
-                reset_global_log_drops();
+                reset_globals();
                 GLOBAL_CAPTURE_START_TIME.store(Instant::now().as_ticks(), Ordering::Relaxed);
             }
             Either3::Third(csi_packet) => {
@@ -631,7 +665,7 @@ pub async fn run_process_csi_packet() {
 
                             // Sanity check for huge gaps (e.g. router reset)
                             if lost < 500 {
-                                GLOBAL_DROP_COUNT.fetch_add(lost, Ordering::Relaxed);
+                                GLOBAL_PACKET_RX_DROP_COUNT.fetch_add(lost, Ordering::Relaxed);
                             }
                         }
                     }
@@ -646,10 +680,6 @@ pub async fn run_process_csi_packet() {
 }
 
 use crate::logging::logging::{get_log_packet_drops, reset_global_log_drops};
-
-pub fn get_dropped_packets() -> u32 {
-    GLOBAL_DROP_COUNT.load(Ordering::Relaxed) + get_log_packet_drops()
-}
 
 pub fn get_one_way_latency() -> i64 {
     ONE_WAY_LATENCY.load(Ordering::Relaxed)
