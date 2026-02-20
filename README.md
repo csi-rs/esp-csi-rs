@@ -65,15 +65,15 @@ Traffic roles in esp-csi-rs are defined as follows:
 
 ***WiFi Station***: Generates ICMP Echo Request broadcasts with incrementing sequence numbers.
 
-***ESP-NOW Central***: Sends data frames to peripherals to elicit a response.
+***ESP-NOW Central***: Sends data frames to peripherals to elicit a response and process collected CSI data.
 
 ***Data Collection***: The collected CSI is the data received from the target device where it was stimulated.
 
 ***Monitor***: In this role, the device (Station or ESP-NOW Peripheral) monitors incoming traffic to stimulate CSI collection.
 
-WiFi Station: Stimulated CSI is sent back to the trigger device alongside a sequence number tag in a UDP message.
+***WiFi Station***: Stimulated CSI is sent back to the trigger device alongside a sequence number tag in a UDP message.
 
-ESP-NOW Peripheral: Responds to central triggers, allowing the central device to calculate the CSI from the return transmission, Can be configured to process CSI directly.
+***ESP-NOW Peripheral***: Responds to central triggers, allowing the central device to calculate the CSI from the return transmission, Can be configured to process CSI directly.
 
 <div align="center">
 
