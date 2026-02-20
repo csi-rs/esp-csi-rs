@@ -31,44 +31,53 @@ With exception to the ESP32 and the ESP32-C2, `esp-csi-rs` leverages the `USB-JT
 ### ✅ Traffic Generation
 When setting up a CSI collection system, dummy traffic on the network is needed to exchange packets that encapsulate the CSI data. `esp-csi-rs` in turn allows you to generate ICMP traffic. The crate also allows you to control the intervals at which traffic is generated. The crate also supports external traffic triggers. The resulting CSI from an external trigger is sent back as a UDP packet.
 
-### ✅ Port Configuration
-Destination and source port numbers can be configured for UDP packets carrying CSI data. This is useful in cases where seperate destination port numbers are required at the CSI recieving end (Ex. Star Topology).
-
 ### ✅ Sequence Numbers Tags
 External trigger traffic are ICMP echo requests with sequence numbers. As such, UDP traffic carrying collected CSI data are tagged with sequence numbers that triggered the collection. This is useful in star topologies where the traffic generator wants to track the CSI generated with a single broadcast across several stations.
 
+### ✅ ESP-NOW
+`esp-csi-rs` supports ESP-NOW star topologies with a central node that can trigger traffic and aggregate CSI, while peripherals can collect CSI locally and stream results back over UDP.
 
 ### ✅ NTP Timestamp
 The crate supports synchronization with an NTP time server. Afterward, the acquired timestamp is associated with every recieved CSI packet.
 
-
 ## Network Architechtures
-`esp-csi-rs` allows you to configure a device to one several modes including access point, station, or sniffer. You would need at least `esp-csi-rs` supports several network setups allowing for flexibility in collection of CSI. Possible architechtures including the following:
+`esp-csi-rs` allows you to configure a device to one several modes including ESP-NOW listener/collector, wifi station, or sniffer.  
+`esp-csi-rs` supports several network setups allowing for flexibility in collection of CSI. Possible architechtures including the following:
 
-1. <span style="color:red">***ESP Sniffer***</span>: This is the simplest setup where only one ESP device is needed. The device is configured to "sniff" packets on surrounding networks and extract CSI data.
-2. <span style="color:red">***Commercial Router Connected to an ESP Station***</span>: In this setup only one ESP device is needed as well and is configrued as a Station. The ESP station then connects to a commercial router. The station sends traffic to the commercial router to acquire CSI data. Additionally, setups including a commercial router have the advantage of syncronizing with an NTP time server if needed. 
-3. <span style="color:red">***ESP Access Point Connected to an ESP Station***</span>: This setup requires the use of at least two ESP devices, one configured as a Station and one as an Access Point. The station sends traffic to the access point to acquire CSI data. This architechure is also expandable where additional stations can be introduces to connect to the central Access point.
-4. <span style="color:red">***Commercial Router Connected to an ESP Access Point/Station Connected to an ESP Station***</span>: This setup is similar to the Access Point setup with the difference that the Access Point + Station can also connect to a commercial router for internet access. This architechure is also expandable where additional stations can be introduces to connect to the central Access point.
-5. <span style="color:red">***ESP Access Point Connected to Several ESP Stations***</span>: This setup is the same as 3 except that several stations connect to the access point.
-6. <span style="color:red">***Commercial Router Connected to an ESP Access Point/Station Connected to Several ESP Stations***</span>: This setup is the same as 4 except that several stations connect to the access point.
+1. ***ESP Sniffer***: This is the simplest setup where only one ESP device is needed. The device is configured to "sniff" packets on surrounding networks and extract CSI data.
+2. ***Commercial Router Connected to an ESP Station***: In this setup only one ESP device is needed as well and is configrued as a Station. The ESP station then connects to a commercial router. The station sends traffic to the commercial router to acquire CSI data. Additionally, setups including a commercial router have the advantage of syncronizing with an NTP time server if needed. 
+3. ***ESP-NOW Central Conntected to multple ESP-NOW Peripherals***: A central ESP acts as the traffic trigger and CSI aggregator, while multiple peripheral ESP stations respond and stream their CSI back over UDP, while peripherals can be configured to do collection directly, enabling star‑topology collection with ESP-NOW architecture.
 
 
 <div align="center">
 
-![Network Architechtures 1](/assets/NetArch1.png)
-![Network Architechtures 2](/assets/NetArch2.png)
+![Network Architechtures](/assets/net-arch.png)
 
 </div>
 
 ## Traffic Generation
 
-Stimulating CSI data requires WiFi channel traffic. This traffic can be artifically generated by `esp-csi-rs`. In non-sniffer networks, CSI in `esp-csi-rs` is also always stimulated at a Station device but can be collected at a Station or Access Point triggering the traffic. Traffic can be generated in two different ways, either locally by the station itself, or remotely by an access point the station is connected to. Traffic roles in `esp-csi-rs` are defined as follows:
-1. <span style="color:red">***Trigger***</span>: In this role, the access point or station is the source of traffic and where the CSI data output is collected. In the case of an Access Point trigger, the collected CSI is the CSI recieved from the Station where it was stimulated. Additionally, the traffic generated by the Access Point is ICMP Echo Request broadcasts with an incrementing sequence number.
-2. <span style="color:red">***Monitor***</span>: In this role, the access point or station monitor incoming traffic to stimulate CSI collection. In the case of the Station, stimulated CSI is sent back to the access point alongside a sequence number tag in a UDP message.
+Stimulating CSI data requires WiFi channel traffic. This traffic can be artificially generated by esp-csi-rs. In non-sniffer networks, CSI is always stimulated at a Station or ESP-NOW Peripheral device, but it can be collected at the device triggering the traffic.
+
+Traffic roles in esp-csi-rs are defined as follows:
+
+***Trigger***: In this role, the device (Station or ESP-NOW Central) acts as the source of traffic and the point where CSI data is collected.
+
+***WiFi Station***: Generates ICMP Echo Request broadcasts with incrementing sequence numbers.
+
+***ESP-NOW Central***: Sends data frames to peripherals to elicit a response.
+
+***Data Collection***: The collected CSI is the data received from the target device where it was stimulated.
+
+***Monitor***: In this role, the device (Station or ESP-NOW Peripheral) monitors incoming traffic to stimulate CSI collection.
+
+WiFi Station: Stimulated CSI is sent back to the trigger device alongside a sequence number tag in a UDP message.
+
+ESP-NOW Peripheral: Responds to central triggers, allowing the central device to calculate the CSI from the return transmission, Can be configured to process CSI directly.
 
 <div align="center">
 
-![Traffic Generation](/assets/traffic-diagram.png)
+![Traffic Generation](/assets/traffic-generation.png)
 
 </div>
 
@@ -84,72 +93,15 @@ esp-generate --chip=esp32c3 your-project
 Add the crate to your `Cargo.toml`. At a minimum, you would need to specify the device and the desired logging framework (`println` or `defmt`):
 
 ```toml
-esp-csi-rs = { version = "0.1.0", features = ["esp32c3", "println"] }
+esp-csi-rs = { version = "0.3.0", features = ["esp32c3", "println"] }
 ```
 
 > ‼️ The selected logging framework needs to align with the selected framework for the `esp-backtrace` dependency
 
-## Usage Example
-This is the simplest example of how this crate can be used. This example follows a sniffer architechture where only one ESP device is needed. This example sets up the ESP to sniff packets of the surrounding networks and print out CSI data to the console.
-
-For more details refer to the crate [documentation](https://docs.rs/esp_csi_rs).
-
-```rust
-use esp_csi_rs::{collector::CSISniffer, config::CsiConfig};
-
-// Create a Collector Instance
-let mut csi_coll_snif = CSISniffer::new(CsiConfig::default(), controller).await;
-
-// Initialize CSI Collector
-csi_coll_snif.init(interfaces, &spawner).await.unwrap();
-
-// Start Collection
-csi_coll_snif.start_collection().await;
-
-// Collect for 2 Seconds
-with_timeout(Duration::from_secs(2), async {
-    loop {
-        csi_coll_snif.print_csi_w_metadata().await;
-    }
-})
-.await
-.unwrap_err();
-
-// Stop Collection
-csi_coll_snif.stop_collection().await;
-```
-
-Everytime CSI data is captured, the resulting output looks like this:
-```bash
-mac: D6:62:A7:DC:DF:7C
-rssi: -79
-rate: 9
-sig_mode: 0
-mcs: 0
-cwb: 0
-smoothing: 0
-not sounding: 0
-aggregation: 0
-stbc: 0
-fec coding: 0
-sgi: 0
-noise floor: 160
-ampdu cnt: 0
-channel: 1
-secondary channel: 1
-timestamp: 26123538
-ant: 0
-sig len: 28
-rx state: 0
-data length: 128
-csi raw data:
-[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -12, 9, -13, 8, -13, 6, -13, 4, -12, 2, -10, 2, -7, 2, -6, 2, -3, 3, -1, 4, 1, 6, 2, 8, 2, 10, 3, 11, 6, 13, 6, 14, 4, 14, 2, 15, 1, 14, 1, 13, 2, 11, 2, 8, 3, 4, 4, 0, 6, -4, 6, -5, 0, 0, 10, -11, 12, -11, 13, -12, 13, -12, 10, -11, 7, -12, 5, -12, 4, -11, 1, -11, -2, -11, -2, -11, -3, -11, -3, -10, -3, -8, -4, -5, -6, -3, -7, -1, -8, 0, -12, 2, -14, 4, -16, 3, -18, 1, -20, 0, -18, -2, -15, -4, -13, -5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-```
-
-## More Examples
+## Usage Examples
 The repository contains an example folder that contains examples for various device configurations. To run any of the examples enter the following to your command line:
 ```bash
-cargo run --example <example-name>
+cargo esp32s3 --example <example-name>
 ```
 Just replace `example-name` with the file name of any of the examples.
 
@@ -162,7 +114,7 @@ You can find full documentation on [docs.rs](https://docs.rs/esp_csi_rs).
 This crate is still in early development and currently supports `no-std` only. Contributions and suggestions are welcome!
 
 ## License
-Copyright 2025 The Embedded Rustacean
+Copyright 2026 The Embedded Rustacean
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
