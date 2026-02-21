@@ -41,6 +41,7 @@ jtag-serial = ["esp-println/jtag-serial"]
 auto = ["esp-println/auto"]
 uart = ["esp-println/uart"]
 no-print = ["esp-println/no-op"]
+async-print = []
 
 ## Support for the ESP32
 esp32 = [

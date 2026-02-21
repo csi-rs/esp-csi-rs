@@ -1,7 +1,13 @@
 use embedded_io_async::Write;
 use esp_hal::peripherals::Peripherals;
+use heapless::String;
+use portable_atomic::{AtomicU8, Ordering};
+use postcard::experimental::max_size::MaxSize;
 
-#[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
+#[cfg(all(
+    any(feature = "uart", feature = "jtag-serial", feature = "auto"),
+    feature = "async-print"
+))]
 mod csi_interface {
     use crate::csi::CSIDataPacket;
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
@@ -10,24 +16,32 @@ mod csi_interface {
     pub static LOG_DROPPED_PACKETS: AtomicU32 = AtomicU32::new(0);
 }
 
-#[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
+#[cfg(all(
+    any(feature = "uart", feature = "jtag-serial", feature = "auto"),
+    feature = "async-print"
+))]
 pub use csi_interface::{CSI_CHANNEL, LOG_DROPPED_PACKETS};
-use heapless::String;
-use portable_atomic::Ordering;
-use postcard::experimental::max_size::MaxSize;
+
+static LOG_MODE: AtomicU8 = AtomicU8::new(LogMode::Text as u8);
 
 pub fn get_log_packet_drops() -> u32 {
-    #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
+    #[cfg(all(
+        any(feature = "uart", feature = "jtag-serial", feature = "auto"),
+        feature = "async-print"
+    ))]
     {
         LOG_DROPPED_PACKETS.load(Ordering::Relaxed)
     }
-    #[cfg(not(any(feature = "uart", feature = "jtag-serial", feature = "auto")))]
+    #[cfg(not(all(
+        any(feature = "uart", feature = "jtag-serial", feature = "auto"),
+        feature = "async-print"
+    )))]
     {
         0
     }
 }
 
-#[cfg(feature = "println")]
+#[cfg(all(feature = "println", feature = "async-print"))]
 mod log_impl {
     use core::fmt::Write;
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
@@ -63,7 +77,7 @@ mod log_impl {
     }
 }
 
-#[cfg(feature = "defmt")]
+#[cfg(all(feature = "defmt", feature = "async-print"))]
 mod defmt_impl {
     use super::*;
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
@@ -94,6 +108,21 @@ pub enum LogMode {
     ArrayList,
 }
 
+impl From<u8> for LogMode {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => LogMode::Text,
+            1 => LogMode::Serialized,
+            2 => LogMode::ArrayList,
+            _ => LogMode::Text, // Default fallback
+        }
+    }
+}
+
+#[cfg(all(
+    any(feature = "uart", feature = "jtag-serial", feature = "auto"),
+    feature = "async-print"
+))]
 mod logging_impl {
     use embedded_io_async::{ErrorType, Write};
     use esp_hal::peripherals::Peripherals;
@@ -205,7 +234,7 @@ mod logging_impl {
 macro_rules! log_ln {
     ($($arg:tt)*) => {{
         #[cfg(
-            any(feature = "uart", feature = "jtag-serial", feature = "auto")
+            all(any(feature = "uart", feature = "jtag-serial", feature = "auto"), feature = "async-print")
         )]
         {
             #[cfg(feature = "println")]
@@ -225,80 +254,177 @@ macro_rules! log_ln {
             {
             }
         }
+        #[cfg(all(not(feature = "async-print"), any(feature = "uart", feature = "jtag-serial", feature = "auto")))]
+        {
+            #[cfg(feature = "println")]
+            {
+                esp_println::println!($($arg)*);
+            }
+
+            #[cfg(feature = "defmt")]
+            {
+                defmt::println!($($arg)*);
+            }
+
+            #[cfg(not(any(
+                feature = "println",
+                feature = "defmt"
+            )))]
+            {
+            }
+        }
+    }};
+}
+
+pub fn print_raw_bytes(bytes: &[u8]) {
+    #[cfg(all(
+        any(feature = "uart", feature = "jtag-serial", feature = "auto"),
+        feature = "async-print"
+    ))]
+    {
+        use core::fmt::Write;
+        let mut printer = esp_println::Printer;
+        for chunk in bytes.chunks(64) {
+            for &b in chunk {
+                let _ = printer.write_char(b as char);
+            }
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! log_raw {
+    ($data:expr) => {{
+        #[cfg(all(
+            any(feature = "uart", feature = "jtag-serial", feature = "auto"),
+            feature = "async-print"
+        ))]
+        {
+            #[cfg(feature = "println")]
+            {
+                print_raw_bytes($data.as_ref());
+            }
+
+            #[cfg(feature = "defmt")]
+            {
+                defmt::write!("{}", $data);
+            }
+        }
     }};
 }
 
 use crate::csi::CSIDataPacket;
 
 pub fn log_csi(packet: CSIDataPacket) {
-    #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
+    #[cfg(feature = "async-print")]
     {
-        match CSI_CHANNEL.try_send(packet) {
-            Ok(_) => {}
-            Err(_) => {
-                LOG_DROPPED_PACKETS.fetch_add(1, Ordering::Relaxed);
+        #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
+        {
+            match CSI_CHANNEL.try_send(packet) {
+                Ok(_) => {}
+                Err(_) => {
+                    LOG_DROPPED_PACKETS.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
+        #[cfg(not(any(feature = "uart", feature = "jtag-serial", feature = "auto")))]
+        {}
     }
-    #[cfg(not(any(feature = "uart", feature = "jtag-serial", feature = "auto")))]
-    {}
+    #[cfg(not(feature = "async-print"))]
+    {
+        #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
+        {
+            use core::sync::atomic::Ordering;
+
+            match LogMode::from(LOG_MODE.load(Ordering::Relaxed)) {
+                LogMode::Text => {
+                    write_text_packet(packet);
+                }
+                LogMode::Serialized => {
+                    write_serialized_packet(packet);
+                }
+                LogMode::ArrayList => {
+                    write_text_array_packet(packet);
+                }
+            }
+        }
+        #[cfg(not(any(feature = "uart", feature = "jtag-serial", feature = "auto")))]
+        {}
+    }
 }
 
+#[cfg(all(
+    feature = "async-print",
+    any(feature = "uart", feature = "jtag-serial", feature = "auto")
+))]
 use crate::logging::logging::logging_impl::LogOutput;
 
 pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
-    #[cfg(feature = "println")]
+    #[cfg(feature = "async-print")]
     {
-        log_impl::init_logger(log::LevelFilter::Info);
-    }
-    #[cfg(feature = "auto")]
-    {
-        #[cfg(not(feature = "esp32"))]
+        #[cfg(feature = "println")]
         {
-            let periphs = unsafe { Peripherals::steal() };
-            #[cfg(feature = "esp32c3")]
-            const USB_DEVICE_INT_RAW: *const u32 = 0x60043008 as *const u32;
-            #[cfg(feature = "esp32c6")]
-            const USB_DEVICE_INT_RAW: *const u32 = 0x6000f008 as *const u32;
-            #[cfg(feature = "esp32h2")]
-            const USB_DEVICE_INT_RAW: *const u32 = 0x6000f008 as *const u32;
-            #[cfg(feature = "esp32s3")]
-            const USB_DEVICE_INT_RAW: *const u32 = 0x60038000 as *const u32;
+            log_impl::init_logger(log::LevelFilter::Info);
+        }
+        #[cfg(feature = "auto")]
+        {
+            #[cfg(not(feature = "esp32"))]
+            {
+                let periphs = unsafe { Peripherals::steal() };
+                #[cfg(feature = "esp32c3")]
+                const USB_DEVICE_INT_RAW: *const u32 = 0x60043008 as *const u32;
+                #[cfg(feature = "esp32c6")]
+                const USB_DEVICE_INT_RAW: *const u32 = 0x6000f008 as *const u32;
+                #[cfg(feature = "esp32h2")]
+                const USB_DEVICE_INT_RAW: *const u32 = 0x6000f008 as *const u32;
+                #[cfg(feature = "esp32s3")]
+                const USB_DEVICE_INT_RAW: *const u32 = 0x60038000 as *const u32;
 
-            const SOF_INT_MASK: u32 = 0b10;
-            let res = unsafe { (USB_DEVICE_INT_RAW.read_volatile() & SOF_INT_MASK) != 0 };
-            if res == true {
-                let driver = LogOutput::new_jtag(periphs, log_mode);
-                spawner.spawn(logger_backend(driver)).unwrap();
-            } else {
+                const SOF_INT_MASK: u32 = 0b10;
+                let res = unsafe { (USB_DEVICE_INT_RAW.read_volatile() & SOF_INT_MASK) != 0 };
+                if res == true {
+                    let driver = LogOutput::new_jtag(periphs, log_mode);
+                    spawner.spawn(logger_backend(driver)).unwrap();
+                } else {
+                    let driver = LogOutput::new_uart(periphs, log_mode);
+                    spawner.spawn(logger_backend(driver)).unwrap();
+                }
+            }
+            #[cfg(feature = "esp32")]
+            {
+                let periphs = unsafe { Peripherals::steal() };
                 let driver = LogOutput::new_uart(periphs, log_mode);
                 spawner.spawn(logger_backend(driver)).unwrap();
             }
         }
-        #[cfg(feature = "esp32")]
+        #[cfg(all(feature = "jtag-serial", not(feature = "esp32")))]
+        {
+            let periphs = unsafe { Peripherals::steal() };
+            let driver = LogOutput::new_jtag(periphs, log_mode);
+            spawner.spawn(logger_backend(driver)).unwrap();
+        }
+        #[cfg(feature = "uart")]
         {
             let periphs = unsafe { Peripherals::steal() };
             let driver = LogOutput::new_uart(periphs, log_mode);
             spawner.spawn(logger_backend(driver)).unwrap();
         }
-    }
-    #[cfg(all(feature = "jtag-serial", not(feature = "esp32")))]
-    {
-        let periphs = unsafe { Peripherals::steal() };
-        let driver = LogOutput::new_jtag(periphs, log_mode);
-        spawner.spawn(logger_backend(driver)).unwrap();
-    }
-    #[cfg(feature = "uart")]
-    {
-        let periphs = unsafe { Peripherals::steal() };
-        let driver = LogOutput::new_uart(periphs, log_mode);
-        spawner.spawn(logger_backend(driver)).unwrap();
-    }
 
-    #[cfg(not(any(feature = "uart", feature = "jtag-serial", feature = "auto")))]
-    {}
+        #[cfg(not(any(feature = "uart", feature = "jtag-serial", feature = "auto")))]
+        {}
+    }
+    #[cfg(not(feature = "async-print"))]
+    {
+        #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
+        {
+            use core::sync::atomic::Ordering;
+
+            LOG_MODE.store(log_mode as u8, Ordering::Relaxed);
+        }
+    }
 }
 
+#[cfg(feature = "async-print")]
 async fn write_serialized_packet(packet: CSIDataPacket, driver: &mut LogOutput) -> Result<(), ()> {
     const PACKET_MAX_SIZE: usize = CSIDataPacket::POSTCARD_MAX_SIZE;
     const PACKET_BUF_SIZE: usize = PACKET_MAX_SIZE + (PACKET_MAX_SIZE / 254) + 1;
@@ -312,7 +438,21 @@ async fn write_serialized_packet(packet: CSIDataPacket, driver: &mut LogOutput) 
         Err(_) => Err(()),
     }
 }
+#[cfg(not(feature = "async-print"))]
+fn write_serialized_packet(packet: CSIDataPacket) {
+    const PACKET_MAX_SIZE: usize = CSIDataPacket::POSTCARD_MAX_SIZE;
+    const PACKET_BUF_SIZE: usize = PACKET_MAX_SIZE + (PACKET_MAX_SIZE / 254) + 1;
 
+    let mut buf = [0u8; PACKET_BUF_SIZE];
+    match postcard::to_slice_cobs(&packet, &mut buf) {
+        Ok(cobs_slice) => {
+            log_raw!(cobs_slice);
+        }
+        Err(_) => {}
+    }
+}
+
+#[cfg(feature = "async-print")]
 async fn write_text_array_packet(packet: CSIDataPacket, driver: &mut LogOutput) -> Result<(), ()> {
     use core::fmt::Write as FmtWrite;
 
@@ -387,7 +527,81 @@ async fn write_text_array_packet(packet: CSIDataPacket, driver: &mut LogOutput) 
 
     Ok(())
 }
+#[cfg(not(feature = "async-print"))]
+fn write_text_array_packet(packet: CSIDataPacket) {
+    use core::fmt::Write as FmtWrite;
 
+    let mut buf = String::<64>::new();
+    macro_rules! write_field {
+        ($arg:expr) => {
+            buf.clear();
+            if write!(&mut buf, "{},", $arg).is_ok() {
+                log_raw!(buf.as_str());
+            }
+        };
+    }
+    macro_rules! write_first_field {
+        ($arg:expr) => {
+            buf.clear();
+            if write!(&mut buf, "[{},", $arg).is_ok() {
+                log_raw!(buf.as_str());
+            }
+        };
+    }
+    macro_rules! write_last_field {
+        ($arg:expr) => {
+            buf.clear();
+            if write!(&mut buf, "{}]\r\n", $arg).is_ok() {
+                log_raw!(buf.as_str());
+            }
+        };
+    }
+
+    write_first_field!(packet.sequence_number);
+    write_field!(packet.rssi);
+    write_field!(packet.rate);
+    write_field!(packet.noise_floor);
+    write_field!(packet.channel);
+    write_field!(packet.timestamp);
+    write_field!(packet.sig_len);
+    write_field!(packet.rx_state);
+    #[cfg(not(feature = "esp32c6"))]
+    {
+        write_field!(packet.secondary_channel);
+        write_field!(packet.sgi);
+        write_field!(packet.antenna);
+        write_field!(packet.ampdu_cnt);
+        write_field!(packet.sig_mode);
+        write_field!(packet.mcs);
+        write_field!(packet.bandwidth);
+        write_field!(packet.smoothing);
+        write_field!(packet.not_sounding);
+        write_field!(packet.aggregation);
+        write_field!(packet.stbc);
+        write_field!(packet.fec_coding);
+    }
+    #[cfg(feature = "esp32c6")]
+    {
+        write_field!(packet.dump_len);
+        write_field!(packet.he_sigb_len);
+        write_field!(packet.cur_single_mpdu);
+        write_field!(packet.cur_bb_format);
+        write_field!(packet.rx_channel_estimate_info_vld);
+        write_field!(packet.rx_channel_estimate_len);
+        write_field!(packet.second);
+        write_field!(packet.channel);
+        write_field!(packet.is_group);
+        write_field!(packet.rxend_state);
+        write_field!(packet.rxmatch3);
+        write_field!(packet.rxmatch2);
+        write_field!(packet.rxmatch1);
+        write_field!(packet.rxmatch0);
+    }
+    write_field!(packet.sig_len);
+    write_last_field!(packet.csi_data_len);
+}
+
+#[cfg(feature = "async-print")]
 async fn write_text_packet(packet: CSIDataPacket, driver: &mut LogOutput) -> Result<(), ()> {
     use core::fmt::Write as FmtWrite;
 
@@ -525,7 +739,92 @@ async fn write_text_packet(packet: CSIDataPacket, driver: &mut LogOutput) -> Res
     Ok(())
 }
 
-#[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
+#[cfg(not(feature = "async-print"))]
+fn write_text_packet(packet: CSIDataPacket) {
+    use core::fmt::Write as FmtWrite;
+
+    let mut buf = String::<128>::new();
+
+    if let Some(dt) = &packet.date_time {
+        log_ln!(
+            "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+            dt.year,
+            dt.month,
+            dt.day,
+            dt.hour,
+            dt.minute,
+            dt.second,
+            dt.millisecond
+        );
+    }
+
+    log_ln!(
+        "mac: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        packet.mac[0],
+        packet.mac[1],
+        packet.mac[2],
+        packet.mac[3],
+        packet.mac[4],
+        packet.mac[5]
+    );
+
+    log_ln!("sequence number: {}", packet.sequence_number);
+    log_ln!("rssi: {}", packet.rssi);
+    log_ln!("rate: {}", packet.rate);
+    log_ln!("noise floor: {}", packet.noise_floor);
+    log_ln!("channel: {}", packet.channel);
+    log_ln!("timestamp: {}", packet.timestamp);
+    log_ln!("sig len: {}", packet.sig_len);
+    log_ln!("rx state: {}", packet.rx_state);
+    #[cfg(not(feature = "esp32c6"))]
+    {
+        log_ln!("secondary channel: {}", packet.secondary_channel);
+        log_ln!("sgi: {}", packet.sgi);
+        log_ln!("ant: {}", packet.antenna);
+        log_ln!("ampdu cnt: {}", packet.ampdu_cnt);
+        log_ln!("sig_mode: {}", packet.sig_mode);
+        log_ln!("mcs: {}", packet.mcs);
+        log_ln!("cwb: {}", packet.bandwidth);
+        log_ln!("smoothing: {}", packet.smoothing);
+        log_ln!("not sounding: {}", packet.not_sounding);
+        log_ln!("aggregation: {}", packet.aggregation);
+        log_ln!("stbc: {}", packet.stbc);
+        log_ln!("fec coding: {}", packet.fec_coding);
+    }
+    #[cfg(feature = "esp32c6")]
+    {
+        log_ln!("dump len: {}", packet.dump_len);
+        log_ln!("he sigb len: {}", packet.he_sigb_len);
+        log_ln!("cur single mpdu: {}", packet.cur_single_mpdu);
+        log_ln!("cur bb format: {}", packet.cur_bb_format);
+        log_ln!(
+            "rx channel estimate info vld: {}",
+            packet.rx_channel_estimate_info_vld
+        );
+        log_ln!(
+            "rx channel estimate len: {}",
+            packet.rx_channel_estimate_len
+        );
+        log_ln!("time seconds: {}", packet.second);
+        log_ln!("channel: {}", packet.channel);
+        log_ln!("is group: {}", packet.is_group);
+        log_ln!("rxend state: {}", packet.rxend_state);
+        log_ln!("rxmatch3: {}", packet.rxmatch3);
+        log_ln!("rxmatch2: {}", packet.rxmatch2);
+        log_ln!("rxmatch1: {}", packet.rxmatch1);
+        log_ln!("rxmatch0: {}", packet.rxmatch0);
+    }
+
+    log_ln!("sig_len: {}", packet.sig_len);
+    log_ln!("data length: {}", packet.csi_data_len);
+
+    log_ln!("csi raw data: [{:X?}]", packet.csi_data);
+}
+
+#[cfg(all(
+    any(feature = "uart", feature = "jtag-serial", feature = "auto"),
+    feature = "async-print"
+))]
 #[embassy_executor::task]
 pub async fn logger_backend(mut driver: LogOutput) {
     use embassy_futures::select::{select, Either};
@@ -570,7 +869,10 @@ pub async fn logger_backend(mut driver: LogOutput) {
 }
 
 pub fn reset_global_log_drops() {
-    #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
+    #[cfg(all(
+        any(feature = "uart", feature = "jtag-serial", feature = "auto"),
+        feature = "async-print"
+    ))]
     {
         LOG_DROPPED_PACKETS.store(0, Ordering::Relaxed);
     }
