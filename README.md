@@ -35,10 +35,9 @@ When setting up a CSI collection system, dummy traffic on the network is needed 
 External trigger traffic are ICMP echo requests with sequence numbers. As such, UDP traffic carrying collected CSI data are tagged with sequence numbers that triggered the collection. This is useful in star topologies where the traffic generator wants to track the CSI generated with a single broadcast across several stations.
 
 ### ✅ ESP-NOW
-`esp-csi-rs` supports ESP-NOW star topologies with a central node that can trigger traffic and aggregate CSI, while peripherals can collect CSI locally and stream results back over UDP.
+By enabling the optional async-print feature, the crate delegates packet serialization and output to an asynchronous driver. This ensures that heavy I/O operations (like writing COBS-encoded data to serial) won't block your async executor. Keeping logging non-blocking is critical for maintaining high-speed ESP-NOW throughput and preventing dropped CSI packets.
 
-### ✅ NTP Timestamp
-The crate supports synchronization with an NTP time server. Afterward, the acquired timestamp is associated with every recieved CSI packet.
+### ✅ Async Logging
 
 ## Network Architechtures
 `esp-csi-rs` allows you to configure a device to one several modes including ESP-NOW listener/collector, wifi station, or sniffer.  
