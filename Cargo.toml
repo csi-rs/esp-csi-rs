@@ -16,14 +16,11 @@ exclude = ["target/debug/*", "assets/*"]
 path = "src/lib/lib.rs"
 
 [features]
-#! Feature flags used by examples and docs.rs. Select exactly one device feature
-#! (esp32, esp32c2, esp32c3, esp32c6, esp32s3) for builds.
 #! ⚠️ At minimum you are required to choose only ONE of the device options. For the most efficient (and fastest) logging, you should combine defmt with the jtag-serial features.
 
 default = ["no-std", "println", "auto", "statistics", "async-print"]
 ## Build without the standard library.
 no-std = []
-## NOTE: esp-println is used only for panic logging
 ## Enable logging via defmt.
 defmt = [
     "dep:defmt",
@@ -32,24 +29,21 @@ defmt = [
     "esp-radio/defmt",
     "esp-backtrace/defmt",
     "embassy-executor/defmt",
-    "esp-println/defmt-espflash"
+    "esp-println/defmt-espflash",
 ]
-## Enable logging via `println!()` instead of defmt.
-println = [
-    "dep:log",
-    "esp-backtrace/println"
-]
-## Force the JTAG backend for println!() (only one should be enabled at a time).
-jtag-serial = ["esp-println/jtag-serial"]
-## Convenience features for println!() backends. `auto` selects the best available backend for the target, while `uart` forces the UART backend.
+## Enable logging via `println!()`.
+println = ["dep:log", "esp-backtrace/println"]
+## Automatically select the best available backend for the target.
 auto = ["esp-println/auto"]
-## Force the UART backend for println!() (not recommended, as it is much slower than JTAG logging).
+## Force the JTAG backend for logging.
+jtag-serial = ["esp-println/jtag-serial"]
+## Force the UART backend for logging (not recommended, much slower than JTAG backend).
 uart = ["esp-println/uart"]
-## Disable all logging (including panics) for maximum performance. Not recommended for general use, but can be useful for benchmarking or if you have an alternative logging mechanism.
+## Disable all logging.
 no-print = ["esp-println/no-op"]
-## Override logging logic to use async printing. This is an unstable feature and may cause unexpected behavior. Use with caution.
+## Non-blocking async logging. This is an unstable feature and may cause unexpected behavior. Use with caution.
 async-print = []
-## Enable collection of runtime statistics (e.g., latency, dropped packets). This is disabled by default to avoid the overhead of atomic operations on the critical path. Enable this feature if you want to collect and log statistics in your application.
+## Enable collection of runtime statistics (e.g., latency, dropped packets).
 statistics = []
 
 ## Support for the ESP32
@@ -83,15 +77,15 @@ esp32c2 = [
 
 # ## Support for the ESP32-C3
 esp32c3 = [
-        "esp-hal/esp32c3",
-        "esp-hal/rt",
-        "esp-backtrace/esp32c3",
-        "esp-radio/esp32c3",
-        "esp-bootloader-esp-idf/esp32c3",
-        "esp-radio/csi",
-        "esp-radio/sniffer",
-        "esp-println/esp32c3",
-        "esp-rtos/esp32c3",
+    "esp-hal/esp32c3",
+    "esp-hal/rt",
+    "esp-backtrace/esp32c3",
+    "esp-radio/esp32c3",
+    "esp-bootloader-esp-idf/esp32c3",
+    "esp-radio/csi",
+    "esp-radio/sniffer",
+    "esp-println/esp32c3",
+    "esp-rtos/esp32c3",
 ]
 
 # ## Support for the ESP32-C6 (WiFi 6)
@@ -173,7 +167,9 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
     "socket-tcp",
     "socket-udp",
 ] }
-heapless = { version = "0.7", default-features = false, optional = false, features = ["serde"] }
+heapless = { version = "0.7", default-features = false, optional = false, features = [
+    "serde",
+] }
 embassy-sync = { version = "0.7.0", optional = false }
 enumset = { version = "1.1.5", optional = false }
 embassy-futures = "0.1.2"
@@ -193,13 +189,15 @@ document-features = "0.2.11"
 defmt = { version = "1.0.1", optional = true }
 defmt-rtt = { version = "1.1.0", optional = true }
 
-log = {version = "0.4.29", optional = true }
+log = { version = "0.4.29", optional = true }
 
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 postcard = { version = "1.1.3", features = ["experimental-derive", "heapless"] }
 
 portable-atomic = { version = "1.13.0", default-features = false }
-zerocopy = { version = "0.8.37", default-features = false, features = ["derive"] }
+zerocopy = { version = "0.8.37", default-features = false, features = [
+    "derive",
+] }
 
 [profile.dev]
 # Rust debug is too slow.

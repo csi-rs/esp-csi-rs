@@ -28,25 +28,38 @@
 //!
 //! ## Feature Flags
 #![doc = document_features::document_features!()]
-//! ## Using the `esp-csi-rs` Crate
+//! ## Using the Crate
 //!
-//! This crate revolves around two axes:
-//! 1) **Node role**: Central vs Peripheral.
-//! 2) **Collection mode**: Collector vs Listener.
+//! Each ESP device is represented as a node in a collection networks. For each node, we need to configure its role in the network, the mode of operation, and the CSI collection behavior. The node role determines how the node participates in the network and interacts with other nodes, while the collection mode determines how the node handles CSI data.
 //!
-//! ### CollectionMode: Collector vs Listener
-//! - **Collector** actively processes CSI data. Use this when you want to store,
-//!   stream, or analyze CSI samples.
-//! - **Listener** keeps CSI traffic flowing but does not process CSI data. This is
-//!   useful when a node must participate in control/traffic but should not consume
-//!   CSI samples.
+//! ### Node Roles
+//! 1) **Central Node**: This type of node is one that generates traffic, also can connect to one or more peripheral nodes.
+//! 2) **Peripheral Node**: This type of node does not generate traffic, also can optionally connect to one central node at most.
 //!
-//! **Important:** Using **Listener** with a **Sniffer** node makes the sniffer
-//! effectively useless because no CSI data is processed.
+//! ### Collection Modes
+//! 1) **Collector**: A collector node collects and provides CSI data output from one or more devices.
+//! 2) **Listener**: A listener is a passive node. It only enables CSI collection and does not provide any CSI output.
 //!
-//! ### Node roles
-//! #### Central
-//! A Central node coordinates traffic and can drive collection. It can operate in:
+//! A collector node typically is the one that actively processes CSI data. A listener on the other hand typically keeps CSI traffic flowing but does not process CSI data.
+//!
+//! ### Node Operation Modes
+//! The operation mode determines how the node operates in terms of Wi-Fi features and interactions with other nodes. The supported operation modes are:
+//! 1) ESP-NOW
+//! 2) Wi-Fi Station (Central only)
+//! 3) Wi-Fi Sniffer (Peripheral only)
+//!
+//! ## Network Architechtures
+//! `esp-csi-rs` allows you to configure a device to one several operational modes including ESP-NOW, wifi station, or sniffer. As such, `esp-csi-rs` supports several network setups allowing for flexibility in collecting of CSI. Some possible setups including the following:
+//!
+//! 1. ***Single Node:***  This is the simplest setup where only one ESP device (CSI Node) is needed. The node is configured to "sniff" packets in surrounding networks and collect CSI data. The WiFi Sniffer Peripheral Collector is the only possible configuration that supports this topology.
+//! 2. ***Point-to-Point:*** This set up uses two CSI Nodes, a central and a peripheral. One of them can be a collector and the other a listener. Alternatively, both can be collectors as well. Some configuration examples include
+//!     - **WiFi Station Central Collector <-> Access Point/Commercial Router**: In this configuration the CSI node can connect to any WiFi Access Point like an ESP AP or a commercial router. The node in turn sends traffic to the Access Point to acquire CSI data.
+//!     - **ESP-NOW Central Listener/Collector <-> ESP-NOW Peripheral Listener/Collector**: In this configuration a CSI central node connects to one other ESP-NOW peripheral node. Both ESP-NOW peripheral and central nodes can operate either as listeners or collectors.
+//! 3. ***Star:*** In this architechture a central node connects to several peripheral nodes. The central node triggers traffic and aggregates CSI sent back from peripheral nodes. Alternatively, CSI can be collected by the individual peripherals. Only the ESP-NOW operation mode supports this architechture. The ESP-NOW peripheral and central nodes can also operate either as listeners or collectors.
+//!
+//! ### Theory of Operation
+//! #### Central Nodes
+//! A Central node coordinates traffic and can drive collection. It can operate in one of two modes:
 //! - **ESP-NOW** (`CentralOpMode::EspNow`):
 //!   - Broadcasts `ControlPacket`s to peripherals.
 //!   - Receives `PeripheralPacket` replies.
@@ -55,23 +68,15 @@
 //!   - Connects to an AP, runs DHCP, optional NTP sync, and generates traffic.
 //!   - Useful when you want CSI from infrastructure Wi‑Fi networks.
 //!
-//! #### Peripheral
-//! A Peripheral node responds to the Central and can also be a local collector.
-//! It can operate in:
+//! #### Peripheral Nodes
+//! A Peripheral node responds to the Central node and can also collect CSI locally. It can operate on one of two modes:
 //! - **ESP-NOW** (`PeripheralOpMode::EspNow`):
-//!   - Listens for Central `ControlPacket`s and replies.
-//!   - Can be `Collector` or `Listener` depending on your pipeline.
+//!   - Listens for Central `ControlPacket`s and responds with CSI data.
+//!   - Can be configured as a `Collector` or `Listener`.
 //! - **Wi‑Fi Sniffer** (`PeripheralOpMode::WifiSniffer`):
-//!   - Promiscuously receives frames and emits CSI.
 //!   - Requires `CollectionMode::Collector` to be useful.
+//!   - Promiscuously receives frames and collects CSI.
 //!
-//! ### Typical configurations
-//! - **Central (ESP‑NOW) + Peripheral (ESP‑NOW)**
-//!   - Good for coordinated CSI capture between two devices.
-//!   - Central can drive the collection state of peripherals.
-//! - **Central (Station) + Peripheral (Sniffer)**
-//!   - Central generates traffic on an AP; sniffer collects CSI from nearby traffic.
-//!   - Use `Collector` on the sniffer to actually process CSI.
 //!
 //! ### High‑level flow (CSINode)
 //! 1. Create a `CSINodeHardware` from `Interfaces` and `WifiController`.
