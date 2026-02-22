@@ -1,4 +1,4 @@
-# esp csi rs
+# `esp-csi-rs`
 
 A Rust crate for collecting **Channel State Information (CSI)** on **ESP32** series devices using the `no-std` embedded framework.
 
@@ -23,60 +23,55 @@ A Rust crate for collecting **Channel State Information (CSI)** on **ESP32** ser
 - ESP32-S3
 
 ### ✅ Host Interface
-With exception to the ESP32 and the ESP32-C2, `esp-csi-rs` leverages the `USB-JTAG-SERIAL` peripheral available on many recent ESP development boards. This allows for higher baud rates compared to using the traditional UART interface.
+With exception to the ESP32 and the ESP32-C2, `esp-csi-rs` leverages the `USB-JTAG-SERIAL` peripheral available on many recent ESP development boards. This allows for higher baud rates compared to using the UART interface.
 
-### ✅ `defmt`
-`esp-csi-rs` reduces device to host transfer overhead further by supporting `defmt`. `defmt` is a highly efficient logging framework introduced by Ferrous Systems that targets resource-constrained devices. More detail about `defmt` can be found [here](https://defmt.ferrous-systems.com/).
-
-### ✅ Traffic Generation
-When setting up a CSI collection system, dummy traffic on the network is needed to exchange packets that encapsulate the CSI data. `esp-csi-rs` in turn allows you to generate ICMP traffic. The crate also allows you to control the intervals at which traffic is generated. The crate also supports external traffic triggers. The resulting CSI from an external trigger is sent back as a UDP packet.
-
-### ✅ Sequence Numbers Tags
-External trigger traffic are ICMP echo requests with sequence numbers. As such, UDP traffic carrying collected CSI data are tagged with sequence numbers that triggered the collection. This is useful in star topologies where the traffic generator wants to track the CSI generated with a single broadcast across several stations.
-
-### ✅ ESP-NOW
-By enabling the optional async-print feature, the crate delegates packet serialization and output to an asynchronous driver. This ensures that heavy I/O operations (like writing COBS-encoded data to serial) won't block your async executor. Keeping logging non-blocking is critical for maintaining high-speed ESP-NOW throughput and preventing dropped CSI packets.
+### ✅ `defmt` & Serialized Output
+`esp-csi-rs` reduces device to host transfer overhead further by supporting both serialized output and `defmt`. This allows for better CSI throughput when communicating the output to a host device. `defmt` is a highly efficient logging framework introduced by Ferrous Systems that targets resource-constrained devices. More detail about `defmt` can be found [here](https://defmt.ferrous-systems.com/).
 
 ### ✅ Async Logging
+By enabling the optional async-print feature, the crate delegates packet serialization and output to an asynchronous driver. This ensures that heavy I/O operations won't block the async executor. Keeping logging non-blocking is critical for maintaining higher throughput and preventing dropped CSI packets.
+
+### ✅ Traffic Generation
+When setting up a CSI collection system, dummy traffic on the network is needed to exchange packets that encapsulate the CSI data. `esp-csi-rs` allows you to control the intervals at which traffic is generated.
+
+### ✅ Sequence Number Tags
+Traffic carrying collected CSI data are tagged with sequence numbers that triggered the collection. This is useful in star topologies where the traffic generator wants to track the CSI generated with a single broadcast across several stations.
+
+## Node Roles
+
+`esp-cs-rs` defines two types of roles that a node can take in a collection network:
+
+1. **Central Node**: This type of node is one that generates traffic, also can connect to one or more peripheral nodes.
+2. **Peripheral Node**: This type of node does not generate traffic, also can optionally connect to one central node at most.
+
+## Node CSI Collection Modes
+
+`esp-cs-rs` defines two types of collection modes:
+
+1. **Collector**: A collector node collects and provides CSI data output from one or more devices.
+2. **Listener**: A listener is a passive node. It only enables CSI collection and does not provide any CSI output.
+
+## Node Operation Modes
+
+`esp-csi-rs` supports three operational modes:
+
+1. ESP-NOW
+2. WiFi Sniffer
+3. WiFi Station
+
 
 ## Network Architechtures
-`esp-csi-rs` allows you to configure a device to one several modes including ESP-NOW listener/collector, wifi station, or sniffer.  
-`esp-csi-rs` supports several network setups allowing for flexibility in collection of CSI. Possible architechtures including the following:
+`esp-csi-rs` allows you to configure a device to one several operational modes including ESP-NOW, wifi station, or sniffer. As such, `esp-csi-rs` supports several network setups allowing for flexibility in collecting of CSI. Some possible setups including the following:
 
-1. ***ESP Sniffer***: This is the simplest setup where only one ESP device is needed. The device is configured to "sniff" packets on surrounding networks and extract CSI data.
-2. ***Commercial Router Connected to an ESP Station***: In this setup only one ESP device is needed as well and is configrued as a Station. The ESP station then connects to a commercial router. The station sends traffic to the commercial router to acquire CSI data. Additionally, setups including a commercial router have the advantage of syncronizing with an NTP time server if needed. 
-3. ***ESP-NOW Central Conntected to multple ESP-NOW Peripherals***: A central ESP acts as the traffic trigger and CSI aggregator, while multiple peripheral ESP stations respond and stream their CSI back over UDP, while peripherals can be configured to do collection directly, enabling star‑topology collection with ESP-NOW architecture.
-
+1. ***Single Node:***  This is the simplest setup where only one ESP device (CSI Node) is needed. The node is configured to "sniff" packets in surrounding networks and collect CSI data. The WiFi Sniffer Peripheral Collector is the only possible configuration that supports this topology. 
+2. ***Point-to-Point:*** This set up uses two CSI Nodes, a central and a peripheral. One of them can be a collector and the other a listener. Alternatively, both can be collectors as well. Some configuration examples include
+    - **WiFi Station Central Collector <-> Access Point/Commercial Router**: In this configuration the CSI node can connect to any WiFi Access Point like an ESP AP or a commercial router. The node in turn sends traffic to the Access Point to acquire CSI data.
+    - **ESP-NOW Central Listener/Collector <-> ESP-NOW Peripheral Listener/Collector**: In this configuration a CSI central node connects to one other ESP-NOW peripheral node. Both ESP-NOW peripheral and central nodes can operate either as listeners or collectors.
+3. ***Star:*** In this architechture a central node connects to several peripheral nodes. The central node triggers traffic and aggregates CSI sent back from peripheral nodes. Alternatively, CSI can be collected by the individual peripherals. Only the ESP-NOW operation mode supports this architechture. The ESP-NOW peripheral and central nodes can also operate either as listeners or collectors. 
 
 <div align="center">
 
 ![Network Architechtures](/assets/net-arch.png)
-
-</div>
-
-## Traffic Generation
-
-Stimulating CSI data requires WiFi channel traffic. This traffic can be artificially generated by esp-csi-rs. In non-sniffer networks, CSI is always stimulated at a Station or ESP-NOW Peripheral device, but it can be collected at the device triggering the traffic.
-
-Traffic roles in esp-csi-rs are defined as follows:
-
-***Trigger***: In this role, the device (Station or ESP-NOW Central) acts as the source of traffic and the point where CSI data is collected.
-
-***WiFi Station***: Generates ICMP Echo Request broadcasts with incrementing sequence numbers.
-
-***ESP-NOW Central***: Sends data frames to peripherals to elicit a response and process collected CSI data.
-
-***Data Collection***: The collected CSI is the data received from the target device where it was stimulated.
-
-***Monitor***: In this role, the device (Station or ESP-NOW Peripheral) monitors incoming traffic to stimulate CSI collection.
-
-***WiFi Station***: Stimulated CSI is sent back to the trigger device alongside a sequence number tag in a UDP message.
-
-***ESP-NOW Peripheral***: Responds to central triggers, allowing the central device to calculate the CSI from the return transmission, Can be configured to process CSI directly.
-
-<div align="center">
-
-![Traffic Generation](/assets/traffic-generation.png)
 
 </div>
 
