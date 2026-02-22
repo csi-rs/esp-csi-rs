@@ -27,6 +27,10 @@ use zerocopy::IntoBytes;
 
 use crate::EspNowConfig;
 
+/// Run ESP-NOW in Peripheral mode.
+///
+/// Configures the channel and starts the responder loop that listens for
+/// `ControlPacket`s from a Central node and replies with `PeripheralPacket`s.
 pub async fn run_esp_now_peripheral(
     esp_now: &mut EspNow<'static>,
     config: &EspNowConfig,
@@ -43,6 +47,7 @@ pub async fn run_esp_now_peripheral(
     responder(esp_now, freq).await;
 }
 
+/// Responder loop that handles ESP-NOW control packets and sends replies.
 async fn responder(esp_now: &mut EspNow<'static>, frequency_hz: u64) {
     let mut is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
     let initial_is_collector = is_collector;

@@ -1,3 +1,89 @@
+//! # A crate for CSI collection on ESP devices
+//! ## Overview
+//! This crate builds on the low level Espressif abstractions to enable the collection of Channel State Information (CSI) on ESP devices with ease.
+//! Currently this crate supports only the ESP `no-std` development framework.
+//!
+//! ### Choosing a device
+//! In terms of hardware, you need to make sure that the device you choose supports WiFi and CSI collection.
+//! Currently supported devices include:
+//! - ESP32
+//! - ESP32-C2
+//! - ESP32-C3
+//! - ESP32-C6
+//! - ESP32-S3
+//!
+//! In terms of project and software toolchain setup, you will need to specify the hardware you will be using. To minimize headache, it is recommended that you generate a project using `esp-generate` as explained next.
+//!
+//! ### Creating a project
+//! To use this crate you would need to create and setup a project for your ESP device then import the crate. This crate is compatible with the `no-std` ESP development framework. You should also select the corresponding device by activating it in the crate features.
+//!
+//! To create a projects it is highly recommended to refer the to instructions in [The Rust on ESP Book](https://docs.esp-rs.org/book/) before proceeding. The book explains the full esp-rs ecosystem, how to get started, and how to generate projects for both `std` and `no-std`.
+//!
+//! Espressif has developed a project generation tool, `esp-generate`, to ease this process and is recommended for new projects. As an example, you can create a `no-std` project for the ESP32-C3 device as follows:
+//!
+//! ```bash
+//! cargo install esp-generate
+//! esp-generate --chip=esp32c3 [project-name]
+//! ```
+//!
+//! ## Feature Flags
+#![doc = document_features::document_features!()]
+//! ## Using the `esp-csi-rs` Crate
+//!
+//! This crate revolves around two axes:
+//! 1) **Node role**: Central vs Peripheral.
+//! 2) **Collection mode**: Collector vs Listener.
+//!
+//! ### CollectionMode: Collector vs Listener
+//! - **Collector** actively processes CSI data. Use this when you want to store,
+//!   stream, or analyze CSI samples.
+//! - **Listener** keeps CSI traffic flowing but does not process CSI data. This is
+//!   useful when a node must participate in control/traffic but should not consume
+//!   CSI samples.
+//!
+//! **Important:** Using **Listener** with a **Sniffer** node makes the sniffer
+//! effectively useless because no CSI data is processed.
+//!
+//! ### Node roles
+//! #### Central
+//! A Central node coordinates traffic and can drive collection. It can operate in:
+//! - **ESP-NOW** (`CentralOpMode::EspNow`):
+//!   - Broadcasts `ControlPacket`s to peripherals.
+//!   - Receives `PeripheralPacket` replies.
+//!   - Optionally drives CSI collection if `CollectionMode::Collector`.
+//! - **Wi‑Fi Station** (`CentralOpMode::WifiStation`):
+//!   - Connects to an AP, runs DHCP, optional NTP sync, and generates traffic.
+//!   - Useful when you want CSI from infrastructure Wi‑Fi networks.
+//!
+//! #### Peripheral
+//! A Peripheral node responds to the Central and can also be a local collector.
+//! It can operate in:
+//! - **ESP-NOW** (`PeripheralOpMode::EspNow`):
+//!   - Listens for Central `ControlPacket`s and replies.
+//!   - Can be `Collector` or `Listener` depending on your pipeline.
+//! - **Wi‑Fi Sniffer** (`PeripheralOpMode::WifiSniffer`):
+//!   - Promiscuously receives frames and emits CSI.
+//!   - Requires `CollectionMode::Collector` to be useful.
+//!
+//! ### Typical configurations
+//! - **Central (ESP‑NOW) + Peripheral (ESP‑NOW)**
+//!   - Good for coordinated CSI capture between two devices.
+//!   - Central can drive the collection state of peripherals.
+//! - **Central (Station) + Peripheral (Sniffer)**
+//!   - Central generates traffic on an AP; sniffer collects CSI from nearby traffic.
+//!   - Use `Collector` on the sniffer to actually process CSI.
+//!
+//! ### High‑level flow (CSINode)
+//! 1. Create a `CSINodeHardware` from `Interfaces` and `WifiController`.
+//! 2. Choose `Node` + operation mode (Central/Peripheral + ESP‑NOW/Station/Sniffer).
+//! 3. Choose `CollectionMode` (Collector/Listener).
+//! 4. Optionally set CSI config, rate, protocol, and traffic frequency.
+//! 5. Call `CSINode::run()` to start.
+//!
+//! ### Examples
+//! See the examples in the `examples/` directory for a variety of supported
+//! configurations and usage patterns.
+//!
 #![no_std]
 
 use portable_atomic::AtomicI64;
@@ -54,16 +140,24 @@ static CENTRAL_MAGIC_NUMBER: u32 = 0xA8912BF0;
 static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
 
 use portable_atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-// Global counter for all drops across all MAC addresses
+/// Global statistics counters (enabled with the `statistics` feature).
 #[cfg(feature = "statistics")]
 struct GlobalStats {
+    /// Total transmitted packets.
     tx_count: AtomicU64,
+    /// Total received packets.
     rx_count: AtomicU64,
+    /// Estimated number of dropped RX packets.
     rx_drop_count: AtomicU32,
+    /// Capture start time (ticks).
     capture_start_time: AtomicU64,
+    /// Current TX packet rate (Hz).
     tx_rate_hz: AtomicU32,
+    /// Current RX packet rate (Hz).
     rx_rate_hz: AtomicU32,
+    /// One-way latency (microseconds).
     one_way_latency: AtomicI64,
+    /// Two-way latency (microseconds).
     two_way_latency: AtomicI64,
 }
 
@@ -90,11 +184,15 @@ static STATS: GlobalStats = GlobalStats {
 // Signals
 static STOP_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
+/// Internal fucntion to change collection mode at runtime (e.g. Central can signal Peripheral to start/stop collecting CSI).
 fn set_runtime_collection_mode(is_collector: bool) {
     IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
     COLLECTION_MODE_CHANGED.signal(());
 }
 
+/// Configuration for ESP-NOW traffic generation.
+///
+/// Used by both Central and Peripheral nodes when operating in ESP-NOW mode.
 pub struct EspNowConfig {
     phy_rate: WifiPhyRate,
     channel: u8,
@@ -109,6 +207,7 @@ impl Default for EspNowConfig {
     }
 }
 
+/// Configuration for Wi-Fi Promiscuous Sniffer mode.
 #[derive(Debug, Clone)]
 pub struct WifiSnifferConfig {
     mac_filter: Option<[u8; 6]>,
@@ -120,6 +219,7 @@ impl Default for WifiSnifferConfig {
     }
 }
 
+/// Configuration for Wi-Fi Station mode.
 #[derive(Debug, Clone)]
 pub struct WifiStationConfig {
     pub ntp_sync: bool,
@@ -128,34 +228,47 @@ pub struct WifiStationConfig {
 
 // Enum for Central modes, each wrapping its specific config.
 
+/// Central node operational modes.
 pub enum CentralOpMode {
     EspNow(EspNowConfig),
     WifiStation(WifiStationConfig),
 }
 
 // Enum for Peripheral modes, each wrapping its specific config.
+/// Peripheral node operational modes.
 pub enum PeripheralOpMode {
     EspNow(EspNowConfig),
     WifiSniffer(WifiSnifferConfig),
 }
 
+/// High-level node type and mode.
 pub enum Node {
     Peripheral(PeripheralOpMode), // Mode is implicit (only EspNow), directly holds config.
     Central(CentralOpMode),       // Uses the sub-enum for mode selection.
 }
 
+/// CSI collection behavior for the node.
+///
+/// Use `Listener` to keep CSI traffic flowing without processing packets,
+/// or `Collector` to actively process CSI data. Note: `Listener` combined with
+/// a sniffer node makes the sniffer effectively useless because no CSI data is
+/// processed.
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum CollectionMode {
-    Collector, // Enables CSI collection + Collect CSI Data
-    Listener,  // Enables CSI collection + Does not collect CSI Data
+    /// Enables CSI collection and processes CSI data.
+    Collector,
+    /// Enables CSI collection but does not process CSI data.
+    Listener,
 }
 
+/// Hardware handles required to operate a CSI node.
 pub struct CSINodeHardware<'a> {
     interfaces: &'a mut Interfaces<'static>,
     controller: &'a mut WifiController<'static>,
 }
 
 impl<'a> CSINodeHardware<'a> {
+    /// Create a hardware bundle from the Wi-Fi `Interfaces` and `WifiController`.
     pub fn new(
         interfaces: &'a mut Interfaces<'static>,
         controller: &'a mut WifiController<'static>,
@@ -176,31 +289,37 @@ type CSIRxSubscriber = Subscriber<
     2,
 >;
 
+/// Client helper to receive CSI packets via a pub/sub channel.
 pub struct CSIClient {
     csi_subscriber: CSIRxSubscriber,
 }
 
 impl CSIClient {
+    /// Create a new CSI subscriber.
     pub fn new() -> Self {
         Self {
             csi_subscriber: CSI_PACKET.subscriber().unwrap(),
         }
     }
 
+    /// Wait for the next CSI packet.
     pub async fn get_csi_data(&mut self) -> CSIDataPacket {
         self.csi_subscriber.next_message_pure().await
     }
 
+    /// Receive and print CSI data with metadata (uses crate logging).
     pub async fn print_csi_w_metadata(&mut self) {
         let packet = self.get_csi_data().await;
         packet.print_csi_w_metadata();
     }
 
+    /// Signal the running node to stop.
     pub async fn send_stop(&self) {
         STOP_SIGNAL.signal(());
     }
 }
 
+/// Control packet sent from Central to Peripheral.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ControlPacket {
     magic_number: u32,
@@ -210,6 +329,7 @@ pub struct ControlPacket {
 }
 
 impl ControlPacket {
+    /// Create a new control packet with the provided collector flag and latency offset.
     pub fn new(is_collector: bool, latency_offset: i64) -> Self {
         Self {
             magic_number: CENTRAL_MAGIC_NUMBER.into(),
@@ -220,6 +340,7 @@ impl ControlPacket {
     }
 }
 
+/// Peripheral reply packet for latency/telemetry exchange.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct PeripheralPacket {
     magic_number: u32,        // Magic number to identify packet type
@@ -229,6 +350,7 @@ pub struct PeripheralPacket {
 }
 
 impl PeripheralPacket {
+    /// Create a new peripheral packet using timestamps captured locally.
     pub fn new(recv_uptime: u64, central_send_uptime: u64) -> Self {
         Self {
             magic_number: PERIPHERAL_MAGIC_NUMBER,
@@ -254,6 +376,10 @@ fn reset_globals() {
     reset_global_log_drops();
 }
 
+/// Primary orchestration object for CSI collection.
+///
+/// Construct a node with `CSINode::new` or `CSINode::new_central_node`, configure
+/// optional protocol/rate/traffic frequency, then call `run()`.
 pub struct CSINode<'a> {
     kind: Node,
     collection_mode: CollectionMode,
@@ -267,6 +393,7 @@ pub struct CSINode<'a> {
 }
 
 impl<'a> CSINode<'a> {
+    /// Create a new node with explicit `Node` kind.
     pub fn new(
         kind: Node,
         collection_mode: CollectionMode,
@@ -285,6 +412,7 @@ impl<'a> CSINode<'a> {
         }
     }
 
+    /// Convenience constructor for a central node.
     pub fn new_central_node(
         op_mode: CentralOpMode,
         collection_mode: CollectionMode,
@@ -303,14 +431,17 @@ impl<'a> CSINode<'a> {
         }
     }
 
+    /// Get the node type and operation mode.
     pub fn get_node_type(&self) -> &Node {
         &self.kind
     }
 
+    /// Get the current collection mode.
     pub fn get_collection_mode(&self) -> CollectionMode {
         self.collection_mode
     }
 
+    /// If central, return the active central op mode.
     pub fn get_central_op_mode(&self) -> Option<&CentralOpMode> {
         match &self.kind {
             Node::Central(mode) => Some(mode),
@@ -318,6 +449,7 @@ impl<'a> CSINode<'a> {
         }
     }
 
+    /// If peripheral, return the active peripheral op mode.
     pub fn get_peripheral_op_mode(&self) -> Option<&PeripheralOpMode> {
         match &self.kind {
             Node::Peripheral(mode) => Some(mode),
@@ -325,36 +457,46 @@ impl<'a> CSINode<'a> {
         }
     }
 
+    /// Update CSI configuration.
     pub fn set_csi_config(&mut self, config: CsiConfiguration) {
         self.csi_config = Some(config);
     }
 
+    /// Update Wi-Fi Station configuration (only applies to central station mode).
     pub fn set_station_config(&mut self, config: WifiStationConfig) {
         if let Node::Central(CentralOpMode::WifiStation(_)) = &mut self.kind {
             self.kind = Node::Central(CentralOpMode::WifiStation(config));
         }
     }
 
+    /// Set traffic generation frequency in Hz (ESP-NOW modes).
     pub fn set_traffic_frequency(&mut self, freq_hz: u16) {
         self.traffic_freq_hz = Some(freq_hz);
     }
 
+    /// Set collection mode for the node.
     pub fn set_collection_mode(&mut self, mode: CollectionMode) {
         self.collection_mode = mode;
     }
 
+    /// Replace the node kind/mode.
     pub fn set_op_mode(&mut self, mode: Node) {
         self.kind = mode;
     }
 
+    /// Set Wi-Fi protocol (overrides default).
     pub fn set_protocol(&mut self, protocol: Protocol) {
         self.protocol = Some(protocol);
     }
 
+    /// Set Wi-Fi PHY data rate for ESP-NOW traffic.
     pub fn set_rate(&mut self, rate: WifiPhyRate) {
         self.rate = Some(rate);
     }
 
+    /// Run the node until stopped.
+    ///
+    /// This initializes Wi-Fi, configures CSI, and starts mode-specific tasks.
     pub async fn run(&mut self) {
         let interfaces = &mut self.hardware.interfaces;
         let controller = &mut self.hardware.controller;
@@ -395,7 +537,6 @@ impl<'a> CSINode<'a> {
         // Start the controller
         controller.start_async().await.unwrap();
         log_ln!("Wi-Fi Controller Started");
-
         let is_collector = self.collection_mode == CollectionMode::Collector;
         IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
 
@@ -499,26 +640,31 @@ fn build_csi_config(csi_config: &CsiConfiguration) -> CsiConfig {
     }
 }
 
+/// Total received CSI packets (statistics feature).
 #[cfg(feature = "statistics")]
 pub fn get_total_rx_packets() -> u64 {
     STATS.rx_count.load(Ordering::Relaxed)
 }
 
+/// Total transmitted packets (statistics feature).
 #[cfg(feature = "statistics")]
 pub fn get_total_tx_packets() -> u64 {
     STATS.tx_count.load(Ordering::Relaxed)
 }
 
+/// Current RX packet rate in Hz (statistics feature).
 #[cfg(feature = "statistics")]
 pub fn get_rx_rate_hz() -> u32 {
     STATS.rx_rate_hz.load(Ordering::Relaxed)
 }
 
+/// Current TX packet rate in Hz (statistics feature).
 #[cfg(feature = "statistics")]
 pub fn get_tx_rate_hz() -> u32 {
     STATS.tx_rate_hz.load(Ordering::Relaxed)
 }
 
+/// Packets per second received since capture start (statistics feature).
 #[cfg(feature = "statistics")]
 pub fn get_pps_rx() -> u64 {
     let start_time = Instant::from_ticks(STATS.capture_start_time.load(Ordering::Relaxed));
@@ -530,6 +676,7 @@ pub fn get_pps_rx() -> u64 {
     total_packets / elapsed_secs
 }
 
+/// Packets per second transmitted since capture start (statistics feature).
 #[cfg(feature = "statistics")]
 pub fn get_pps_tx() -> u64 {
     let start_time = Instant::from_ticks(STATS.capture_start_time.load(Ordering::Relaxed));
@@ -541,16 +688,19 @@ pub fn get_pps_tx() -> u64 {
     total_packets / elapsed_secs
 }
 
+/// Dropped RX packets estimate (statistics feature).
 #[cfg(feature = "statistics")]
 pub fn get_dropped_packets_rx() -> u32 {
     STATS.rx_drop_count.load(Ordering::Relaxed)
 }
 
+/// One-way latency (statistics feature).
 #[cfg(feature = "statistics")]
 pub fn get_one_way_latency() -> i64 {
     STATS.one_way_latency.load(Ordering::Relaxed)
 }
 
+/// Two-way latency (statistics feature).
 #[cfg(feature = "statistics")]
 pub fn get_two_way_latency() -> i64 {
     STATS.two_way_latency.load(Ordering::Relaxed)
@@ -670,6 +820,7 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
     STATS.rx_count.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Internal task that processes CSI packets from the pub/sub channel.
 pub async fn run_process_csi_packet() {
     // Initialize CSI process start time
     #[cfg(feature = "statistics")]

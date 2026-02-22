@@ -23,6 +23,11 @@ use embassy_time::Duration;
 
 use crate::EspNowConfig;
 
+/// Run ESP-NOW in Central mode, broadcasting control packets and handling replies.
+///
+/// This task periodically sends `ControlPacket` broadcasts at the specified
+/// frequency, processes `PeripheralPacket` replies, and updates statistics
+/// when the `statistics` feature is enabled.
 pub async fn run_esp_now_central(
     esp_now: &mut EspNow<'static>, // Borrow the hardware
     mac_addr: [u8; 6],

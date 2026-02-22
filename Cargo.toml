@@ -16,6 +16,8 @@ exclude = ["target/debug/*", "assets/*"]
 path = "src/lib/lib.rs"
 
 [features]
+#! Feature flags used by examples and docs.rs. Select exactly one device feature
+#! (esp32, esp32c2, esp32c3, esp32c6, esp32s3) for builds.
 #! ⚠️ At minimum you are required to choose only ONE of the device options. For the most efficient (and fastest) logging, you should combine defmt with the jtag-serial features.
 
 default = ["no-std", "println", "auto", "statistics", "async-print"]
@@ -37,11 +39,17 @@ println = [
     "dep:log",
     "esp-backtrace/println"
 ]
+## Force the JTAG backend for println!() (only one should be enabled at a time).
 jtag-serial = ["esp-println/jtag-serial"]
+## Convenience features for println!() backends. `auto` selects the best available backend for the target, while `uart` forces the UART backend.
 auto = ["esp-println/auto"]
+## Force the UART backend for println!() (not recommended, as it is much slower than JTAG logging).
 uart = ["esp-println/uart"]
+## Disable all logging (including panics) for maximum performance. Not recommended for general use, but can be useful for benchmarking or if you have an alternative logging mechanism.
 no-print = ["esp-println/no-op"]
+## Override logging logic to use async printing. This is an unstable feature and may cause unexpected behavior. Use with caution.
 async-print = []
+## Enable collection of runtime statistics (e.g., latency, dropped packets). This is disabled by default to avoid the overhead of atomic operations on the critical path. Enable this feature if you want to collect and log statistics in your application.
 statistics = []
 
 ## Support for the ESP32
@@ -116,6 +124,7 @@ esp32s3 = [
 
 
 [dependencies]
+# Core dependencies required for ESP HAL/RTOS, radio, and networking.
 # Core dependencies
 esp-hal = { version = "~1.0", default-features = false, optional = false, features = [
     "unstable",
@@ -209,5 +218,7 @@ overflow-checks = false
 panic = "abort"
 
 [package.metadata.docs.rs]
+# docs.rs configuration: build docs for a single embedded target with
+# a representative feature set. Adjust if you want different chips in docs.
 targets = ["riscv32imc-unknown-none-elf"]
 features = ["esp32c3", "println"]

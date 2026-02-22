@@ -1,9 +1,19 @@
+# Cargo configuration for esp-csi-rs
+#
+# This file documents the available Cargo aliases and target-specific settings
+# used when building and flashing ESP targets. It is included in docs.rs so
+# users can quickly see common commands and tooling expectations.
+
 [alias]
+# Convenience aliases for running examples on supported chips.
+# Example: `cargo esp32 --example wifi_station`
 esp32 = "run --release --features=esp32   --target=xtensa-esp32-none-elf"
 esp32c3 = "run --release --features=esp32c3 --target=riscv32imc-unknown-none-elf"
 esp32c6 = "run --release --features=esp32c6 --target=riscv32imac-unknown-none-elf"
 esp32c2 = "run --release --features=esp32c2 --target=riscv32imc-unknown-none-elf"
 esp32s3 = "run --release --features=esp32s3 --target=xtensa-esp32s3-none-elf"
+
+# Convenience aliases for building release binaries without running.
 esp32-build = "build --release --features=esp32   --target=xtensa-esp32-none-elf"
 esp32c3-build = "build --release --features=esp32c3 --target=riscv32imc-unknown-none-elf"
 esp32c6-build = "build --release --features=esp32c6 --target=riscv32imac-unknown-none-elf"
@@ -11,6 +21,7 @@ esp32c2-build = "build --release --features=esp32c2 --target=riscv32imc-unknown-
 esp32s3-build = "build --release --features=esp32s3 --target=xtensa-esp32s3-none-elf"
 
 [target.'cfg(target_arch = "riscv32")']
+# Default runner and linker flags for all RISC-V ESP targets.
 # runner = "espflash flash --monitor --log-format defmt"
 runner = "espflash flash --monitor"
 rustflags = [
@@ -22,6 +33,7 @@ rustflags = [
 ]
 
 [target.'cfg(target_arch = "xtensa")']
+# Default runner and linker flags for all Xtensa ESP targets.
 # Uncomment the following line if you want to use defmt
 # runner = "espflash flash --monitor --log-format defmt"
 runner = "espflash flash --monitor"
@@ -41,24 +53,28 @@ rustflags = [
 ]
 
 [target.riscv32imc-unknown-none-elf]
+# Per-target overrides for RISC-V IMC devices (e.g., ESP32-C2/C3).
 # Uncomment the following line if you want to use defmt
 # runner = "espflash flash --monitor --log-format defmt"
 # Comment the following line if you want to use defmt
 runner = "espflash flash --monitor"
 
 [target.riscv32imac-unknown-none-elf]
+# Per-target overrides for RISC-V IMAC devices (e.g., ESP32-C6).
 # Uncomment the following line if you want to use defmt
 # runner = "espflash flash --monitor --log-format defmt"
 # Comment the following line if you want to use defmt
 runner = "espflash flash --monitor"
 
 [target.xtensa-esp32s3-none-elf]
+# Per-target overrides for Xtensa ESP32-S3 devices.
 # Uncomment the following line if you want to use defmt
 # runner = "espflash flash --monitor --log-format defmt"
 # Comment the following line if you want to use defmt
 runner = "espflash flash --monitor"
 
 [target.xtensa-esp32-none-elf]
+# Per-target overrides for Xtensa ESP32 devices.
 # Uncomment the following line if you want to use defmt
 # runner = "espflash flash --monitor --log-format defmt"
 # Comment the following line if you want to use defmt
@@ -66,9 +82,11 @@ runner = "espflash flash --monitor"
 
 
 [env]
+# Default log level for ESP-IDF logging output.
 ESP_LOG = "INFO"
 # Uncomment the following line if you want to use defmt
 # DEFMT_LOG = "INFO"
 
 [unstable]
+# Build core/alloc for no_std targets.
 build-std = ["alloc", "core"]

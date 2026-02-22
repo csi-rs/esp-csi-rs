@@ -27,6 +27,9 @@ pub use csi_interface::LOG_DROPPED_PACKETS;
 
 static LOG_MODE: AtomicU8 = AtomicU8::new(LogMode::Text as u8);
 
+/// Return the number of CSI log packets dropped by the async logging channel.
+///
+/// Returns `0` when async logging or statistics are not enabled.
 pub fn get_log_packet_drops() -> u32 {
     #[cfg(all(
         any(feature = "uart", feature = "jtag-serial", feature = "auto"),
@@ -106,10 +109,14 @@ mod defmt_impl {
     }
 }
 
+/// Logging output format for CSI packets.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum LogMode {
+    /// Human-readable text output.
     Text,
+    /// Postcard-serialized output (COBS-framed).
     Serialized,
+    /// Compact CSV-style array list.
     ArrayList,
 }
 
@@ -140,6 +147,7 @@ mod logging_impl {
 
     use crate::logging::logging::LogMode;
 
+    /// Low-level logging backend (UART or USB JTAG).
     pub enum Backend {
         #[cfg(any(feature = "uart", feature = "auto"))]
         Uart(Uart<'static, Async>),
@@ -193,6 +201,7 @@ mod logging_impl {
         }
     }
 
+    /// Async log output wrapper with selected `LogMode`.
     pub struct LogOutput {
         inner: Backend,
         pub log_mode: LogMode,
@@ -235,6 +244,9 @@ mod logging_impl {
     }
 }
 
+/// Logging macro that routes to `println!`/`defmt` based on features.
+///
+/// Uses async logging when `async-print` is enabled; otherwise writes directly.
 #[macro_export]
 macro_rules! log_ln {
     ($($arg:tt)*) => {{
@@ -281,6 +293,7 @@ macro_rules! log_ln {
     }};
 }
 
+/// Print raw bytes to the active logging backend (async-print only).
 pub fn print_raw_bytes(bytes: &[u8]) {
     #[cfg(all(
         any(feature = "uart", feature = "jtag-serial", feature = "auto"),
@@ -297,6 +310,7 @@ pub fn print_raw_bytes(bytes: &[u8]) {
     }
 }
 
+/// Log raw bytes (Only for blocking printer).
 #[macro_export]
 macro_rules! log_raw {
     ($data:expr) => {{
@@ -320,6 +334,9 @@ macro_rules! log_raw {
 
 use crate::csi::CSIDataPacket;
 
+/// Log a CSI packet according to the selected `LogMode`.
+///
+/// In async mode this enqueues the packet; otherwise it prints immediately.
 pub fn log_csi(packet: CSIDataPacket) {
     #[cfg(feature = "async-print")]
     {
@@ -365,6 +382,10 @@ pub fn log_csi(packet: CSIDataPacket) {
 ))]
 use crate::logging::logging::logging_impl::LogOutput;
 
+/// Initialize the logging backend and spawn the async logger task.
+///
+/// In async mode this selects UART/JTAG automatically (if enabled) and
+/// spawns `logger_backend`. In non-async mode it stores the `LogMode`.
 pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
     #[cfg(feature = "async-print")]
     {
@@ -832,6 +853,7 @@ fn write_text_packet(packet: CSIDataPacket) {
     feature = "async-print"
 ))]
 #[embassy_executor::task]
+/// Async logger backend task that drains CSI/log channels and writes output.
 pub async fn logger_backend(mut driver: LogOutput) {
     use embassy_futures::select::{select, Either};
     use embedded_io_async::Write;
@@ -874,6 +896,7 @@ pub async fn logger_backend(mut driver: LogOutput) {
     }
 }
 
+/// Reset the global dropped-log counter (statistics feature only).
 pub fn reset_global_log_drops() {
     #[cfg(all(
         any(feature = "uart", feature = "jtag-serial", feature = "auto"),

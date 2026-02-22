@@ -26,12 +26,14 @@ macro_rules! mk_static {
     }};
 }
 
+/// DHCP-acquired IP configuration for the STA interface.
 #[derive(Debug, Clone)]
 struct IpInfo {
     pub local_address: Ipv4Cidr,
     pub gateway_address: Ipv4Address,
 }
 
+/// Initialize the station interface and return the network stack and runner.
 pub fn sta_init<'a>(
     interfaces: &'a mut WifiDevice<'static>,
     config: &WifiStationConfig,
@@ -62,6 +64,7 @@ pub fn sta_init<'a>(
     (sta_stack, sta_runner)
 }
 
+/// Connect to Wi-Fi and run all STA tasks (connection, DHCP, network ops).
 pub async fn run_sta_connect(
     controller: &mut WifiController<'_>,
     freq: Option<u16>,
@@ -85,6 +88,7 @@ pub async fn run_sta_connect(
     .await;
 }
 
+/// Run the embassy-net runner until a stop signal is received.
 async fn run_net_task(mut sta_runner: Runner<'_, &mut WifiDevice<'_>>) {
     loop {
         match select(STOP_SIGNAL.wait(), sta_runner.run()).await {
@@ -97,6 +101,7 @@ async fn run_net_task(mut sta_runner: Runner<'_, &mut WifiDevice<'_>>) {
     }
 }
 
+/// Run a DHCP client and publish the acquired IP configuration.
 async fn run_dhcp_client(sta_stack: Stack<'_>) {
     log_ln!("Running DHCP Client");
 
@@ -137,6 +142,7 @@ async fn run_dhcp_client(sta_stack: Stack<'_>) {
     DHCP_CLIENT_INFO.signal(ip_info);
 }
 
+/// Monitor STA events (connect/disconnect/stop) until a stop signal.
 pub async fn sta_connection(controller: &mut WifiController<'_>) {
     // let mut start_collection_watch = match START_COLLECTION.receiver() {
     //     Some(r) => r,
@@ -176,7 +182,7 @@ pub async fn sta_connection(controller: &mut WifiController<'_>) {
     }
 }
 
-// This task manages network operations for the station
+/// Manage station network operations and emit periodic ICMP traffic.
 pub async fn sta_network_ops(sta_stack: Stack<'_>, frequency_hz: Option<u16>) {
     // Retrieve acquired IP information from DHCP
     let ip_info = DHCP_CLIENT_INFO.wait().await;
