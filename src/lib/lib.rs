@@ -52,17 +52,40 @@ static IS_COLLECTOR: AtomicBool = AtomicBool::new(false);
 static COLLECTION_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static CENTRAL_MAGIC_NUMBER: u32 = 0xA8912BF0;
 static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
-static TWO_WAY_LATENCY: AtomicI64 = AtomicI64::new(0);
-static ONE_WAY_LATENCY: AtomicI64 = AtomicI64::new(0);
 
 use portable_atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 // Global counter for all drops across all MAC addresses
-static GLOBAL_PACKET_RX_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
-static GLOBAL_PACKET_TX_COUNT: AtomicU64 = AtomicU64::new(0);
-static GLOBAL_PACKET_RX_COUNT: AtomicU64 = AtomicU64::new(0);
-static GLOBAL_CAPTURE_START_TIME: AtomicU64 = AtomicU64::new(0);
-static TX_RATE_HZ: AtomicU32 = AtomicU32::new(0);
-static RX_RATE_HZ: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "statistics")]
+struct GlobalStats {
+    tx_count: AtomicU64,
+    rx_count: AtomicU64,
+    rx_drop_count: AtomicU32,
+    capture_start_time: AtomicU64,
+    tx_rate_hz: AtomicU32,
+    rx_rate_hz: AtomicU32,
+    one_way_latency: AtomicI64,
+    two_way_latency: AtomicI64,
+}
+
+#[cfg(feature = "statistics")]
+static STATS: GlobalStats = GlobalStats {
+    tx_count: AtomicU64::new(0),
+    rx_count: AtomicU64::new(0),
+    rx_drop_count: AtomicU32::new(0),
+    capture_start_time: AtomicU64::new(0),
+    tx_rate_hz: AtomicU32::new(0),
+    rx_rate_hz: AtomicU32::new(0),
+    one_way_latency: AtomicI64::new(0),
+    two_way_latency: AtomicI64::new(0),
+};
+// static GLOBAL_PACKET_RX_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
+// static GLOBAL_PACKET_TX_COUNT: AtomicU64 = AtomicU64::new(0);
+// static GLOBAL_PACKET_RX_COUNT: AtomicU64 = AtomicU64::new(0);
+// static GLOBAL_CAPTURE_START_TIME: AtomicU64 = AtomicU64::new(0);
+// static TX_RATE_HZ: AtomicU32 = AtomicU32::new(0);
+// static RX_RATE_HZ: AtomicU32 = AtomicU32::new(0);
+// static TWO_WAY_LATENCY: AtomicI64 = AtomicI64::new(0);
+// static ONE_WAY_LATENCY: AtomicI64 = AtomicI64::new(0);
 
 // Signals
 static STOP_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -200,8 +223,8 @@ impl ControlPacket {
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct PeripheralPacket {
     magic_number: u32,        // Magic number to identify packet type
-    recv_uptime: u64,        // When Peripheral received the Control Packet
-    send_uptime: u64,        // When Peripheral sent the Peripheral Packet (after receiving Control Packet)
+    recv_uptime: u64,         // When Peripheral received the Control Packet
+    send_uptime: u64, // When Peripheral sent the Peripheral Packet (after receiving Control Packet)
     central_send_uptime: u64, // When Central sent the Control Packet
 }
 
@@ -217,11 +240,17 @@ impl PeripheralPacket {
 }
 
 fn reset_globals() {
-    GLOBAL_PACKET_RX_COUNT.store(0, Ordering::Relaxed);
-    GLOBAL_PACKET_RX_DROP_COUNT.store(0, Ordering::Relaxed);
-    GLOBAL_PACKET_TX_COUNT.store(0, Ordering::Relaxed);
-    TX_RATE_HZ.store(0, Ordering::Relaxed);
-    RX_RATE_HZ.store(0, Ordering::Relaxed);
+    #[cfg(feature = "statistics")]
+    {
+        STATS.tx_count.store(0, Ordering::Relaxed);
+        STATS.rx_drop_count.store(0, Ordering::Relaxed);
+        STATS.tx_count.store(0, Ordering::Relaxed);
+        STATS.tx_rate_hz.store(0, Ordering::Relaxed);
+        STATS.rx_rate_hz.store(0, Ordering::Relaxed);
+        STATS.one_way_latency.store(0, Ordering::Relaxed);
+        STATS.two_way_latency.store(0, Ordering::Relaxed);
+    }
+    #[cfg(feature = "statistics")]
     reset_global_log_drops();
 }
 
@@ -470,44 +499,61 @@ fn build_csi_config(csi_config: &CsiConfiguration) -> CsiConfig {
     }
 }
 
+#[cfg(feature = "statistics")]
 pub fn get_total_rx_packets() -> u64 {
-    GLOBAL_PACKET_RX_COUNT.load(Ordering::Relaxed)
+    STATS.rx_count.load(Ordering::Relaxed)
 }
 
+#[cfg(feature = "statistics")]
 pub fn get_total_tx_packets() -> u64 {
-    GLOBAL_PACKET_TX_COUNT.load(Ordering::Relaxed)
+    STATS.tx_count.load(Ordering::Relaxed)
 }
 
+#[cfg(feature = "statistics")]
 pub fn get_rx_rate_hz() -> u32 {
-    RX_RATE_HZ.load(Ordering::Relaxed)
+    STATS.rx_rate_hz.load(Ordering::Relaxed)
 }
 
+#[cfg(feature = "statistics")]
 pub fn get_tx_rate_hz() -> u32 {
-    TX_RATE_HZ.load(Ordering::Relaxed)
+    STATS.tx_rate_hz.load(Ordering::Relaxed)
 }
 
+#[cfg(feature = "statistics")]
 pub fn get_pps_rx() -> u64 {
-    let start_time = Instant::from_ticks(GLOBAL_CAPTURE_START_TIME.load(Ordering::Relaxed));
+    let start_time = Instant::from_ticks(STATS.capture_start_time.load(Ordering::Relaxed));
     let elapsed_secs = start_time.elapsed().as_secs() as u64;
-    let total_packets = GLOBAL_PACKET_RX_COUNT.load(Ordering::Relaxed);
+    let total_packets = STATS.rx_count.load(Ordering::Relaxed);
     if elapsed_secs == 0 {
         return total_packets;
     }
     total_packets / elapsed_secs
 }
 
+#[cfg(feature = "statistics")]
 pub fn get_pps_tx() -> u64 {
-    let start_time = Instant::from_ticks(GLOBAL_CAPTURE_START_TIME.load(Ordering::Relaxed));
+    let start_time = Instant::from_ticks(STATS.capture_start_time.load(Ordering::Relaxed));
     let elapsed_secs = start_time.elapsed().as_secs() as u64;
-    let total_packets = GLOBAL_PACKET_TX_COUNT.load(Ordering::Relaxed);
+    let total_packets = STATS.tx_count.load(Ordering::Relaxed);
     if elapsed_secs == 0 {
         return total_packets;
     }
     total_packets / elapsed_secs
 }
 
+#[cfg(feature = "statistics")]
 pub fn get_dropped_packets_rx() -> u32 {
-    GLOBAL_PACKET_RX_DROP_COUNT.load(Ordering::Relaxed)
+    STATS.rx_drop_count.load(Ordering::Relaxed)
+}
+
+#[cfg(feature = "statistics")]
+pub fn get_one_way_latency() -> i64 {
+    STATS.one_way_latency.load(Ordering::Relaxed)
+}
+
+#[cfg(feature = "statistics")]
+pub fn get_two_way_latency() -> i64 {
+    STATS.two_way_latency.load(Ordering::Relaxed)
 }
 
 /// Sets CSI Configuration.
@@ -540,7 +586,8 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
     match csi_data.extend_from_slice(csi_slice) {
         Ok(_) => {}
         Err(_) => {
-            GLOBAL_PACKET_RX_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "statistics")]
+            STATS.rx_drop_count.fetch_add(1, Ordering::Relaxed);
             return;
         }
     }
@@ -619,12 +666,16 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
     };
 
     CSI_PACKET.publish_immediate(csi_packet);
-    GLOBAL_PACKET_RX_COUNT.fetch_add(1, Ordering::Relaxed);
+    #[cfg(feature = "statistics")]
+    STATS.rx_count.fetch_add(1, Ordering::Relaxed);
 }
 
 pub async fn run_process_csi_packet() {
     // Initialize CSI process start time
-    GLOBAL_CAPTURE_START_TIME.store(Instant::now().as_ticks(), Ordering::Relaxed);
+    #[cfg(feature = "statistics")]
+    STATS
+        .capture_start_time
+        .store(Instant::now().as_ticks(), Ordering::Relaxed);
     // Subscribe to CSI packet capture updates
     let mut csi_packet_sub = CSI_PACKET.subscriber().unwrap();
     // Map to track sequence numbers per MAC address
@@ -647,47 +698,46 @@ pub async fn run_process_csi_packet() {
                 COLLECTION_MODE_CHANGED.reset();
                 is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
                 reset_globals();
-                GLOBAL_CAPTURE_START_TIME.store(Instant::now().as_ticks(), Ordering::Relaxed);
+                #[cfg(feature = "statistics")]
+                STATS
+                    .capture_start_time
+                    .store(Instant::now().as_ticks(), Ordering::Relaxed);
             }
             Either3::Third(csi_packet) => {
-                if is_collector {
-                    let current_seq = csi_packet.sequence_number;
+                #[cfg(feature = "statistics")]
+                {
+                    if is_collector {
+                        let current_seq = csi_packet.sequence_number;
 
-                    // Check if we have seen this MAC before
-                    if let Some(&last_seq) = peer_tracker.get(&csi_packet.mac) {
-                        // Station Mode / Hardware Sequence Number Fix:
-                        // WiFi hardware sequence numbers (802.11) are 12-bit (0-4095).
-                        // We use '& 0x0FFF' to handle the wraparound from 4095 -> 0 correctly.
-                        let diff = (current_seq.wrapping_sub(last_seq)) & 0x0FFF;
+                        // Check if we have seen this MAC before
+                        if let Some(&last_seq) = peer_tracker.get(&csi_packet.mac) {
+                            // Station Mode / Hardware Sequence Number Fix:
+                            // WiFi hardware sequence numbers (802.11) are 12-bit (0-4095).
+                            // We use '& 0x0FFF' to handle the wraparound from 4095 -> 0 correctly.
+                            let diff = (current_seq.wrapping_sub(last_seq)) & 0x0FFF;
 
-                        if diff > 1 {
-                            let lost = (diff - 1) as u32;
+                            if diff > 1 {
+                                let lost = (diff - 1) as u32;
 
-                            // Sanity check for huge gaps (e.g. router reset)
-                            if lost < 500 {
-                                GLOBAL_PACKET_RX_DROP_COUNT.fetch_add(lost, Ordering::Relaxed);
+                                // Sanity check for huge gaps (e.g. router reset)
+                                if lost < 500 {
+                                    STATS.rx_drop_count.fetch_add(lost, Ordering::Relaxed);
+                                }
                             }
                         }
-                    }
 
-                    // Update tracker with new sequence
-                    peer_tracker.insert(csi_packet.mac, current_seq);
-                    // --- DROP DETECTION LOGIC END ---
+                        // Update tracker with new sequence
+                        peer_tracker.insert(csi_packet.mac, current_seq);
+                        // --- DROP DETECTION LOGIC END ---
+                    }
                 }
             }
         }
     }
 }
 
+#[cfg(feature = "statistics")]
 use crate::logging::logging::{get_log_packet_drops, reset_global_log_drops};
-
-pub fn get_one_way_latency() -> i64 {
-    ONE_WAY_LATENCY.load(Ordering::Relaxed)
-}
-
-pub fn get_two_way_latency() -> i64 {
-    TWO_WAY_LATENCY.load(Ordering::Relaxed)
-}
 
 fn reconstruct_wifi_rate(rate: &WifiPhyRate) -> WifiPhyRate {
     match rate {

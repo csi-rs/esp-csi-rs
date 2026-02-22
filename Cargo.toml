@@ -18,7 +18,7 @@ path = "src/lib/lib.rs"
 [features]
 #! ⚠️ At minimum you are required to choose only ONE of the device options. For the most efficient (and fastest) logging, you should combine defmt with the jtag-serial features.
 
-default = ["no-std", "println", "auto"]
+default = ["no-std", "println", "auto", "statistics", "async-print"]
 ## Build without the standard library.
 no-std = []
 ## NOTE: esp-println is used only for panic logging
@@ -42,6 +42,7 @@ auto = ["esp-println/auto"]
 uart = ["esp-println/uart"]
 no-print = ["esp-println/no-op"]
 async-print = []
+statistics = []
 
 ## Support for the ESP32
 esp32 = [

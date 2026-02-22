@@ -13,6 +13,7 @@ mod csi_interface {
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
     use portable_atomic::AtomicU32;
     pub static CSI_CHANNEL: Channel<CriticalSectionRawMutex, CSIDataPacket, 2> = Channel::new();
+    #[cfg(feature = "statistics")]
     pub static LOG_DROPPED_PACKETS: AtomicU32 = AtomicU32::new(0);
 }
 
@@ -20,21 +21,25 @@ mod csi_interface {
     any(feature = "uart", feature = "jtag-serial", feature = "auto"),
     feature = "async-print"
 ))]
-pub use csi_interface::{CSI_CHANNEL, LOG_DROPPED_PACKETS};
+pub use csi_interface::{CSI_CHANNEL};
+#[cfg(feature = "statistics")]
+pub use csi_interface::LOG_DROPPED_PACKETS;
 
 static LOG_MODE: AtomicU8 = AtomicU8::new(LogMode::Text as u8);
 
 pub fn get_log_packet_drops() -> u32 {
     #[cfg(all(
         any(feature = "uart", feature = "jtag-serial", feature = "auto"),
-        feature = "async-print"
+        feature = "async-print",
+        feature = "statistics"
     ))]
     {
         LOG_DROPPED_PACKETS.load(Ordering::Relaxed)
     }
     #[cfg(not(all(
         any(feature = "uart", feature = "jtag-serial", feature = "auto"),
-        feature = "async-print"
+        feature = "async-print",
+        feature = "statistics"
     )))]
     {
         0
@@ -323,6 +328,7 @@ pub fn log_csi(packet: CSIDataPacket) {
             match CSI_CHANNEL.try_send(packet) {
                 Ok(_) => {}
                 Err(_) => {
+                    #[cfg(feature = "statistics")]
                     LOG_DROPPED_PACKETS.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -874,6 +880,7 @@ pub fn reset_global_log_drops() {
         feature = "async-print"
     ))]
     {
+        #[cfg(feature = "statistics")]
         LOG_DROPPED_PACKETS.store(0, Ordering::Relaxed);
     }
 }

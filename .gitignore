@@ -14,3 +14,6 @@ target/
 
 # Temporary files created by rustc during an internal compiler error
 rustc-ice-*
+
+# Visual Studio Code settings folder
+.vscode/
