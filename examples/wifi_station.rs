@@ -105,7 +105,6 @@ async fn main(spawner: Spawner) -> ! {
         .with_auth_method(esp_radio::wifi::AuthMethod::Wpa2Personal);
 
     let station_config = WifiStationConfig {
-        ntp_sync: true, // Set to true if you want NTP time sync
         client_config,  // Pass the config we created above
     };
     let mut node_handle = CSIClient::new();
