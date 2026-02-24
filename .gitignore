@@ -11,6 +11,7 @@ target/
 
 # Mac Artifacts
 .DS_Store
+._*
 
 # Temporary files created by rustc during an internal compiler error
 rustc-ice-*

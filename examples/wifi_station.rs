@@ -8,7 +8,8 @@ use embassy_time::{with_timeout, Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode};
 use esp_csi_rs::{
-    CSIClient, CSINodeHardware, get_pps_rx, get_pps_tx, get_dropped_packets_rx, get_one_way_latency, get_two_way_latency, log_ln, WifiStationConfig
+    get_dropped_packets_rx, get_one_way_latency, get_pps_rx, get_pps_tx, get_two_way_latency,
+    log_ln, CSIClient, CSINodeHardware, WifiStationConfig,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -23,8 +24,6 @@ extern crate alloc;
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
     static_cell::StaticCell::new();
 
-// This creates a default app-descriptor required by the esp-idf bootloader.
-// For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
 #[allow(
@@ -45,19 +44,10 @@ async fn node_task(client: &mut CSIClient) {
     let mut last_log_time = Instant::now();
 
     with_timeout(Duration::from_secs(1000), async {
-            loop {
-                // Timer::after_millis(10).await;
-                // log_ln!(
-                //     "RX PPS: {}, TX PPS: {}, RX Dropped Packets: {}, One Way Latency: {}, Two Way Latency: {}",
-                //     get_pps_rx(),
-                //     get_pps_tx(),
-                //     get_dropped_packets_rx(),
-                //     get_one_way_latency(),
-                //     get_two_way_latency()
-                // );
-                let _ = with_timeout(Duration::from_millis(10), client.print_csi_w_metadata()).await;
-            }
-        })
+        loop {
+            let _ = with_timeout(Duration::from_millis(10), client.print_csi_w_metadata()).await;
+        }
+    })
     .await
     .unwrap_err();
     client.send_stop().await;
@@ -65,8 +55,6 @@ async fn node_task(client: &mut CSIClient) {
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    // generator version: 1.1.0
-
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     init_logger(spawner, LogMode::ArrayList);
@@ -105,9 +93,12 @@ async fn main(spawner: Spawner) -> ! {
         .with_auth_method(esp_radio::wifi::AuthMethod::Wpa2Personal);
 
     let station_config = WifiStationConfig {
-        client_config,  // Pass the config we created above
+        client_config, // Pass the config we created above
     };
+
+    // Create a CSI Client Instance to handle CSI data and control messages
     let mut node_handle = CSIClient::new();
+    // Create a CSINodeHardware instance which will be used by the CSINode to interact with the Wi-Fi hardware
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
         esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::WifiStation(station_config)),
