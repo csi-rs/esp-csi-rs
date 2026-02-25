@@ -57,52 +57,29 @@
 //!     - **ESP-NOW Central Listener/Collector <-> ESP-NOW Peripheral Listener/Collector**: In this configuration a CSI central node connects to one other ESP-NOW peripheral node. Both ESP-NOW peripheral and central nodes can operate either as listeners or collectors.
 //! 3. ***Star:*** In this architechture a central node connects to several peripheral nodes. The central node triggers traffic and aggregates CSI sent back from peripheral nodes. Alternatively, CSI can be collected by the individual peripherals. Only the ESP-NOW operation mode supports this architechture. The ESP-NOW peripheral and central nodes can also operate either as listeners or collectors.
 //!
+//! ## Output Formats & Logging Modes
+//! `esp-csi-rs` is able to print CSI data in several formats. The output format can be configured when initializing the logger. The supported formats include:
+//! - **LogMode::ArrayList**: This prints CSI data as a list of arrays, where each array represents the CSI values for a received packet. This format is more compact and easier to read for large volumes of CSI data.
+//! /// place example output
+//! - **LogMode::Text**: This output prints CSI data in a more verbose, human-readable format. This includes additional metadata and explanations alongside the raw CSI values, making it easier to understand the context of each packet's CSI data.
+//! //Place example output
+//! - **LogMode::Serialized**: This mode serializes the `CSIDataPacket` structure and prints it in a serialized COBS format. This is a compact binary format that can be parsed by and serde compatible crate like [postcard](https://crates.io/crates/postcard). It is not human-readable but is efficient for logging large amounts of CSI data on the host without overwhelming the console output.
 //!
-//! ### High‑level flow (CSINode) -> Needs to be Basic Example
-//! ## This example commentary should align highly with examples proviced
-//! 1. Create a `CSINodeHardware` from `Interfaces` and `WifiController`.
-//! 2. Choose `Node` + operation mode (Central/Peripheral + ESP‑NOW/Station/Sniffer).
-//! 3. Choose `CollectionMode` (Collector/Listener).
-//! 4. Optionally set CSI config, rate, protocol, and traffic frequency.
-//! 5. Call `CSINode::run()` to start.
 //!
-//! ### Example for Collecting CSI with WIFI Station Mode
-//!## I suggest to remove this whole section
+//!
+//! ### Example for creating WiFi Station Central Collector
 //! There are more examples in the repository. The example below demonstrates how to collect CSI data with an ESP configured in WIFI Station mode.
 //!
-//! #### Step 1: Initialize Hardware and Logger
-//! First, we need to initialize the hardware interfaces and the Wi-Fi controller. This involves setting up the radio, and preparing the CSI node hardware bundle. We also initialize a logger to print output to the console. This step is common across all modes of operation, but in this example we show it in the context of setting up a Wi-Fi Station node.
-//!
-//! Initalize Logger Pritning Options:
-//! - **LogMode::ArrayList**: Print CSI Data as a list of arrays, where each array represents the CSI values for a received packet. This format is more compact and easier to read for large volumes of CSI data.
-//! - **LogMode::Text**: Print CSI Data in a more verbose, human-readable format. This can include additional metadata and explanations alongside the raw CSI values, making it easier to understand the context of each packet's CSI data.
-//! - **LogMode::Serialized**: Print CSI Data in a serialized COBS format. This is a compact binary format that can be easily parsed by external tools for further analysis. It is not human-readable but is efficient for logging large amounts of CSI data without overwhelming the console output.
-//!
-//!```rust, no_run
+//! #### Step 1: Initialize Logger
+//! ```rust
 //! init_logger(spawner, LogMode::ArrayList);
-//! let radio_init = mk_static!(
-//!     Controller<'static>,
-//!     esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
-//! );
-//!
-//! let mut config_radio = esp_radio::wifi::Config::default();
-//! config_radio = config_radio.with_power_save_mode(esp_radio::wifi::PowerSaveMode::None);
-//! let (wifi_controller, mut interfaces) =
-//!     esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
-//!         .expect("Failed to initialize Wi-Fi controller");
-//!
-//! let controller = WIFI_CONTROLLER.init(wifi_controller);
+//! ```
+//! #### Step 2: Create a Hardware Instance for the CSI Node
+//! ```rust
 //! let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
-//!```
-//!
-//! #### Step 2: Create a CSI Collection Configuration/Profile
-//! This configuration creates a Wi-Fi Station central node that connects to an AP with the specified SSID and password, and collects CSI as a Collector. You can customize the connection options and CSI configuration as needed.
-//!
-//! Connection Options include:
-//! - **Option 1**: SSID/Password for a commercial router or ESP in AP mode
-//! - **Option 2**: Auth method (e.g. WPA2 Personal, Open, etc.)
-//! - **Option 3**: Hz for generating traffic (e.g. 100Hz = 10ms between packets)
-//!```rust, no_run
+//! ```
+//! #### Step 3: Create a Station Configuration
+//! ```rust
 //! let client_config = ClientConfig::default()
 //!     .with_ssid("SSID".to_string())
 //!     .with_password("PASS".to_string())
@@ -111,8 +88,9 @@
 //! let station_config = WifiStationConfig {
 //!    client_config,  // Pass the config we created above
 //! };
-//! let mut node_handle = CSIClient::new(); // Create a client handle to receive CSI data and stop the node when needed
-//! let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+//! ```
+//! #### Step 3: Create a CSI Collection Node Instance with the Desired Configuration
+//! ```rust
 //! let mut node = CSINode::new(
 //!     esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::WifiStation(station_config)),
 //!     CollectionMode::Collector,
@@ -120,28 +98,17 @@
 //!     Some(100),
 //!     csi_hardware,
 //! );
-//!```
+//! ```
+//! #### Step 4: Create a CSI Node Client to Control the Node and Receive CSI Data
+//! ```rust
+//! let mut node_handle = CSIClient::new();
+//! ```
+//! #### Step 5: Create Handler for Printing for Certain Duration????
+//! ```rust
+//! //example code
+//! ```
 //!
-//! #### Step 3: Run CSI Collection
-//! Finally, we call `run()` on the node to start the CSI collection process. This will connect to the Wi-Fi network, start generating traffic, and begin collecting CSI data according to the configuration we set up, we use join here to run the node and the client task concurrently. The client task can be used to receive and print CSI data while the node is running, the client can signal CSINode to stop using CSIClient handle.
-//!```rust, no_run
-//! // Async function to run concurrently with the node to receive and print CSI data, and stop the node after a certain duration
-//! async fn node_task(client: &mut CSIClient) {
-//!    let mut last_log_time = Instant::now();
-//!
-//!    // Print CSI data with metadata every 10 milliseconds for 1000 seconds
-//!    with_timeout(Duration::from_secs(1000), async {
-//!            loop {
-//!                let _ = with_timeout(Duration::from_millis(10), client.print_csi_w_metadata()).await;
-//!            }
-//!        })
-//!    .await
-//!    .unwrap_err();
-//!    client.send_stop().await; // Signal the node to stop after the timeout
-//! }
-//! join(node.run(), node_task(&mut node_handle)).await;
-//!```
-//!
+
 #![no_std]
 
 use portable_atomic::AtomicI64;
