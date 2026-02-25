@@ -9,7 +9,7 @@ use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode};
 use esp_csi_rs::{
     get_dropped_packets_rx, get_one_way_latency, get_pps_rx, get_pps_tx, get_two_way_latency,
-    log_ln, CSIClient, CSINodeHardware, WifiStationConfig,
+    log_ln, CSINodeClient, CSINodeHardware, WifiStationConfig,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -38,19 +38,6 @@ macro_rules! mk_static {
         let x = STATIC_CELL.uninit().write(($val));
         x
     }};
-}
-
-async fn node_task(client: &mut CSIClient) {
-    let mut last_log_time = Instant::now();
-
-    with_timeout(Duration::from_secs(1000), async {
-        loop {
-            let _ = with_timeout(Duration::from_millis(10), client.print_csi_w_metadata()).await;
-        }
-    })
-    .await
-    .unwrap_err();
-    client.send_stop().await;
 }
 
 #[esp_rtos::main]
@@ -97,7 +84,7 @@ async fn main(spawner: Spawner) -> ! {
     };
 
     // Create a CSI Client Instance to handle CSI data and control messages
-    let mut node_handle = CSIClient::new();
+    let mut node_handle = CSINodeClient::new();
     // Create a CSINodeHardware instance which will be used by the CSINode to interact with the Wi-Fi hardware
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
@@ -108,7 +95,7 @@ async fn main(spawner: Spawner) -> ! {
         csi_hardware,
     );
 
-    join(node.run(), node_task(&mut node_handle)).await;
+    node.run_duration(1000, &mut node_handle).await;
 
     loop {
         log_ln!("Hello world!");

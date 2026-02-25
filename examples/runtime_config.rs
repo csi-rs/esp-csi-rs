@@ -9,7 +9,7 @@ use esp_csi_rs::{
     PeripheralOpMode,
 };
 use esp_csi_rs::{
-    CSIClient, CSINodeHardware, get_pps_rx, get_pps_tx, get_dropped_packets_rx, get_one_way_latency, get_two_way_latency, log_ln,
+    CSINodeClient, CSINodeHardware, get_pps_rx, get_pps_tx, get_dropped_packets_rx, get_one_way_latency, get_two_way_latency, log_ln,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -43,7 +43,7 @@ macro_rules! mk_static {
     }};
 }
 
-async fn node_task_listener(mut client: &mut CSIClient) {
+async fn node_task_listener(mut client: &mut CSINodeClient) {
     log_ln!("Starting Listener Task");
     let mut last_log_time = Instant::now();
 
@@ -57,7 +57,7 @@ async fn node_task_listener(mut client: &mut CSIClient) {
     client.send_stop().await;
 }
 
-async fn node_task_collector(mut client: &mut CSIClient) {
+async fn node_task_collector(mut client: &mut CSINodeClient) {
     log_ln!("Starting Collector Task");
 
     with_timeout(Duration::from_secs(10), async {
@@ -114,7 +114,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    let mut node_handle = CSIClient::new();
+    let mut node_handle = CSINodeClient::new();
     let mut csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
         esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(

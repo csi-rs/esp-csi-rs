@@ -60,9 +60,42 @@
 //! ## Output Formats & Logging Modes
 //! `esp-csi-rs` is able to print CSI data in several formats. The output format can be configured when initializing the logger. The supported formats include:
 //! - **LogMode::ArrayList**: This prints CSI data as a list of arrays, where each array represents the CSI values for a received packet. This format is more compact and easier to read for large volumes of CSI data.
-//! /// place example output
+//! 
+//! Example output:
+//! ```
+//! [1758,-84,11,163,1,10032333,332,0,336,2,0,1,1,128,0,1,1,0,1,0,0,0,332,128]
+//! ```
 //! - **LogMode::Text**: This output prints CSI data in a more verbose, human-readable format. This includes additional metadata and explanations alongside the raw CSI values, making it easier to understand the context of each packet's CSI data.
-//! //Place example output
+//! 
+//! Example output:
+//! ```rust
+//! mac: 56:6C:EB:6F:BC:3D
+//! sequence number: 426
+//! rssi: -82
+//! rate: 11
+//! noise floor: 165
+//! channel: 1
+//! timestamp: 2424915
+//! sig len: 332
+//! rx state: 0
+//! dump len: 336
+//! he sigb len: 2
+//! cur single mpdu: 0
+//! cur bb format: 1
+//! rx channel estimate info vld: 1
+//! rx channel estimate len: 128
+//! time seconds: 0
+//! channel: 1
+//! is group: 1
+//! rxend state: 0
+//! rxmatch3: 1
+//! rxmatch2: 0
+//! rxmatch1: 0
+//! rxmatch0: 0
+//! sig_len: 332
+//! data length: 128
+//! csi raw data: [0, 0, 0, 0, 0, 0, 0, 0, -6, 0, 6, 0, -24, 10, -23, 9, -23, 8, -23, 7, -22, 6, -22, 5, -22, 6, -23, 5, -22, 6, -22, 6, -22, 7, -20, 7, -19, 9, -19, 10, -19, 12, -19, 12, -18, 14, -19, 14, -19, 16, -20, 17, -21, 18, -20, 18, -19, 18, -16, 18, -14, 19, -13, 18, 0, 0, -19, 22, -20, 22, -20, 22, -20, 21, -21, 19, -22, 18, -20, 16, -18, 16, -17, 15, -16, 15, -14, 15, -13, 13, -12, 13, -9, 13, -7, 14, -6, 14, -5, 13, -3, 12, 0, 13, 2, 12, 3, 12, 5, 12, 7, 13, 8, 13, 10, 13, 12, 14, 9, 1, -5, -4, 0, 0, 0, 0, 0, 0]
+//! ```
 //! - **LogMode::Serialized**: This mode serializes the `CSIDataPacket` structure and prints it in a serialized COBS format. This is a compact binary format that can be parsed by and serde compatible crate like [postcard](https://crates.io/crates/postcard). It is not human-readable but is efficient for logging large amounts of CSI data on the host without overwhelming the console output.
 //!
 //!
@@ -101,11 +134,11 @@
 //! ```
 //! #### Step 4: Create a CSI Node Client to Control the Node and Receive CSI Data
 //! ```rust
-//! let mut node_handle = CSIClient::new();
+//! let mut node_handle = CSINodeClient::new();
 //! ```
-//! #### Step 5: Create Handler for Printing for Certain Duration????
+//! #### Step 5: Create Handler for Printing for Certain Duration
 //! ```rust
-//! //example code
+//! node.run_duration(1000, &mut node_handle).await;
 //! ```
 //!
 
@@ -116,11 +149,11 @@ use portable_atomic::AtomicI64;
 use zerocopy::little_endian::{U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use embassy_futures::join::join;
+use embassy_futures::join::{join, join3};
 use embassy_futures::select::{select3, Either3};
 use embassy_sync::pubsub::{PubSubBehavior, Subscriber};
 
-use embassy_time::Instant;
+use embassy_time::{Duration, Instant, with_timeout};
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::{ClientConfig, CsiConfig, Interfaces, Protocol, WifiController};
 
@@ -213,6 +246,17 @@ static STOP_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 fn set_runtime_collection_mode(is_collector: bool) {
     IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
     COLLECTION_MODE_CHANGED.signal(());
+}
+
+async fn csi_data_collection(client: &mut CSINodeClient, duration: u64) {
+    with_timeout(Duration::from_secs(duration), async {
+        loop {
+            client.print_csi_w_metadata().await;
+        }
+    })
+    .await
+    .unwrap_err();
+    client.send_stop().await;
 }
 
 /// Configuration for ESP-NOW traffic generation.
@@ -314,11 +358,11 @@ type CSIRxSubscriber = Subscriber<
 >;
 
 /// Client helper to receive CSI packets via a pub/sub channel.
-pub struct CSIClient {
+pub struct CSINodeClient {
     csi_subscriber: CSIRxSubscriber,
 }
 
-impl CSIClient {
+impl CSINodeClient {
     /// Create a new CSI subscriber.
     pub fn new() -> Self {
         Self {
@@ -516,6 +560,139 @@ impl<'a> CSINode<'a> {
     /// Set Wi-Fi PHY data rate for ESP-NOW traffic.
     pub fn set_rate(&mut self, rate: WifiPhyRate) {
         self.rate = Some(rate);
+    }
+
+    /// Run the node until duration in seconds with internal collection.
+    ///
+    /// This initializes Wi-Fi, configures CSI, and starts mode-specific tasks.
+    pub async fn run_duration(&mut self, duration: u64, mut client: &mut CSINodeClient) {
+        let interfaces = &mut self.hardware.interfaces;
+        let controller = &mut self.hardware.controller;
+
+        // Tasks Necessary for Central Station & Sniffer
+        let sta_interface = if let Node::Central(CentralOpMode::WifiStation(config)) = &self.kind {
+            Some(sta_init(&mut interfaces.sta, config, controller))
+        } else {
+            None
+        };
+
+        // Set Wi-Fi mode to Station for all node types
+        controller.set_mode(esp_radio::wifi::WifiMode::Sta).unwrap();
+
+        // Build CSI Configuration
+        let config = match self.csi_config {
+            Some(ref config) => {
+                log_ln!("CSI Configuration Set: {:?}", config);
+                build_csi_config(config)
+            }
+            None => {
+                let default_config = CsiConfiguration::default();
+                log_ln!(
+                    "No CSI Configuration Provided. Going with defaults: {:?}",
+                    default_config
+                );
+                build_csi_config(&default_config)
+            }
+        };
+
+        // Apply Protocol if specified
+        if let Some(protocol) = self.protocol.take() {
+            let old_protocol = reconstruct_protocol(&protocol);
+            controller.set_protocol(protocol.into()).unwrap();
+            self.protocol = Some(old_protocol);
+        }
+
+        // Start the controller
+        controller.start_async().await.unwrap();
+        log_ln!("Wi-Fi Controller Started");
+        let is_collector = self.collection_mode == CollectionMode::Collector;
+        IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
+
+        // Set Peripheral/Central to Collect CSI
+        set_csi(controller, config);
+        let sniffer: &esp_radio::wifi::Sniffer<'_> = &interfaces.sniffer;
+
+        // Initialize Nodes based on type
+        match &self.kind {
+            Node::Peripheral(op_mode) => match op_mode {
+                PeripheralOpMode::EspNow(esp_now_config) => {
+                    // Initialize as Peripheral node with EspNowConfig
+                    if let Some(rate) = self.rate.take() {
+                        let old_rate = reconstruct_wifi_rate(&rate);
+                        let _ = interfaces.esp_now.set_rate(rate);
+                        self.rate = Some(old_rate);
+                    }
+
+                    let main_task = run_esp_now_peripheral(
+                        &mut interfaces.esp_now,
+                        esp_now_config,
+                        self.traffic_freq_hz,
+                    );
+                    join3(
+                        main_task,
+                        run_process_csi_packet(),
+                        csi_data_collection(client, duration),
+                    )
+                    .await;
+                }
+                PeripheralOpMode::WifiSniffer(sniffer_config) => {
+                    let sniffer = &interfaces.sniffer;
+                    sniffer.set_promiscuous_mode(true).unwrap();
+                    join(
+                        run_process_csi_packet(),
+                        csi_data_collection(client, duration),
+                    )
+                    .await;
+                    run_process_csi_packet().await;
+                    sniffer.set_promiscuous_mode(false).unwrap();
+                }
+            },
+            Node::Central(op_mode) => match op_mode {
+                CentralOpMode::EspNow(esp_now_config) => {
+                    // Initialize as Central node with EspNowConfig
+                    if let Some(rate) = self.rate.take() {
+                        let old_rate = reconstruct_wifi_rate(&rate);
+                        let _ = interfaces.esp_now.set_rate(rate);
+                        self.rate = Some(old_rate);
+                    }
+
+                    let main_task = run_esp_now_central(
+                        &mut interfaces.esp_now,
+                        interfaces.sta.mac_address(),
+                        esp_now_config,
+                        self.traffic_freq_hz,
+                        is_collector,
+                    );
+                    join3(
+                        main_task,
+                        run_process_csi_packet(),
+                        csi_data_collection(client, duration),
+                    )
+                    .await;
+                }
+                CentralOpMode::WifiStation(sta_config) => {
+                    // Initialize as Wifi Station Collector with WifiStationConfig
+                    // 1. Connect to Wi-Fi network, etc.
+                    // 2. Run DHCP, NTP sync if enabled in config, etc.
+                    // 3. Spawn STA Connection Handling Task
+                    // 4. Spawn STA Network Operation Task
+                    let (sta_stack, sta_runner) = sta_interface.unwrap();
+
+                    let main_task =
+                        run_sta_connect(controller, self.traffic_freq_hz, sta_stack, sta_runner);
+                    join3(
+                        main_task,
+                        run_process_csi_packet(),
+                        csi_data_collection(client, duration),
+                    )
+                    .await;
+                }
+            },
+        }
+
+        STOP_SIGNAL.reset();
+        let _ = controller.stop_async().await;
+        reset_globals();
     }
 
     /// Run the node until stopped.
