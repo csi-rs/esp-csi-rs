@@ -8,7 +8,7 @@ keywords = ["embedded", "esp32", "wifi", "csi"]
 categories = ["embedded"]
 readme = "README.md"
 homepage = "https://blog.theembeddedrustacean.com/"
-repository = "https://github.com/theembeddedrustacean/esp-csi-rs"
+repository = "https://github.com/csi-rs/esp-csi-rs"
 license = "MIT OR Apache-2.0"
 exclude = ["target/debug/*", "assets/*"]
 
