@@ -80,8 +80,10 @@ mod log_impl {
 
     pub fn init_logger(level: log::LevelFilter) {
         static LOGGER: EspLogger = EspLogger;
-        log::set_logger(&LOGGER).unwrap();
-        log::set_max_level(level);
+        // `log::set_logger` requires the `std` feature; use the unsafe
+        // `set_logger_racy` which is available in no-std environments.
+        unsafe { log::set_logger_racy(&LOGGER) }.unwrap();
+        unsafe { log::set_max_level_racy(level) };
     }
 }
 
