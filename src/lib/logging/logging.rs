@@ -140,7 +140,7 @@ impl From<u8> for LogMode {
 mod logging_impl {
     use embedded_io_async::{ErrorType, Write};
     use esp_hal::peripherals::Peripherals;
-    #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(feature = "esp32")))]
+    #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(any(feature = "esp32", feature = "esp32c2"))))]
     use esp_hal::usb_serial_jtag::UsbSerialJtag;
     use esp_hal::{
         uart::{Config, Uart},
@@ -153,7 +153,7 @@ mod logging_impl {
     pub enum Backend {
         #[cfg(any(feature = "uart", feature = "auto"))]
         Uart(Uart<'static, Async>),
-        #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(feature = "esp32")))]
+        #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(any(feature = "esp32", feature = "esp32c2"))))]
         Jtag(UsbSerialJtag<'static, Async>),
     }
 
@@ -172,7 +172,7 @@ mod logging_impl {
                     .map(|_| buf.len())
                     .map_err(|_| embedded_io_async::ErrorKind::Other),
 
-                #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(feature = "esp32")))]
+                #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(any(feature = "esp32", feature = "esp32c2"))))]
                 Self::Jtag(driver) => driver
                     .write_all(buf)
                     .await
@@ -192,7 +192,7 @@ mod logging_impl {
                     .await
                     .map_err(|_| embedded_io_async::ErrorKind::Other),
 
-                #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(feature = "esp32")))]
+                #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(any(feature = "esp32", feature = "esp32c2"))))]
                 Self::Jtag(driver) => driver
                     .flush()
                     .await
@@ -221,7 +221,7 @@ mod logging_impl {
             }
         }
 
-        #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(feature = "esp32")))]
+        #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(any(feature = "esp32", feature = "esp32c2"))))]
         pub fn new_jtag(periphs: Peripherals, log_mode: LogMode) -> Self {
             let raw_driver = UsbSerialJtag::new(periphs.USB_DEVICE).into_async();
             Self {
@@ -397,7 +397,7 @@ pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
         }
         #[cfg(feature = "auto")]
         {
-            #[cfg(not(feature = "esp32"))]
+            #[cfg(not(any(feature = "esp32", feature = "esp32c2")))]
             {
                 let periphs = unsafe { Peripherals::steal() };
                 #[cfg(feature = "esp32c3")]
@@ -426,7 +426,7 @@ pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
                 spawner.spawn(logger_backend(driver)).unwrap();
             }
         }
-        #[cfg(all(feature = "jtag-serial", not(feature = "esp32")))]
+        #[cfg(all(feature = "jtag-serial", not(any(feature = "esp32", feature = "esp32c2"))))]
         {
             let periphs = unsafe { Peripherals::steal() };
             let driver = LogOutput::new_jtag(periphs, log_mode);
