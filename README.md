@@ -39,14 +39,14 @@ Traffic carrying collected CSI data are tagged with sequence numbers that trigge
 
 ## Node Roles
 
-`esp-cs-rs` defines two types of roles that a node can take in a collection network:
+`esp-csi-rs` defines two types of roles that a node can take in a collection network:
 
 1. **Central Node**: This type of node is one that generates traffic, also can connect to one or more peripheral nodes.
 2. **Peripheral Node**: This type of node does not generate traffic, also can optionally connect to one central node at most.
 
 ## Node CSI Collection Modes
 
-`esp-cs-rs` defines two types of collection modes:
+`esp-csi-rs` defines two types of collection modes:
 
 1. **Collector**: A collector node collects and provides CSI data output from one or more devices.
 2. **Listener**: A listener is a passive node. It only enables CSI collection and does not provide any CSI output.
