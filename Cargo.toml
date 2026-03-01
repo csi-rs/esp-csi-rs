@@ -60,7 +60,7 @@ esp32 = [
     "esp-rtos/esp32",
 ]
 
-# ## Support for the ESP32-C2
+## Support for the ESP32-C2
 esp32c2 = [
     "esp-backtrace/esp32c2",
     "esp-bootloader-esp-idf/esp32c2",
@@ -75,7 +75,7 @@ esp32c2 = [
     "esp-rtos/esp32c2",
 ]
 
-# ## Support for the ESP32-C3
+## Support for the ESP32-C3
 esp32c3 = [
     "esp-hal/esp32c3",
     "esp-hal/rt",
@@ -88,7 +88,7 @@ esp32c3 = [
     "esp-rtos/esp32c3",
 ]
 
-# ## Support for the ESP32-C6 (WiFi 6)
+## Support for the ESP32-C6 (WiFi 6)
 esp32c6 = [
     "esp-hal/esp32c6",
     "esp-hal/rt",
@@ -102,7 +102,7 @@ esp32c6 = [
     "esp-rtos/esp32c6",
 ]
 
-# ## Support for the ESP32-S3 (AIoT)
+## Support for the ESP32-S3 (AIoT)
 esp32s3 = [
     "esp-hal/esp32s3",
     "esp-hal/rt",

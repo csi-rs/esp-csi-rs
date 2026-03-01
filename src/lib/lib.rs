@@ -59,14 +59,14 @@
 //!
 //! ## Output Formats & Logging Modes
 //! `esp-csi-rs` is able to print CSI data in several formats. The output format can be configured when initializing the logger. The supported formats include:
-//! - **LogMode::ArrayList**: This prints CSI data as a list of arrays, where each array represents the CSI values for a received packet. This format is more compact and easier to read for large volumes of CSI data.
-//! 
+//! - **LogMode::ArrayList**: This prints CSI data as an array, where the array represents the CSI values for a received packet. This format is more compact and easier to read for large volumes of CSI data.
+//!
 //! Example output:
 //! ```
 //! [1758,-84,11,163,1,10032333,332,0,336,2,0,1,1,128,0,1,1,0,1,0,0,0,332,128]
 //! ```
 //! - **LogMode::Text**: This output prints CSI data in a more verbose, human-readable format. This includes additional metadata and explanations alongside the raw CSI values, making it easier to understand the context of each packet's CSI data.
-//! 
+//!
 //! Example output:
 //! ```rust
 //! mac: 56:6C:EB:6F:BC:3D
@@ -153,7 +153,7 @@ use embassy_futures::join::{join, join3};
 use embassy_futures::select::{select3, Either3};
 use embassy_sync::pubsub::{PubSubBehavior, Subscriber};
 
-use embassy_time::{Duration, Instant, with_timeout};
+use embassy_time::{with_timeout, Duration, Instant};
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::{ClientConfig, CsiConfig, Interfaces, Protocol, WifiController};
 
