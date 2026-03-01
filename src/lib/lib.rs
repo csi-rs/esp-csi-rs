@@ -63,8 +63,36 @@
 //!
 //! Example output:
 //! ```
-//! [1758,-84,11,163,1,10032333,332,0,336,2,0,1,1,128,0,1,1,0,1,0,0,0,332,128]
+//! [3916,-93,11,157,1,1815804,256,0,260,2,0,1,1,128,0,1,1,0,1,0,0,0,256,128,[...]]
 //! ```
+//! The array fields map to the [`CSIDataPacket`] struct fields in the following order:
+//!
+//! | Index | Field | Description |
+//! |-------|-------|-------------|
+//! | 0 | `sequence_number` | Sequence number of the packet that triggered the CSI capture |
+//! | 1 | `rssi` | Received Signal Strength Indicator (dBm) |
+//! | 2 | `rate` | PHY rate encoding (valid for non-HT / 802.11b/g packets) |
+//! | 3 | `noise_floor` | Noise floor of the RF module (dBm) |
+//! | 4 | `channel` | Primary channel on which the packet was received |
+//! | 5 | `timestamp` | Local timestamp when the packet was received (microseconds) |
+//! | 6 | `sig_len` | Length of the packet including Frame Check Sequence (FCS) |
+//! | 7 | `rx_state` | Reception state: `0` = no error, non-zero = error code |
+//! | 8 | `secondary_channel` | Secondary channel: `0` = none, `1` = above, `2` = below *(non-ESP32-C6 only)* |
+//! | 9 | `sgi` | Short Guard Interval: `0` = Long GI, `1` = Short GI *(non-ESP32-C6 only)* |
+//! | 10 | `antenna` | Antenna number: `0` = antenna 0, `1` = antenna 1 *(non-ESP32-C6 only)* |
+//! | 11 | `ampdu_cnt` | Number of subframes aggregated in AMPDU *(non-ESP32-C6 only)* |
+//! | 12 | `sig_mode` | Protocol: `0` = non-HT (11b/g), `1` = HT (11n), `3` = VHT (11ac) *(non-ESP32-C6 only)* |
+//! | 13 | `mcs` | Modulation Coding Scheme; for HT packets ranges from 0 (MCS0) to 76 (MCS76) *(non-ESP32-C6 only)* |
+//! | 14 | `bandwidth` | Channel bandwidth: `0` = 20 MHz, `1` = 40 MHz *(non-ESP32-C6 only)* |
+//! | 15 | `smoothing` | Channel estimate smoothing: `0` = unsmoothed, `1` = smoothing recommended *(non-ESP32-C6 only)* |
+//! | 16 | `not_sounding` | Sounding PPDU flag: `0` = sounding PPDU, `1` = not a sounding PPDU *(non-ESP32-C6 only)* |
+//! | 17 | `aggregation` | Aggregation type: `0` = MPDU, `1` = AMPDU *(non-ESP32-C6 only)* |
+//! | 18 | `stbc` | Space-Time Block Code: `0` = non-STBC, `1` = STBC *(non-ESP32-C6 only)* |
+//! | 19 | `fec_coding` | Forward Error Correction / LDPC flag; set for 11n LDPC packets *(non-ESP32-C6 only)* |
+//! | 20 | `sig_len` | Packet length including FCS (repeated) |
+//! | 21 | `csi_data_len` | Length of the raw CSI data (number of `i8` samples) |
+//! | 22 | `[csi_data]` | Inner array of raw CSI `i8` samples |
+//!
 //! - **LogMode::Text**: This output prints CSI data in a more verbose, human-readable format. This includes additional metadata and explanations alongside the raw CSI values, making it easier to understand the context of each packet's CSI data.
 //!
 //! Example output:

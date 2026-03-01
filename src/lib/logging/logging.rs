@@ -550,7 +550,21 @@ async fn write_text_array_packet(packet: CSIDataPacket, driver: &mut LogOutput) 
         write_field!(packet.rxmatch0);
     }
     write_field!(packet.sig_len);
-    write_last_field!(packet.csi_data_len);
+    write_field!(packet.csi_data_len);
+
+    driver.write(b"[").await.map_err(|_| ())?;
+    let data_len = packet.csi_data.len();
+    for (i, val) in packet.csi_data.iter().enumerate() {
+        buf.clear();
+        if i + 1 < data_len {
+            let _ = write!(&mut buf, "{},", val);
+        } else {
+            let _ = write!(&mut buf, "{}", val);
+        }
+        driver.write(buf.as_bytes()).await.map_err(|_| ())?;
+    }
+    driver.write(b"]]
+").await.map_err(|_| ())?;
 
     Ok(())
 }
@@ -625,7 +639,21 @@ fn write_text_array_packet(packet: CSIDataPacket) {
         write_field!(packet.rxmatch0);
     }
     write_field!(packet.sig_len);
-    write_last_field!(packet.csi_data_len);
+    write_field!(packet.csi_data_len);
+
+    log_raw!("[");
+    let data_len = packet.csi_data.len();
+    for (i, val) in packet.csi_data.iter().enumerate() {
+        buf.clear();
+        if i + 1 < data_len {
+            let _ = write!(&mut buf, "{},", val);
+        } else {
+            let _ = write!(&mut buf, "{}", val);
+        }
+        log_raw!(buf.as_str());
+    }
+    log_raw!("]]
+");
 }
 
 #[cfg(feature = "async-print")]

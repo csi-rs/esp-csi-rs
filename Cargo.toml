@@ -18,9 +18,15 @@ path = "src/lib/lib.rs"
 [features]
 #! ⚠️ At minimum you are required to choose only ONE of the device options. For the most efficient (and fastest) logging, you should combine defmt with the jtag-serial features.
 
-default = ["no-std", "println", "auto", "statistics", "async-print"]
+default = ["no-std", "println", "auto", "async-print"]
 ## Build without the standard library.
 no-std = []
+## Enable logging via `println!()`.
+println = ["dep:log", "esp-backtrace/println"]
+## Automatically select the best available backend for the target.
+auto = ["esp-println/auto"]
+## Non-blocking async logging. This is an unstable feature and may cause unexpected behavior. Use with caution.
+async-print = []
 ## Enable logging via defmt.
 defmt = [
     "dep:defmt",
@@ -31,18 +37,12 @@ defmt = [
     "embassy-executor/defmt",
     "esp-println/defmt-espflash",
 ]
-## Enable logging via `println!()`.
-println = ["dep:log", "esp-backtrace/println"]
-## Automatically select the best available backend for the target.
-auto = ["esp-println/auto"]
 ## Force the JTAG backend for logging.
 jtag-serial = ["esp-println/jtag-serial"]
 ## Force the UART backend for logging (not recommended, much slower than JTAG backend).
 uart = ["esp-println/uart"]
 ## Disable all logging.
 no-print = ["esp-println/no-op"]
-## Non-blocking async logging. This is an unstable feature and may cause unexpected behavior. Use with caution.
-async-print = []
 ## Enable collection of runtime statistics (e.g., latency, dropped packets).
 statistics = []
 
