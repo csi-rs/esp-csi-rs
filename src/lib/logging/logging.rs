@@ -22,7 +22,7 @@ mod csi_interface {
     feature = "async-print"
 ))]
 pub use csi_interface::{CSI_CHANNEL};
-#[cfg(feature = "statistics")]
+#[cfg(all(feature = "statistics", feature = "async-print"))]
 pub use csi_interface::LOG_DROPPED_PACKETS;
 
 static LOG_MODE: AtomicU8 = AtomicU8::new(LogMode::Text as u8);
@@ -312,23 +312,23 @@ pub fn print_raw_bytes(bytes: &[u8]) {
     }
 }
 
-/// Log raw bytes (Only for blocking printer).
+/// Log raw bytes without any added newline (blocking path only; no-op in async-print mode).
+///
+/// `defmt` is a structured/framed logger and cannot stream raw binary, so it
+/// is intentionally excluded here.
 #[macro_export]
 macro_rules! log_raw {
     ($data:expr) => {{
         #[cfg(all(
             any(feature = "uart", feature = "jtag-serial", feature = "auto"),
-            feature = "async-print"
+            not(feature = "async-print"),
+            feature = "println"
         ))]
         {
-            #[cfg(feature = "println")]
-            {
-                print_raw_bytes($data.as_ref());
-            }
-
-            #[cfg(feature = "defmt")]
-            {
-                defmt::write!("{}", $data);
+            use core::fmt::Write as _FmtWrite;
+            let mut _printer = esp_println::Printer;
+            for &_b in AsRef::<[u8]>::as_ref(&$data) {
+                let _ = _printer.write_char(_b as char);
             }
         }
     }};
@@ -451,6 +451,11 @@ pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
             LOG_MODE.store(log_mode as u8, Ordering::Relaxed);
         }
     }
+}
+
+// Set the logging mode at runtime.
+pub fn set_log_mode(log_mode: LogMode) {
+    LOG_MODE.store(log_mode as u8, Ordering::Relaxed);
 }
 
 #[cfg(feature = "async-print")]
