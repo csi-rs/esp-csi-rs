@@ -99,8 +99,8 @@ mod defmt_impl {
 
     unsafe impl defmt::Logger for AsyncDefmtBackend {
         fn acquire() {}
-        fn release() {}
-        fn flush() {}
+        unsafe fn release() {}
+        unsafe fn flush() {}
 
         unsafe fn write(bytes: &[u8]) {
             #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
@@ -916,12 +916,20 @@ pub async fn logger_backend(mut driver: LogOutput) {
                 }
             }
             Either::Second(message) => {
-                // 'message' is a heapless::String.
-                // It is guaranteed to be a single linear chunk of memory.
+                // `message` is heapless::String<256> in println mode,
+                // or [u8; 256] in defmt mode.
+                #[cfg(all(feature = "println", not(feature = "defmt")))]
                 let _ = driver.write_all(message.as_bytes()).await;
+                #[cfg(feature = "defmt")]
+                let _ = driver.write_all(&message).await;
 
-                // Only flush if no more logs are pending
+                // Only flush if no more messages are pending.
+                #[cfg(all(feature = "println", not(feature = "defmt")))]
                 if log_impl::LOG_CHANNEL.is_empty() {
+                    let _ = driver.flush().await;
+                }
+                #[cfg(feature = "defmt")]
+                if defmt_impl::DEFMT_CHANNEL.is_empty() {
                     let _ = driver.flush().await;
                 }
             }
