@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-rs"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["Omar Hiari", "Ammar Saleh", "Abdullah Alawad", "Maryam Odat"]
 description = "ESP CSI Driver for Rust"
@@ -35,7 +35,6 @@ defmt = [
     "esp-radio/defmt",
     "esp-backtrace/defmt",
     "embassy-executor/defmt",
-    "esp-println/defmt-espflash",
 ]
 ## Force the JTAG backend for logging.
 jtag-serial = ["esp-println/jtag-serial"]

@@ -22,7 +22,7 @@ mod csi_interface {
     feature = "async-print"
 ))]
 pub use csi_interface::{CSI_CHANNEL};
-#[cfg(feature = "statistics")]
+#[cfg(all(feature = "statistics", feature = "async-print"))]
 pub use csi_interface::LOG_DROPPED_PACKETS;
 
 static LOG_MODE: AtomicU8 = AtomicU8::new(LogMode::Text as u8);
@@ -99,8 +99,8 @@ mod defmt_impl {
 
     unsafe impl defmt::Logger for AsyncDefmtBackend {
         fn acquire() {}
-        fn release() {}
-        fn flush() {}
+        unsafe fn release() {}
+        unsafe fn flush() {}
 
         unsafe fn write(bytes: &[u8]) {
             #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
@@ -206,27 +206,24 @@ mod logging_impl {
     /// Async log output wrapper with selected `LogMode`.
     pub struct LogOutput {
         inner: Backend,
-        pub log_mode: LogMode,
     }
 
     impl LogOutput {
         #[cfg(any(feature = "uart", feature = "auto"))]
-        pub fn new_uart(periphs: Peripherals, log_mode: LogMode) -> Self {
+        pub fn new_uart(periphs: Peripherals) -> Self {
             let raw_driver = Uart::new(periphs.UART0, Config::default().with_baudrate(115_200))
                 .unwrap()
                 .into_async();
             Self {
                 inner: Backend::Uart(raw_driver),
-                log_mode,
             }
         }
 
         #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(any(feature = "esp32", feature = "esp32c2"))))]
-        pub fn new_jtag(periphs: Peripherals, log_mode: LogMode) -> Self {
+        pub fn new_jtag(periphs: Peripherals) -> Self {
             let raw_driver = UsbSerialJtag::new(periphs.USB_DEVICE).into_async();
             Self {
                 inner: Backend::Jtag(raw_driver),
-                log_mode,
             }
         }
     }
@@ -312,23 +309,23 @@ pub fn print_raw_bytes(bytes: &[u8]) {
     }
 }
 
-/// Log raw bytes (Only for blocking printer).
+/// Log raw bytes without any added newline (blocking path only; no-op in async-print mode).
+///
+/// `defmt` is a structured/framed logger and cannot stream raw binary, so it
+/// is intentionally excluded here.
 #[macro_export]
 macro_rules! log_raw {
     ($data:expr) => {{
         #[cfg(all(
             any(feature = "uart", feature = "jtag-serial", feature = "auto"),
-            feature = "async-print"
+            not(feature = "async-print"),
+            feature = "println"
         ))]
         {
-            #[cfg(feature = "println")]
-            {
-                print_raw_bytes($data.as_ref());
-            }
-
-            #[cfg(feature = "defmt")]
-            {
-                defmt::write!("{}", $data);
+            use core::fmt::Write as _FmtWrite;
+            let mut _printer = esp_println::Printer;
+            for &_b in AsRef::<[u8]>::as_ref(&$data) {
+                let _ = _printer.write_char(_b as char);
             }
         }
     }};
@@ -389,6 +386,7 @@ use crate::logging::logging::logging_impl::LogOutput;
 /// In async mode this selects UART/JTAG automatically (if enabled) and
 /// spawns `logger_backend`. In non-async mode it stores the `LogMode`.
 pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
+    LOG_MODE.store(log_mode as u8, Ordering::Relaxed);
     #[cfg(feature = "async-print")]
     {
         #[cfg(feature = "println")]
@@ -412,30 +410,30 @@ pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
                 const SOF_INT_MASK: u32 = 0b10;
                 let res = unsafe { (USB_DEVICE_INT_RAW.read_volatile() & SOF_INT_MASK) != 0 };
                 if res == true {
-                    let driver = LogOutput::new_jtag(periphs, log_mode);
+                    let driver = LogOutput::new_jtag(periphs);
                     spawner.spawn(logger_backend(driver)).unwrap();
                 } else {
-                    let driver = LogOutput::new_uart(periphs, log_mode);
+                    let driver = LogOutput::new_uart(periphs);
                     spawner.spawn(logger_backend(driver)).unwrap();
                 }
             }
             #[cfg(feature = "esp32")]
             {
                 let periphs = unsafe { Peripherals::steal() };
-                let driver = LogOutput::new_uart(periphs, log_mode);
+                let driver = LogOutput::new_uart(periphs);
                 spawner.spawn(logger_backend(driver)).unwrap();
             }
         }
         #[cfg(all(feature = "jtag-serial", not(any(feature = "esp32", feature = "esp32c2"))))]
         {
             let periphs = unsafe { Peripherals::steal() };
-            let driver = LogOutput::new_jtag(periphs, log_mode);
+            let driver = LogOutput::new_jtag(periphs);
             spawner.spawn(logger_backend(driver)).unwrap();
         }
         #[cfg(feature = "uart")]
         {
             let periphs = unsafe { Peripherals::steal() };
-            let driver = LogOutput::new_uart(periphs, log_mode);
+            let driver = LogOutput::new_uart(periphs);
             spawner.spawn(logger_backend(driver)).unwrap();
         }
 
@@ -451,6 +449,11 @@ pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
             LOG_MODE.store(log_mode as u8, Ordering::Relaxed);
         }
     }
+}
+
+// Set the logging mode at runtime.
+pub fn set_log_mode(log_mode: LogMode) {
+    LOG_MODE.store(log_mode as u8, Ordering::Relaxed);
 }
 
 #[cfg(feature = "async-print")]
@@ -902,7 +905,7 @@ pub async fn logger_backend(mut driver: LogOutput) {
 
         match select(csi_future, log_future).await {
             Either::First(packet) => {
-                let _ = match driver.log_mode {
+                let _ = match LOG_MODE.load(Ordering::Relaxed).into() {
                     LogMode::Serialized => write_serialized_packet(packet, &mut driver).await,
                     LogMode::ArrayList => write_text_array_packet(packet, &mut driver).await,
                     LogMode::Text => write_text_packet(packet, &mut driver).await,
@@ -913,12 +916,20 @@ pub async fn logger_backend(mut driver: LogOutput) {
                 }
             }
             Either::Second(message) => {
-                // 'message' is a heapless::String.
-                // It is guaranteed to be a single linear chunk of memory.
+                // `message` is heapless::String<256> in println mode,
+                // or [u8; 256] in defmt mode.
+                #[cfg(all(feature = "println", not(feature = "defmt")))]
                 let _ = driver.write_all(message.as_bytes()).await;
+                #[cfg(feature = "defmt")]
+                let _ = driver.write_all(&message).await;
 
-                // Only flush if no more logs are pending
+                // Only flush if no more messages are pending.
+                #[cfg(all(feature = "println", not(feature = "defmt")))]
                 if log_impl::LOG_CHANNEL.is_empty() {
+                    let _ = driver.flush().await;
+                }
+                #[cfg(feature = "defmt")]
+                if defmt_impl::DEFMT_CHANNEL.is_empty() {
                     let _ = driver.flush().await;
                 }
             }
