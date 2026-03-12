@@ -74,7 +74,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    let client_config = ClientConfig::default()
+    let client_config: ClientConfig = ClientConfig::default()
         .with_ssid("SSID".to_string())
         .with_password("PASS".to_string())
         .with_auth_method(esp_radio::wifi::AuthMethod::Wpa2Personal);
@@ -94,6 +94,7 @@ async fn main(spawner: Spawner) -> ! {
         Some(1000),
         csi_hardware,
     );
+    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR);
 
     node.run_duration(1000, &mut node_handle).await;
 
