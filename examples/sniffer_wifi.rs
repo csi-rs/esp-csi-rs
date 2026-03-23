@@ -92,7 +92,14 @@ async fn main(spawner: Spawner) -> ! {
         Some(1000),
         csi_hardware,
     );
+    #[cfg(feature = "esp32c6")]
+    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNAX);
+    #[cfg(not(feature = "esp32c6"))]
     node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR);
+
+    #[cfg(feature = "esp32c6")]
+    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
+    #[cfg(not(feature = "esp32c6"))]
     node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
 
     node.run_duration(1000, &mut node_handle).await;
