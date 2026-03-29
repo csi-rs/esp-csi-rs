@@ -4,15 +4,24 @@ use heapless::String;
 use portable_atomic::{AtomicU8, Ordering};
 use postcard::experimental::max_size::MaxSize;
 
+const CSI_LOG_CHANNEL_CAPACITY: usize = 64;
+const TEXT_LOG_CHANNEL_CAPACITY: usize = 64;
+const DEFMT_LOG_CHANNEL_CAPACITY: usize = 64;
+
 #[cfg(all(
     any(feature = "uart", feature = "jtag-serial", feature = "auto"),
     feature = "async-print"
 ))]
 mod csi_interface {
     use crate::csi::CSIDataPacket;
+    use crate::logging::logging::CSI_LOG_CHANNEL_CAPACITY;
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
     use portable_atomic::AtomicU32;
-    pub static CSI_CHANNEL: Channel<CriticalSectionRawMutex, CSIDataPacket, 2> = Channel::new();
+    pub static CSI_CHANNEL: Channel<
+        CriticalSectionRawMutex,
+        CSIDataPacket,
+        CSI_LOG_CHANNEL_CAPACITY,
+    > = Channel::new();
     #[cfg(feature = "statistics")]
     pub static LOG_DROPPED_PACKETS: AtomicU32 = AtomicU32::new(0);
 }
@@ -51,11 +60,16 @@ pub fn get_log_packet_drops() -> u32 {
 
 #[cfg(all(feature = "println", feature = "async-print"))]
 mod log_impl {
+    use crate::logging::logging::TEXT_LOG_CHANNEL_CAPACITY;
     use core::fmt::Write;
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
     use heapless::String;
 
-    pub static LOG_CHANNEL: Channel<CriticalSectionRawMutex, String<256>, 16> = Channel::new();
+    pub static LOG_CHANNEL: Channel<
+        CriticalSectionRawMutex,
+        String<256>,
+        TEXT_LOG_CHANNEL_CAPACITY,
+    > = Channel::new();
 
     struct EspLogger;
 
@@ -90,9 +104,14 @@ mod log_impl {
 #[cfg(all(feature = "defmt", feature = "async-print"))]
 mod defmt_impl {
     use super::*;
+    use crate::logging::logging::DEFMT_LOG_CHANNEL_CAPACITY;
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 
-    pub static DEFMT_CHANNEL: Channel<CriticalSectionRawMutex, [u8; 256], 16> = Channel::new();
+    pub static DEFMT_CHANNEL: Channel<
+        CriticalSectionRawMutex,
+        [u8; 256],
+        DEFMT_LOG_CHANNEL_CAPACITY,
+    > = Channel::new();
 
     #[defmt::global_logger]
     struct AsyncDefmtBackend;

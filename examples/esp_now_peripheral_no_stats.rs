@@ -9,9 +9,7 @@ use esp_csi_rs::{
     config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
     PeripheralOpMode,
 };
-use esp_csi_rs::{
-    CSINodeClient, CSINodeHardware, log_ln,
-};
+use esp_csi_rs::{log_ln, CSINodeClient, CSINodeHardware};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
@@ -45,14 +43,9 @@ macro_rules! mk_static {
 }
 
 async fn node_task(client: &mut CSINodeClient) {
-    with_timeout(Duration::from_secs(1000), async {
-        loop {
-            Timer::after_secs(1).await;
-        }
-    })
-    .await
-    .unwrap_err();
-    client.send_stop().await;
+    loop {
+        Timer::after_secs(1).await;
+    }
 }
 
 #[esp_rtos::main]
@@ -61,7 +54,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-    init_logger(spawner, LogMode::Text);
+    init_logger(spawner, LogMode::Serialized);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
@@ -103,7 +96,7 @@ async fn main(spawner: Spawner) -> ! {
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
+    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs7Sgi);
 
     join(node.run(), node_task(&mut node_handle)).await;
 

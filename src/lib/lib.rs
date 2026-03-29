@@ -190,9 +190,8 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_sync::signal::Signal;
 
-use heapless::Vec;
+use heapless::{LinearMap, Vec};
 extern crate alloc;
-use alloc::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub mod central;
@@ -208,8 +207,9 @@ use crate::config::CsiConfig as CsiConfiguration;
 use crate::csi::{CSIDataPacket, RxCSIFmt};
 use crate::peripheral::esp_now::run_esp_now_peripheral;
 
-const PROC_CSI_CH_CAPACITY: usize = 20;
+const PROC_CSI_CH_CAPACITY: usize = 64;
 const PROC_CSI_CH_SUBS: usize = 2;
+const MAX_TRACKED_PEERS: usize = 16;
 
 // PubSub Channels
 static CSI_PACKET: PubSubChannel<
@@ -1122,10 +1122,12 @@ pub async fn run_process_csi_packet() {
     let mut last_rx_count = STATS.rx_count.load(Ordering::Relaxed);
     #[cfg(feature = "statistics")]
     let mut last_tx_count = STATS.tx_count.load(Ordering::Relaxed);
+    #[cfg(feature = "statistics")]
+    let mut rate_calc_decimator: u8 = 0;
     // Subscribe to CSI packet capture updates
     let mut csi_packet_sub = CSI_PACKET.subscriber().unwrap();
-    // Map to track sequence numbers per MAC address
-    let mut peer_tracker: BTreeMap<[u8; 6], u16> = BTreeMap::new();
+    // Fixed-capacity map avoids heap traffic in the per-packet path.
+    let mut peer_tracker: LinearMap<[u8; 6], u16, MAX_TRACKED_PEERS> = LinearMap::new();
     let mut is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
 
     loop {
@@ -1158,6 +1160,8 @@ pub async fn run_process_csi_packet() {
             Either3::Third(csi_packet) => {
                 #[cfg(feature = "statistics")]
                 {
+                    rate_calc_decimator = rate_calc_decimator.wrapping_add(1);
+
                     if is_collector && seq_drop_detection_enabled() {
                         let current_seq = csi_packet.sequence_number;
 
@@ -1178,27 +1182,35 @@ pub async fn run_process_csi_packet() {
                             }
                         }
 
-                        // Update tracker with new sequence
-                        peer_tracker.insert(csi_packet.mac, current_seq);
+                        // Update tracker with new sequence. If the tracker is full,
+                        // reset it to keep the hot path non-blocking.
+                        if peer_tracker.insert(csi_packet.mac, current_seq).is_err() {
+                            peer_tracker.clear();
+                            let _ = peer_tracker.insert(csi_packet.mac, current_seq);
+                        }
                         // --- DROP DETECTION LOGIC END ---
                     }
 
-                    let elapsed_secs = last_rate_update.elapsed().as_secs() as u64;
-                    if elapsed_secs >= 1 {
-                        let current_rx = STATS.rx_count.load(Ordering::Relaxed);
-                        let current_tx = STATS.tx_count.load(Ordering::Relaxed);
+                    // Recompute rates periodically instead of every packet to keep
+                    // callback processing overhead low at high packet rates.
+                    if rate_calc_decimator & 0x0F == 0 {
+                        let elapsed_secs = last_rate_update.elapsed().as_secs() as u64;
+                        if elapsed_secs >= 1 {
+                            let current_rx = STATS.rx_count.load(Ordering::Relaxed);
+                            let current_tx = STATS.tx_count.load(Ordering::Relaxed);
 
-                        let rx_rate = ((current_rx.saturating_sub(last_rx_count)) / elapsed_secs)
-                            as u32;
-                        let tx_rate = ((current_tx.saturating_sub(last_tx_count)) / elapsed_secs)
-                            as u32;
+                            let rx_rate =
+                                ((current_rx.saturating_sub(last_rx_count)) / elapsed_secs) as u32;
+                            let tx_rate =
+                                ((current_tx.saturating_sub(last_tx_count)) / elapsed_secs) as u32;
 
-                        STATS.rx_rate_hz.store(rx_rate, Ordering::Relaxed);
-                        STATS.tx_rate_hz.store(tx_rate, Ordering::Relaxed);
+                            STATS.rx_rate_hz.store(rx_rate, Ordering::Relaxed);
+                            STATS.tx_rate_hz.store(tx_rate, Ordering::Relaxed);
 
-                        last_rx_count = current_rx;
-                        last_tx_count = current_tx;
-                        last_rate_update = Instant::now();
+                            last_rx_count = current_rx;
+                            last_tx_count = current_tx;
+                            last_rate_update = Instant::now();
+                        }
                     }
                 }
             }
