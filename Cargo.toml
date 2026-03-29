@@ -205,6 +205,10 @@ incremental = true
 debug = 2
 opt-level = "s"
 
+[profile.dev.package."*"]
+# Dependencies (HAL, radio, graphics, etc.) are performance critical.
+opt-level = 3
+
 [profile.release]
 codegen-units = 1        # LLVM can perform better optimizations using a single thread
 debug-assertions = false
@@ -213,6 +217,10 @@ lto = 'fat'
 opt-level = "s"
 overflow-checks = false
 panic = "abort"
+
+[profile.release.package."*"]
+# Dependencies (HAL, radio, graphics, etc.) are performance critical.
+opt-level = 3
 
 [package.metadata.docs.rs]
 # docs.rs configuration: build docs for a single embedded target with
