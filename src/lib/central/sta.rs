@@ -1,6 +1,6 @@
 use core::{net::Ipv4Addr};
 use embassy_futures::join::{join4};
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_net::raw::{IpProtocol, IpVersion, PacketMetadata, RawSocket};
 use embassy_net::{Ipv4Address, Ipv4Cidr, Runner, Stack, StackResources};
 use embassy_time::{Duration, Timer};
@@ -71,11 +71,27 @@ pub async fn run_sta_connect(
     sta_stack: Stack<'_>,
     sta_runner: Runner<'_, &mut WifiDevice<'_>>
 ) {
-    // Connect WiFi
-    match controller.connect_async().await {
-        Ok(_) => log_ln!("WiFi Connected"),
-        Err(e) => {
-            panic!("Failed to connect WiFi: {:?}", e);
+    // Connect WiFi (retry on transient failures)
+    loop {
+        match select(STOP_SIGNAL.wait(), controller.connect_async()).await {
+            Either::First(_) => {
+                STOP_SIGNAL.signal(());
+                return;
+            }
+            Either::Second(Ok(_)) => {
+                log_ln!("WiFi Connected");
+                break;
+            }
+            Either::Second(Err(e)) => {
+                log_ln!("Failed to connect WiFi: {:?}. Retrying...", e);
+                match select(STOP_SIGNAL.wait(), Timer::after(Duration::from_secs(1))).await {
+                    Either::First(_) => {
+                        STOP_SIGNAL.signal(());
+                        return;
+                    }
+                    Either::Second(_) => {}
+                }
+            }
         }
     }
 
@@ -105,41 +121,44 @@ async fn run_net_task(mut sta_runner: Runner<'_, &mut WifiDevice<'_>>) {
 async fn run_dhcp_client(sta_stack: Stack<'_>) {
     log_ln!("Running DHCP Client");
 
-    // Acquire and store IP information for gateway and client after configuration is up
-
-    // Check if link is up
-    sta_stack.wait_link_up().await;
-    log_ln!("Link is up!");
-
-    // Create instance to store acquired IP information
-    let mut ip_info = IpInfo {
-        local_address: Ipv4Cidr::new(Ipv4Addr::UNSPECIFIED, 24),
-        gateway_address: Ipv4Address::UNSPECIFIED,
-    };
-
-    log_ln!("Acquiring config...");
-    sta_stack.wait_config_up().await;
-    log_ln!("Config Acquired");
-
-    // Print out acquired IP configuration
     loop {
-        if let Some(config) = sta_stack.config_v4() {
-            ip_info.local_address = config.address;
-            ip_info.gateway_address = config.gateway.unwrap();
+        // Check if link is up
+        sta_stack.wait_link_up().await;
+        log_ln!("Link is up!");
 
-            log_ln!("Local IP: {:?}", ip_info.local_address);
-            log_ln!("Gateway IP: {:?}", ip_info.gateway_address);
+        // Create instance to store acquired IP information
+        let mut ip_info = IpInfo {
+            local_address: Ipv4Cidr::new(Ipv4Addr::UNSPECIFIED, 24),
+            gateway_address: Ipv4Address::UNSPECIFIED,
+        };
 
-            break;
+        log_ln!("Acquiring config...");
+        sta_stack.wait_config_up().await;
+        log_ln!("Config Acquired");
+
+        // Print out acquired IP configuration
+        loop {
+            if let Some(config) = sta_stack.config_v4() {
+                ip_info.local_address = config.address;
+                ip_info.gateway_address = config.gateway.unwrap_or(Ipv4Address::UNSPECIFIED);
+
+                log_ln!("Local IP: {:?}", ip_info.local_address);
+                log_ln!("Gateway IP: {:?}", ip_info.gateway_address);
+
+                break;
+            }
+            Timer::after(Duration::from_millis(500)).await;
         }
-        Timer::after(Duration::from_millis(500)).await;
+
+        // Publish DHCP info. On reconnect this updates consumers.
+        DHCP_CLIENT_INFO.signal(ip_info);
+
+        // Wait until link drops before looping for next lease/config.
+        while sta_stack.is_link_up() {
+            Timer::after(Duration::from_millis(250)).await;
+        }
+        log_ln!("Link down, waiting to reacquire DHCP config...");
     }
-    // // Store Gateway Address in Global Context
-    // GATEWAY_ADDRESS.lock(|lock| {
-    //     lock.replace(ip_info.gateway_address);
-    // });
-    // Signal that DHCP is complete
-    DHCP_CLIENT_INFO.signal(ip_info);
 }
 
 /// Monitor STA events (connect/disconnect/stop) until a stop signal.
@@ -172,6 +191,35 @@ pub async fn sta_connection(controller: &mut WifiController<'_>) {
             Either::Second(mut wait_event_fut) => {
                 if wait_event_fut.contains(WifiEvent::StaDisconnected) {
                     log_ln!("STA Disconnected");
+
+                    // Try to reconnect until successful or stop requested.
+                    loop {
+                        match select(STOP_SIGNAL.wait(), controller.connect_async()).await {
+                            Either::First(_) => {
+                                STOP_SIGNAL.signal(());
+                                return;
+                            }
+                            Either::Second(Ok(_)) => {
+                                log_ln!("STA Reconnected");
+                                break;
+                            }
+                            Either::Second(Err(e)) => {
+                                log_ln!("STA reconnect failed: {:?}", e);
+                                match select(
+                                    STOP_SIGNAL.wait(),
+                                    Timer::after(Duration::from_secs(1)),
+                                )
+                                .await
+                                {
+                                    Either::First(_) => {
+                                        STOP_SIGNAL.signal(());
+                                        return;
+                                    }
+                                    Either::Second(_) => {}
+                                }
+                            }
+                        }
+                    }
                 }
                 if wait_event_fut.contains(WifiEvent::StaStop) {
                     log_ln!("STA Stopped");
@@ -185,7 +233,7 @@ pub async fn sta_connection(controller: &mut WifiController<'_>) {
 /// Manage station network operations and emit periodic ICMP traffic.
 pub async fn sta_network_ops(sta_stack: Stack<'_>, frequency_hz: Option<u16>) {
     // Retrieve acquired IP information from DHCP
-    let ip_info = DHCP_CLIENT_INFO.wait().await;
+    let mut ip_info = DHCP_CLIENT_INFO.wait().await;
 
     // let mut start_collection_watch = match START_COLLECTION.receiver() {
     //     Some(r) => r,
@@ -216,7 +264,7 @@ pub async fn sta_network_ops(sta_stack: Stack<'_>, frequency_hz: Option<u16>) {
     // Determine trigger frequency
     let freq = match frequency_hz {
         Some(freq) => freq as u64,
-        None => u16::MAX as u64,
+        None => 100,
     };
 
     // Initialize sequence counter
@@ -226,18 +274,19 @@ pub async fn sta_network_ops(sta_stack: Stack<'_>, frequency_hz: Option<u16>) {
 
     // Start sending trigger packets
     loop {
-        match select(
+        match select3(
             STOP_SIGNAL.wait(),
             Timer::after(Duration::from_hz(freq)),
+            DHCP_CLIENT_INFO.wait(),
         )
         .await
         {
-            Either::First(_) => {
+            Either3::First(_) => {
                 // Stop signal received, exit the loop
                 STOP_SIGNAL.signal(());
                 break;
             }
-            Either::Second(_) => {
+            Either3::Second(_) => {
                 // Increment sequence number for this packet
                 seq_counter = seq_counter.wrapping_add(1);
 
@@ -283,6 +332,10 @@ pub async fn sta_network_ops(sta_stack: Stack<'_>, frequency_hz: Option<u16>) {
 
                 // Send raw packet
                 raw_socket.send(ipv4_packet_buffer).await;
+            }
+            Either3::Third(new_ip_info) => {
+                ip_info = new_ip_info;
+                log_ln!("Updated station IP context for trigger traffic");
             }
         }
     }

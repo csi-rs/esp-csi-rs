@@ -1,0 +1,170 @@
+name: Cargo Hack Compile
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "**/*.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/cargo-hack.yml"
+  push:
+    branches:
+      - main
+      - staging
+    paths:
+      - "**/*.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/cargo-hack.yml"
+
+concurrency:
+  group: cargo-hack-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover-chip-features:
+    name: Discover chip features
+    runs-on: ubuntu-latest
+    outputs:
+      all_matrix: ${{ steps.discover.outputs.all_matrix }}
+      pr_matrix: ${{ steps.discover.outputs.pr_matrix }}
+      chip_group: ${{ steps.discover.outputs.chip_group }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Discover chip feature matrix
+        id: discover
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          chips=$(cargo +stable metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "esp-csi-rs") | .features | keys[] | select(test("^esp32"))' \
+            | sort -u)
+
+          if [[ -z "${chips}" ]]; then
+            echo "No chip features matching ^esp32 were found in Cargo.toml"
+            exit 1
+          fi
+
+          chip_group=$(printf '%s\n' "${chips}" | jq -R -s -r 'split("\n") | map(select(length > 0)) | join(",")')
+
+          entries=()
+          while IFS= read -r chip; do
+            [[ -z "${chip}" ]] && continue
+
+            case "${chip}" in
+              esp32)
+                target="xtensa-esp32-none-elf"
+                ;;
+              esp32s3)
+                target="xtensa-esp32s3-none-elf"
+                ;;
+              esp32c6)
+                target="riscv32imac-unknown-none-elf"
+                ;;
+              esp32c2|esp32c3)
+                target="riscv32imc-unknown-none-elf"
+                ;;
+              *)
+                echo "Unsupported chip feature '${chip}'. Add a target mapping in this workflow."
+                exit 1
+                ;;
+            esac
+
+            entries+=("{\"chip\":\"${chip}\",\"target\":\"${target}\"}")
+          done <<< "${chips}"
+
+          all_matrix=$(printf '%s\n' "${entries[@]}" | jq -s -c '.')
+          pr_matrix=$(jq -c '[ .[] | select(.chip == "esp32" or .chip == "esp32c3") ]' <<< "${all_matrix}")
+
+          if [[ "${pr_matrix}" == "[]" ]]; then
+            pr_matrix="${all_matrix}"
+          fi
+
+          echo "all_matrix=${all_matrix}" >> "$GITHUB_OUTPUT"
+          echo "pr_matrix=${pr_matrix}" >> "$GITHUB_OUTPUT"
+          echo "chip_group=${chip_group}" >> "$GITHUB_OUTPUT"
+          echo "Discovered all matrix entries: ${all_matrix}"
+          echo "Discovered PR matrix entries: ${pr_matrix}"
+
+  cargo-hack-check:
+    name: cargo-hack (${{ matrix.chip }})
+    runs-on: ubuntu-latest
+    needs: discover-chip-features
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'pull_request' && needs.discover-chip-features.outputs.pr_matrix || needs.discover-chip-features.outputs.all_matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: cargo-hack-${{ matrix.chip }}
+
+      - name: Install ESP Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +stable install espup --locked
+          espup install --targets esp32,esp32c2,esp32c3,esp32c6,esp32s3
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@cargo-hack
+
+      - name: Run cargo-hack checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$HOME/export-esp.sh"
+
+          chip="${{ matrix.chip }}"
+          target="${{ matrix.target }}"
+
+          mode="${{ github.event_name == 'pull_request' && 'each-feature' || 'depth-2' }}"
+          chip_group='${{ needs.discover-chip-features.outputs.chip_group }}'
+          other_chips=$(tr ',' '\n' <<< "${chip_group}" | awk -v chip="${chip}" '$0 != chip' | paste -sd, -)
+
+          # Keep one stable logging baseline in every build and avoid invalid
+          # backend combinations like jtag-serial + uart.
+          base_features="${chip},println,auto"
+          logging_backend_features="jtag-serial,uart"
+          excluded_common="default,defmt,no-print"
+          excluded_each_feature="${excluded_common},${logging_backend_features}"
+          excluded_depth2="${excluded_common},${logging_backend_features}"
+          if [[ -n "${other_chips}" ]]; then
+            excluded_each_feature="${excluded_each_feature},${other_chips}"
+            excluded_depth2="${excluded_depth2},${other_chips}"
+          fi
+
+          if [[ "${mode}" == "each-feature" ]]; then
+            cargo hack check \
+              --target "${target}" \
+              --features "${base_features}" \
+              --exclude-features "${excluded_each_feature}" \
+              --each-feature \
+              --no-dev-deps
+          else
+            cargo hack check \
+              --target "${target}" \
+              --features "${base_features}" \
+              --exclude-features "${excluded_depth2}" \
+              --feature-powerset \
+              --depth 2 \
+              --no-dev-deps
+          fi

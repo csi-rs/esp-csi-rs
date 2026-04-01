@@ -190,9 +190,8 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_sync::signal::Signal;
 
-use heapless::Vec;
+use heapless::{LinearMap, Vec};
 extern crate alloc;
-use alloc::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub mod central;
@@ -208,8 +207,9 @@ use crate::config::CsiConfig as CsiConfiguration;
 use crate::csi::{CSIDataPacket, RxCSIFmt};
 use crate::peripheral::esp_now::run_esp_now_peripheral;
 
-const PROC_CSI_CH_CAPACITY: usize = 20;
+const PROC_CSI_CH_CAPACITY: usize = 64;
 const PROC_CSI_CH_SUBS: usize = 2;
+const MAX_TRACKED_PEERS: usize = 16;
 
 // PubSub Channels
 static CSI_PACKET: PubSubChannel<
@@ -224,6 +224,8 @@ static IS_COLLECTOR: AtomicBool = AtomicBool::new(false);
 static COLLECTION_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static CENTRAL_MAGIC_NUMBER: u32 = 0xA8912BF0;
 static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
+#[cfg(feature = "statistics")]
+static SEQ_DROP_DETECTION_ENABLED: AtomicBool = AtomicBool::new(false);
 
 use portable_atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 /// Global statistics counters (enabled with the `statistics` feature).
@@ -274,6 +276,30 @@ static STOP_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 fn set_runtime_collection_mode(is_collector: bool) {
     IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
     COLLECTION_MODE_CHANGED.signal(());
+}
+
+fn set_seq_drop_detection(enabled: bool) {
+    #[cfg(feature = "statistics")]
+    {
+        SEQ_DROP_DETECTION_ENABLED.store(enabled, Ordering::Relaxed);
+    }
+
+    #[cfg(not(feature = "statistics"))]
+    {
+        let _ = enabled;
+    }
+}
+
+fn seq_drop_detection_enabled() -> bool {
+    #[cfg(feature = "statistics")]
+    {
+        SEQ_DROP_DETECTION_ENABLED.load(Ordering::Relaxed)
+    }
+
+    #[cfg(not(feature = "statistics"))]
+    {
+        false
+    }
 }
 
 async fn csi_data_collection(client: &mut CSINodeClient, duration: u64) {
@@ -387,20 +413,38 @@ type CSIRxSubscriber = Subscriber<
 
 /// Client helper to receive CSI packets via a pub/sub channel.
 pub struct CSINodeClient {
-    csi_subscriber: CSIRxSubscriber,
+    csi_subscriber: Option<CSIRxSubscriber>,
 }
 
 impl CSINodeClient {
-    /// Create a new CSI subscriber.
+    /// Create a new CSI node client.
+    ///
+    /// The CSI subscriber is created lazily on first call to `get_csi_data()`.
+    /// This allows creating a control-only handle (e.g. just calling `send_stop()`)
+    /// without consuming one of the CSI pub/sub subscriber slots.
     pub fn new() -> Self {
         Self {
-            csi_subscriber: CSI_PACKET.subscriber().unwrap(),
+            csi_subscriber: None,
         }
+    }
+
+    fn subscriber_mut(&mut self) -> &mut CSIRxSubscriber {
+        if self.csi_subscriber.is_none() {
+            self.csi_subscriber = Some(
+                CSI_PACKET
+                    .subscriber()
+                    .expect("failed to create CSI subscriber"),
+            );
+        }
+
+        self.csi_subscriber
+            .as_mut()
+            .expect("CSI subscriber unexpectedly missing")
     }
 
     /// Wait for the next CSI packet.
     pub async fn get_csi_data(&mut self) -> CSIDataPacket {
-        self.csi_subscriber.next_message_pure().await
+        self.subscriber_mut().next_message_pure().await
     }
 
     /// Receive and print CSI data with metadata (uses crate logging).
@@ -635,6 +679,11 @@ impl<'a> CSINode<'a> {
         log_ln!("Wi-Fi Controller Started");
         let is_collector = self.collection_mode == CollectionMode::Collector;
         IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
+        set_seq_drop_detection(matches!(
+            &self.kind,
+            Node::Peripheral(PeripheralOpMode::EspNow(_))
+                | Node::Central(CentralOpMode::EspNow(_))
+        ));
 
         // Set Peripheral/Central to Collect CSI
         set_csi(controller, config);
@@ -705,6 +754,8 @@ impl<'a> CSINode<'a> {
                     // 3. Spawn STA Connection Handling Task
                     // 4. Spawn STA Network Operation Task
                     let (sta_stack, sta_runner) = sta_interface.unwrap();
+                    let sniffer = &interfaces.sniffer;
+                    sniffer.set_promiscuous_mode(true).unwrap();
 
                     let main_task =
                         run_sta_connect(controller, self.traffic_freq_hz, sta_stack, sta_runner);
@@ -714,6 +765,7 @@ impl<'a> CSINode<'a> {
                         csi_data_collection(client, duration),
                     )
                     .await;
+                    sniffer.set_promiscuous_mode(false).unwrap();
                 }
             },
         }
@@ -768,6 +820,11 @@ impl<'a> CSINode<'a> {
         log_ln!("Wi-Fi Controller Started");
         let is_collector = self.collection_mode == CollectionMode::Collector;
         IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
+        set_seq_drop_detection(matches!(
+            &self.kind,
+            Node::Peripheral(PeripheralOpMode::EspNow(_))
+                | Node::Central(CentralOpMode::EspNow(_))
+        ));
 
         // Set Peripheral/Central to Collect CSI
         set_csi(controller, config);
@@ -823,10 +880,13 @@ impl<'a> CSINode<'a> {
                     // 3. Spawn STA Connection Handling Task
                     // 4. Spawn STA Network Operation Task
                     let (sta_stack, sta_runner) = sta_interface.unwrap();
+                    let sniffer = &interfaces.sniffer;
+                    sniffer.set_promiscuous_mode(true).unwrap();
 
                     let main_task =
                         run_sta_connect(controller, self.traffic_freq_hz, sta_stack, sta_runner);
                     join(main_task, run_process_csi_packet()).await;
+                    sniffer.set_promiscuous_mode(false).unwrap();
                 }
             },
         }
@@ -1056,10 +1116,18 @@ pub async fn run_process_csi_packet() {
     STATS
         .capture_start_time
         .store(Instant::now().as_ticks(), Ordering::Relaxed);
+    #[cfg(feature = "statistics")]
+    let mut last_rate_update = Instant::now();
+    #[cfg(feature = "statistics")]
+    let mut last_rx_count = STATS.rx_count.load(Ordering::Relaxed);
+    #[cfg(feature = "statistics")]
+    let mut last_tx_count = STATS.tx_count.load(Ordering::Relaxed);
+    #[cfg(feature = "statistics")]
+    let mut rate_calc_decimator: u8 = 0;
     // Subscribe to CSI packet capture updates
     let mut csi_packet_sub = CSI_PACKET.subscriber().unwrap();
-    // Map to track sequence numbers per MAC address
-    let mut peer_tracker: BTreeMap<[u8; 6], u16> = BTreeMap::new();
+    // Fixed-capacity map avoids heap traffic in the per-packet path.
+    let mut peer_tracker: LinearMap<[u8; 6], u16, MAX_TRACKED_PEERS> = LinearMap::new();
     let mut is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
 
     loop {
@@ -1082,11 +1150,19 @@ pub async fn run_process_csi_packet() {
                 STATS
                     .capture_start_time
                     .store(Instant::now().as_ticks(), Ordering::Relaxed);
+                #[cfg(feature = "statistics")]
+                {
+                    last_rate_update = Instant::now();
+                    last_rx_count = STATS.rx_count.load(Ordering::Relaxed);
+                    last_tx_count = STATS.tx_count.load(Ordering::Relaxed);
+                }
             }
             Either3::Third(csi_packet) => {
                 #[cfg(feature = "statistics")]
                 {
-                    if is_collector {
+                    rate_calc_decimator = rate_calc_decimator.wrapping_add(1);
+
+                    if is_collector && seq_drop_detection_enabled() {
                         let current_seq = csi_packet.sequence_number;
 
                         // Check if we have seen this MAC before
@@ -1106,9 +1182,35 @@ pub async fn run_process_csi_packet() {
                             }
                         }
 
-                        // Update tracker with new sequence
-                        peer_tracker.insert(csi_packet.mac, current_seq);
+                        // Update tracker with new sequence. If the tracker is full,
+                        // reset it to keep the hot path non-blocking.
+                        if peer_tracker.insert(csi_packet.mac, current_seq).is_err() {
+                            peer_tracker.clear();
+                            let _ = peer_tracker.insert(csi_packet.mac, current_seq);
+                        }
                         // --- DROP DETECTION LOGIC END ---
+                    }
+
+                    // Recompute rates periodically instead of every packet to keep
+                    // callback processing overhead low at high packet rates.
+                    if rate_calc_decimator & 0x0F == 0 {
+                        let elapsed_secs = last_rate_update.elapsed().as_secs() as u64;
+                        if elapsed_secs >= 1 {
+                            let current_rx = STATS.rx_count.load(Ordering::Relaxed);
+                            let current_tx = STATS.tx_count.load(Ordering::Relaxed);
+
+                            let rx_rate =
+                                ((current_rx.saturating_sub(last_rx_count)) / elapsed_secs) as u32;
+                            let tx_rate =
+                                ((current_tx.saturating_sub(last_tx_count)) / elapsed_secs) as u32;
+
+                            STATS.rx_rate_hz.store(rx_rate, Ordering::Relaxed);
+                            STATS.tx_rate_hz.store(tx_rate, Ordering::Relaxed);
+
+                            last_rx_count = current_rx;
+                            last_tx_count = current_tx;
+                            last_rate_update = Instant::now();
+                        }
                     }
                 }
             }

@@ -4,11 +4,12 @@
 use crate::alloc::string::ToString;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_time::{with_timeout, Duration, Instant, Timer};
+use embassy_time::{with_timeout, Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode};
 use esp_csi_rs::{
-    get_dropped_packets_rx, get_one_way_latency, get_pps_rx, get_pps_tx, get_two_way_latency,
+    get_dropped_packets_rx, get_one_way_latency, get_pps_rx, get_pps_tx, get_rx_rate_hz,
+    get_tx_rate_hz, get_two_way_latency,
     log_ln, CSINodeClient, CSINodeHardware, WifiStationConfig,
 };
 use esp_hal::clock::CpuClock;
@@ -38,6 +39,27 @@ macro_rules! mk_static {
         let x = STATIC_CELL.uninit().write(($val));
         x
     }};
+}
+
+async fn node_task(client: &mut CSINodeClient) {
+    with_timeout(Duration::from_secs(1000), async {
+        loop {
+            Timer::after_secs(1).await;
+            log_ln!(
+                "RX PPS(avg): {}, TX PPS(avg): {}, RX Rate(Hz): {}, TX Rate(Hz): {}, RX Dropped Packets: {}, One Way Latency: {}, Two Way Latency: {}",
+                get_pps_rx(),
+                get_pps_tx(),
+                get_rx_rate_hz(),
+                get_tx_rate_hz(),
+                get_dropped_packets_rx(),
+                get_one_way_latency(),
+                get_two_way_latency()
+            )
+        }
+    })
+    .await
+    .unwrap_err();
+    client.send_stop().await;
 }
 
 #[esp_rtos::main]
@@ -75,8 +97,8 @@ async fn main(spawner: Spawner) -> ! {
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let client_config = ClientConfig::default()
-        .with_ssid("SSID".to_string())
-        .with_password("PASS".to_string())
+        .with_ssid("OrangeFiber_2.4".to_string())
+        .with_password("Omar200@".to_string())
         .with_auth_method(esp_radio::wifi::AuthMethod::Wpa2Personal);
 
     let station_config = WifiStationConfig {
@@ -94,8 +116,12 @@ async fn main(spawner: Spawner) -> ! {
         Some(1000),
         csi_hardware,
     );
+    #[cfg(feature = "esp32c6")]
+    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNAX);
+    #[cfg(not(feature = "esp32c6"))]
+    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGN);
 
-    node.run_duration(1000, &mut node_handle).await;
+    join(node.run(), node_task(&mut node_handle)).await;
 
     loop {
         log_ln!("Hello world!");
