@@ -1,6 +1,7 @@
 name: Cargo Hack Compile
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - "**/*.rs"
