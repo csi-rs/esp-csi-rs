@@ -12,7 +12,6 @@ on:
   push:
     branches:
       - main
-      - staging
     paths:
       - "**/*.rs"
       - "Cargo.toml"
