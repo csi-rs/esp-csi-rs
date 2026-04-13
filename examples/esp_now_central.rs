@@ -10,8 +10,9 @@ use esp_csi_rs::{
     PeripheralOpMode,
 };
 use esp_csi_rs::{
-    get_dropped_packets_rx, get_one_way_latency, get_pps_rx, get_pps_tx, get_two_way_latency,
-    log_ln, CSINodeClient, CSINodeHardware,
+    get_dropped_packets_rx, get_one_way_latency, get_pps_rx, get_pps_tx, get_total_rx_packets,
+    get_total_tx_packets, get_two_way_latency, log_ln,
+    CSINodeClient, CSINodeHardware,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -46,13 +47,40 @@ macro_rules! mk_static {
 }
 
 async fn node_task(client: &mut CSINodeClient) {
+    let mut last_sample = Instant::now();
+    let mut last_rx_total = get_total_rx_packets();
+    let mut last_tx_total = get_total_tx_packets();
+
     with_timeout(Duration::from_secs(1000), async {
         loop {
             Timer::after_secs(1).await;
+
+            let elapsed_us = last_sample.elapsed().as_micros() as u64;
+            let rx_total = get_total_rx_packets();
+            let tx_total = get_total_tx_packets();
+            let rx_rate_hz = if elapsed_us == 0 {
+                0
+            } else {
+                (rx_total.saturating_sub(last_rx_total) * 1_000_000 / elapsed_us) as u32
+            };
+            let tx_rate_hz = if elapsed_us == 0 {
+                0
+            } else {
+                (tx_total.saturating_sub(last_tx_total) * 1_000_000 / elapsed_us) as u32
+            };
+
+            last_sample = Instant::now();
+            last_rx_total = rx_total;
+            last_tx_total = tx_total;
+
             log_ln!(
-                "RX PPS: {}, TX PPS: {}, RX Dropped Packets: {}, One Way Latency: {}, Two Way Latency: {}",
+                "RX PPS(avg): {}, TX PPS(avg): {}, RX Hz(inst): {}, TX Hz(inst): {}, RX Total: {}, TX Total: {}, RX Dropped Packets: {}, One Way Latency: {}, Two Way Latency: {}",
                 get_pps_rx(),
                 get_pps_tx(),
+                rx_rate_hz,
+                tx_rate_hz,
+                rx_total,
+                tx_total,
                 get_dropped_packets_rx(),
                 get_one_way_latency(),
                 get_two_way_latency()
@@ -91,7 +119,18 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     let mut config_radio = esp_radio::wifi::Config::default();
-    config_radio = config_radio.with_power_save_mode(esp_radio::wifi::PowerSaveMode::None);
+    // Raise Wi-Fi buffer budget for sustained ESP-NOW + CSI traffic on ESP32.
+    config_radio = config_radio
+        .with_power_save_mode(esp_radio::wifi::PowerSaveMode::None)
+        .with_static_rx_buf_num(16)
+        .with_dynamic_rx_buf_num(64)
+        .with_static_tx_buf_num(8)
+        .with_dynamic_tx_buf_num(64)
+        .with_rx_queue_size(12)
+        .with_tx_queue_size(12)
+        .with_ampdu_rx_enable(true)
+        .with_ampdu_tx_enable(true)
+        .with_rx_ba_win(10);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
@@ -104,11 +143,11 @@ async fn main(spawner: Spawner) -> ! {
         esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(EspNowConfig::default())),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
-        Some(10000),
+        Some(1200),
         csi_hardware,
     );
-    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
+    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGN);
+    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs3Lgi);
 
     join(node.run(), node_task(&mut node_handle)).await;
 

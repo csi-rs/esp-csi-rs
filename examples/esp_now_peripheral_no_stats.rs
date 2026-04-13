@@ -92,7 +92,7 @@ async fn main(spawner: Spawner) -> ! {
         )),
         CollectionMode::Listener,
         Some(CsiConfig::default()),
-        Some(10000),
+        Some(1000),
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR);

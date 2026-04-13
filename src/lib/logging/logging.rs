@@ -7,6 +7,7 @@ use postcard::experimental::max_size::MaxSize;
 const CSI_LOG_CHANNEL_CAPACITY: usize = 64;
 const TEXT_LOG_CHANNEL_CAPACITY: usize = 64;
 const DEFMT_LOG_CHANNEL_CAPACITY: usize = 64;
+const UART_LOG_BAUDRATE: u32 = 460_800;
 
 #[cfg(all(
     any(feature = "uart", feature = "jtag-serial", feature = "auto"),
@@ -166,7 +167,7 @@ mod logging_impl {
         Async,
     };
 
-    use crate::logging::logging::LogMode;
+    use crate::logging::logging::UART_LOG_BAUDRATE;
 
     /// Low-level logging backend (UART or USB JTAG).
     pub enum Backend {
@@ -230,7 +231,8 @@ mod logging_impl {
     impl LogOutput {
         #[cfg(any(feature = "uart", feature = "auto"))]
         pub fn new_uart(periphs: Peripherals) -> Self {
-            let raw_driver = Uart::new(periphs.UART0, Config::default().with_baudrate(115_200))
+            let raw_driver =
+                Uart::new(periphs.UART0, Config::default().with_baudrate(UART_LOG_BAUDRATE))
                 .unwrap()
                 .into_async();
             Self {

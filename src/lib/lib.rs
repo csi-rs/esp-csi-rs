@@ -505,8 +505,8 @@ fn reset_globals() {
     #[cfg(feature = "statistics")]
     {
         STATS.tx_count.store(0, Ordering::Relaxed);
+        STATS.rx_count.store(0, Ordering::Relaxed);
         STATS.rx_drop_count.store(0, Ordering::Relaxed);
-        STATS.tx_count.store(0, Ordering::Relaxed);
         STATS.tx_rate_hz.store(0, Ordering::Relaxed);
         STATS.rx_rate_hz.store(0, Ordering::Relaxed);
         STATS.one_way_latency.store(0, Ordering::Relaxed);
