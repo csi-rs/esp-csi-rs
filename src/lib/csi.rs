@@ -165,7 +165,9 @@ impl CSIDataPacket {
         log_csi(self.clone());
     }
 
-    // Retrieves `RxCSIFmt` for a `CSIDataPacket`
+    /// Derive and set `data_format` from captured radio metadata fields.
+    ///
+    /// Retrieves `RxCSIFmt` for a `CSIDataPacket`
     // The RxCSIFmt enum is a mapping of the different possible recieved CSI data formats supported by the Espressif WiFi driver.
     // RxCSIFmt encodes the different formats (each column in the table) in one byte to save space
     // More details on the different data formats can be found in the ESP CSI WiFi driver here:
@@ -278,78 +280,103 @@ impl CSIDataPacket {
         }
     }
 
+    /// Return the source MAC address.
     pub fn mac(&self) -> &[u8; 6] {
         &self.mac
     }
+    /// Return packet RSSI in dBm.
     pub fn rssi(&self) -> i32 {
         self.rssi
     }
+    /// Return local receive timestamp in microseconds.
     pub fn timestamp(&self) -> u32 {
         self.timestamp
     }
+    /// Return PHY rate encoding.
     pub fn rate(&self) -> u32 {
         self.rate
     }
+    /// Return SGI flag (0 = long GI, 1 = short GI).
     pub fn sgi(&self) -> u32 {
         self.sgi
     }
+    /// Return secondary-channel indicator.
     pub fn secondary_channel(&self) -> u32 {
         self.secondary_channel
     }
+    /// Return primary Wi-Fi channel.
     pub fn channel(&self) -> u32 {
         self.channel
     }
+    /// Return channel bandwidth encoding.
     pub fn bandwidth(&self) -> u32 {
         self.bandwidth
     }
+    /// Return receiving antenna index.
     pub fn antenna(&self) -> u32 {
         self.antenna
     }
+    /// Return signal mode encoding.
     pub fn sig_mode(&self) -> u32 {
         self.sig_mode
     }
+    /// Return MCS index.
     pub fn mcs(&self) -> u32 {
         self.mcs
     }
+    /// Return channel-smoothing recommendation flag.
     pub fn smoothing(&self) -> u32 {
         self.smoothing
     }
+    /// Return sounding indicator flag.
     pub fn not_sounding(&self) -> u32 {
         self.not_sounding
     }
+    /// Return MPDU/AMPDU aggregation flag.
     pub fn aggregation(&self) -> u32 {
         self.aggregation
     }
+    /// Return STBC flag.
     pub fn stbc(&self) -> u32 {
         self.stbc
     }
+    /// Return FEC coding flag.
     pub fn fec_coding(&self) -> u32 {
         self.fec_coding
     }
+    /// Return AMPDU subframe count.
     pub fn ampdu_cnt(&self) -> u32 {
         self.ampdu_cnt
     }
+    /// Return RF noise floor in dBm.
     pub fn noise_floor(&self) -> i32 {
         self.noise_floor
     }
+    /// Return RX state code.
     pub fn rx_state(&self) -> u32 {
         self.rx_state
     }
+    /// Return packet length including FCS.
     pub fn sig_len(&self) -> u32 {
         self.sig_len
     }
+    /// Return optional capture date/time metadata.
     pub fn date_time(&self) -> Option<&DateTime> {
         self.date_time.as_ref()
     }
+    /// Return trigger sequence number.
     pub fn sequence_number(&self) -> u16 {
         self.sequence_number
     }
+    /// Return interpreted CSI data format.
     pub fn data_format(&self) -> RxCSIFmt {
         self.data_format.clone()
     }
+    /// Return CSI payload length in bytes.
     pub fn csi_data_len(&self) -> u16 {
         self.csi_data_len
     }
+    /// Return a slice of raw CSI values.
     pub fn csi_data(&self) -> &[i8] {
         self.csi_data.as_slice()
     }

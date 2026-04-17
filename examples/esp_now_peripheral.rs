@@ -100,7 +100,7 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
     init_logger(spawner, LogMode::Text);
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     #[cfg(any(feature = "esp32c6", feature = "esp32c3"))]
@@ -121,18 +121,18 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     let mut config_radio = esp_radio::wifi::Config::default();
-    // Raise Wi-Fi buffer budget for sustained ESP-NOW + CSI traffic on ESP32.
+    // Raise Wi-Fi buffer budget for sustained ESP-NOW + CSI traffic.
     config_radio = config_radio
         .with_power_save_mode(esp_radio::wifi::PowerSaveMode::None)
-        .with_static_rx_buf_num(16)
+        .with_static_rx_buf_num(32)
         .with_dynamic_rx_buf_num(64)
-        .with_static_tx_buf_num(8)
+        .with_static_tx_buf_num(32)
         .with_dynamic_tx_buf_num(64)
-        .with_rx_queue_size(12)
-        .with_tx_queue_size(12)
+        .with_rx_queue_size(32)
+        .with_tx_queue_size(32)
         .with_ampdu_rx_enable(true)
         .with_ampdu_tx_enable(true)
-        .with_rx_ba_win(10);
+        .with_rx_ba_win(16);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
@@ -147,7 +147,7 @@ async fn main(spawner: Spawner) -> ! {
         )),
         CollectionMode::Listener,
         Some(CsiConfig::default()),
-        Some(1200),
+        Some(1500),
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::P802D11BGN);

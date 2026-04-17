@@ -472,7 +472,9 @@ pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
     }
 }
 
-// Set the logging mode at runtime.
+/// Set the logging output mode at runtime.
+///
+/// This updates the global mode used by `log_csi` formatting paths.
 pub fn set_log_mode(log_mode: LogMode) {
     LOG_MODE.store(log_mode as u8, Ordering::Relaxed);
 }

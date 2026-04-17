@@ -1,11 +1,8 @@
 use core::sync::atomic::Ordering;
 
-use embassy_futures::select::select3;
-use embassy_futures::select::Either3;
-use embassy_time::Duration;
+use embassy_futures::select::{select, Either};
 use embassy_time::Instant;
 use embassy_time::Timer;
-use heapless::LinearMap;
 use heapless::Vec;
 
 use crate::log_ln;
@@ -20,12 +17,22 @@ use esp_radio::esp_now::{Error as EspNowInnerError, EspNow, EspNowError, PeerInf
 use crate::EspNowConfig;
 
 const TX_BACKOFF_US: u64 = 200;
+const RX_BURST_DRAIN_LIMIT: u8 = 1;
+const TX_WAIT_SLICE_US: u64 = 200;
+const ADAPT_UP_EVERY_SUCCESSES: u16 = 32;
+const ADAPT_DOWN_PERCENT: u64 = 25;
+const ADAPT_UP_PERCENT: u64 = 10;
+const MIN_TX_HZ_FLOOR: u64 = 100;
+const MAX_TX_HZ_CEILING: u64 = 2_000;
+
+fn hz_to_interval_us(hz: u64) -> u64 {
+    (1_000_000u64 / hz.max(1)).max(1)
+}
 
 fn handle_peripheral_packet(
     esp_now: &mut EspNow<'static>,
     r: ReceivedData,
     channel: u8,
-    peripheral_offsets: &mut LinearMap<[u8; 6], i64, 8>,
     latency_offset: &mut i64,
 ) {
     #[cfg(feature = "statistics")]
@@ -56,7 +63,6 @@ fn handle_peripheral_packet(
         if rtt > 0 && rtt < 1_000_000 {
             *latency_offset =
                 packet.recv_uptime as i64 - (packet.central_send_uptime + rtt / 2) as i64;
-            let _ = peripheral_offsets.insert(r.info.src_address, *latency_offset);
 
             let total_elapsed = r_time.saturating_sub(packet.central_send_uptime);
             let b_processing_delay = packet.send_uptime.saturating_sub(packet.recv_uptime);
@@ -86,7 +92,6 @@ pub async fn run_esp_now_central(
     is_collector: bool,
 ) {
     let mut latency_offset: i64 = -1;
-    let mut peripheral_offsets: LinearMap<[u8; 6], i64, 8> = LinearMap::new();
     // Configure
     esp_now.set_channel(config.channel).unwrap();
     log_ln!("esp-now version {}", esp_now.version().unwrap());
@@ -96,57 +101,87 @@ pub async fn run_esp_now_central(
         None => u16::MAX as u64,
     };
 
-    let tx_interval = Duration::from_hz(freq);
+    // Adaptive control pacing: start from configured target and automatically
+    // back off under TX pressure, then slowly climb back up on stable sends.
+    let tx_hz_max = freq.clamp(1, MAX_TX_HZ_CEILING);
+    let tx_hz_min = (tx_hz_max / 8).max(MIN_TX_HZ_FLOOR).min(tx_hz_max);
+    let mut adaptive_tx_hz = tx_hz_max;
+    let mut tx_interval_us = hz_to_interval_us(adaptive_tx_hz);
+    let mut consecutive_tx_ok: u16 = 0;
+    let mut next_tx_us = Instant::now().as_micros().saturating_add(tx_interval_us);
 
     loop {
-        // Drain queued packets first so RX does not get starved by high TX rates.
-        while let Some(r) = esp_now.receive() {
-            handle_peripheral_packet(
-                esp_now,
-                r,
-                config.channel,
-                &mut peripheral_offsets,
-                &mut latency_offset,
-            );
+        let now_us = Instant::now().as_micros();
+        let tx_due = now_us >= next_tx_us;
+        if tx_due {
+            let control_packet = ControlPacket::new(is_collector, latency_offset);
+            let message_u8: Vec<u8, 16> = postcard::to_vec(&control_packet).unwrap();
+
+            let send_result = match esp_now.send(&BROADCAST_ADDRESS, &message_u8) {
+                Ok(waiter) => waiter.wait(),
+                Err(e) => Err(e),
+            };
+
+            match send_result {
+                Ok(()) => {
+                    #[cfg(feature = "statistics")]
+                    STATS.tx_count.fetch_add(1, Ordering::Relaxed);
+
+                    consecutive_tx_ok = consecutive_tx_ok.saturating_add(1);
+                    if consecutive_tx_ok >= ADAPT_UP_EVERY_SUCCESSES {
+                        consecutive_tx_ok = 0;
+                        let step_up = (adaptive_tx_hz * ADAPT_UP_PERCENT / 100).max(1);
+                        adaptive_tx_hz = (adaptive_tx_hz + step_up).min(tx_hz_max);
+                        tx_interval_us = hz_to_interval_us(adaptive_tx_hz);
+                    }
+                }
+                // Back off briefly when Wi-Fi TX buffers are full.
+                Err(EspNowError::Error(EspNowInnerError::OutOfMemory) | EspNowError::SendFailed) => {
+                    consecutive_tx_ok = 0;
+                    let step_down = (adaptive_tx_hz * ADAPT_DOWN_PERCENT / 100).max(1);
+                    adaptive_tx_hz = adaptive_tx_hz
+                        .saturating_sub(step_down)
+                        .max(tx_hz_min);
+                    tx_interval_us = hz_to_interval_us(adaptive_tx_hz);
+                    Timer::after_micros(TX_BACKOFF_US).await;
+                }
+                Err(e) => {
+                    consecutive_tx_ok = 0;
+                    log_ln!("Failed to send ESP-NOW packet: {:?}", e);
+                }
+            }
+
+            // Keep periodic phase from the previous deadline to avoid adding
+            // an extra full interval after each blocking send(). If we're
+            // behind, send again as soon as possible on the next loop.
+            next_tx_us = next_tx_us.saturating_add(tx_interval_us);
+            let now_after_tx = Instant::now().as_micros();
+            if next_tx_us <= now_after_tx {
+                next_tx_us = now_after_tx.saturating_add(1);
+            }
         }
 
-        match select3(
-            STOP_SIGNAL.wait(),
-            esp_now.receive_async(),
-            Timer::after(tx_interval),
-        )
-        .await
-        {
-            Either3::First(_) => {
-                // Stop signal received, exit the loop
+        // Drain a bounded RX burst after the TX step so TX deadlines stay
+        // prioritized at higher rates.
+        let mut rx_packets: u8 = 0;
+        while rx_packets < RX_BURST_DRAIN_LIMIT {
+            let Some(r) = esp_now.receive() else {
+                break;
+            };
+
+            handle_peripheral_packet(esp_now, r, config.channel, &mut latency_offset);
+            rx_packets = rx_packets.saturating_add(1);
+        }
+
+        let now_us = Instant::now().as_micros();
+        let until_tx_us = next_tx_us.saturating_sub(now_us);
+        let wait_us = until_tx_us.min(TX_WAIT_SLICE_US).max(1);
+        match select(STOP_SIGNAL.wait(), Timer::after_micros(wait_us)).await {
+            Either::First(_) => {
                 STOP_SIGNAL.signal(());
                 break;
             }
-            Either3::Second(r) => {
-                handle_peripheral_packet(
-                    esp_now,
-                    r,
-                    config.channel,
-                    &mut peripheral_offsets,
-                    &mut latency_offset,
-                );
-            }
-            Either3::Third(_) => {
-                let control_packet = ControlPacket::new(is_collector, latency_offset);
-                let message_u8: Vec<u8, 16> = postcard::to_vec(&control_packet).unwrap();
-                match esp_now.send_async(&BROADCAST_ADDRESS, &message_u8).await {
-                    Ok(()) => {
-                        #[cfg(feature = "statistics")]
-                        STATS.tx_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                    // Back off briefly when Wi-Fi TX buffers are full.
-                    Err(EspNowError::Error(EspNowInnerError::OutOfMemory)
-                    | EspNowError::SendFailed) => {
-                        Timer::after_micros(TX_BACKOFF_US).await;
-                    }
-                    Err(_) => {}
-                }
-            }
+            Either::Second(_) => {}
         }
     }
 

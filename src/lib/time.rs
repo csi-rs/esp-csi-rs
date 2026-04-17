@@ -11,18 +11,27 @@ struct DateTimeCapture {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, MaxSize)]
+/// Calendar date/time representation.
 pub struct DateTime {
+    /// Year (e.g. 2026).
     pub year: u64,
+    /// Month in range 1..=12.
     pub month: u64,
+    /// Day in month in range 1..=31.
     pub day: u64,
+    /// Hour in range 0..=23.
     pub hour: u64,
+    /// Minute in range 0..=59.
     pub minute: u64,
+    /// Second in range 0..=59.
     pub second: u64,
+    /// Millisecond in range 0..=999.
     pub millisecond: u64,
 }
 
-// Date/Time Calculation Helper Funcions
-// Function to convert UNIX timestamp to date and time
+/// Convert a UNIX timestamp to calendar components.
+///
+/// Returns `(year, month, day, hour, minute, second, millisecond)`.
 pub fn unix_to_date_time(
     unix_seconds: u64,
     unix_millis: u64,
@@ -59,12 +68,12 @@ pub fn unix_to_date_time(
     (year, month, day, hour, minute, second, unix_millis)
 }
 
-// Function to check if a year is a leap year
+/// Return `true` when `year` is a leap year in the Gregorian calendar.
 pub fn is_leap_year(year: u64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
-// Function to get the number of days in a year
+/// Return the number of days in `year`.
 pub fn days_in_year(year: u64) -> u64 {
     if is_leap_year(year) {
         366
@@ -73,7 +82,9 @@ pub fn days_in_year(year: u64) -> u64 {
     }
 }
 
-// Function to get the number of days in a month
+/// Return the number of days in `month` for a given `year`.
+///
+/// Returns `0` when `month` is outside `1..=12`.
 pub fn days_in_month(year: u64, month: u64) -> u64 {
     match month {
         1 => 31,

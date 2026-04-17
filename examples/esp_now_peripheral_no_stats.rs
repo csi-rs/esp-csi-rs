@@ -9,7 +9,11 @@ use esp_csi_rs::{
     config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
     PeripheralOpMode,
 };
-use esp_csi_rs::{log_ln, CSINodeClient, CSINodeHardware};
+use esp_csi_rs::{
+    get_dropped_packets_rx, get_one_way_latency, get_pps_rx, get_pps_tx, get_total_rx_packets,
+    get_total_tx_packets, get_two_way_latency, log_ln,
+    CSINodeClient, CSINodeHardware,
+};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
@@ -42,21 +46,15 @@ macro_rules! mk_static {
     }};
 }
 
-async fn node_task(client: &mut CSINodeClient) {
-    loop {
-        Timer::after_secs(1).await;
-    }
-}
-
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     // generator version: 1.1.0
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-    init_logger(spawner, LogMode::Serialized);
+    init_logger(spawner, LogMode::Text);
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     #[cfg(any(feature = "esp32c6", feature = "esp32c3"))]
@@ -77,7 +75,18 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     let mut config_radio = esp_radio::wifi::Config::default();
-    config_radio = config_radio.with_power_save_mode(esp_radio::wifi::PowerSaveMode::None);
+    // Raise Wi-Fi buffer budget for sustained ESP-NOW + CSI traffic.
+    config_radio = config_radio
+        .with_power_save_mode(esp_radio::wifi::PowerSaveMode::None)
+        .with_static_rx_buf_num(32)
+        .with_dynamic_rx_buf_num(64)
+        .with_static_tx_buf_num(32)
+        .with_dynamic_tx_buf_num(64)
+        .with_rx_queue_size(32)
+        .with_tx_queue_size(32)
+        .with_ampdu_rx_enable(true)
+        .with_ampdu_tx_enable(true)
+        .with_rx_ba_win(16);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
@@ -92,13 +101,13 @@ async fn main(spawner: Spawner) -> ! {
         )),
         CollectionMode::Listener,
         Some(CsiConfig::default()),
-        Some(1000),
+        Some(1500),
         csi_hardware,
     );
-    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
+    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGN);
+    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs3Lgi);
 
-    join(node.run(), node_task(&mut node_handle)).await;
+    node.run().await;
 
     loop {
         log_ln!("Hello world!");

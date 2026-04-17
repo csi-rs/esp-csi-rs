@@ -754,8 +754,6 @@ impl<'a> CSINode<'a> {
                     // 3. Spawn STA Connection Handling Task
                     // 4. Spawn STA Network Operation Task
                     let (sta_stack, sta_runner) = sta_interface.unwrap();
-                    let sniffer = &interfaces.sniffer;
-                    sniffer.set_promiscuous_mode(true).unwrap();
 
                     let main_task =
                         run_sta_connect(controller, self.traffic_freq_hz, sta_stack, sta_runner);
@@ -765,7 +763,6 @@ impl<'a> CSINode<'a> {
                         csi_data_collection(client, duration),
                     )
                     .await;
-                    sniffer.set_promiscuous_mode(false).unwrap();
                 }
             },
         }
@@ -880,8 +877,6 @@ impl<'a> CSINode<'a> {
                     // 3. Spawn STA Connection Handling Task
                     // 4. Spawn STA Network Operation Task
                     let (sta_stack, sta_runner) = sta_interface.unwrap();
-                    let sniffer = &interfaces.sniffer;
-                    sniffer.set_promiscuous_mode(true).unwrap();
 
                     let main_task =
                         run_sta_connect(controller, self.traffic_freq_hz, sta_stack, sta_runner);
