@@ -685,7 +685,10 @@ impl<'a> CSINode<'a> {
                 | Node::Central(CentralOpMode::EspNow(_))
         ));
 
-        // Set Peripheral/Central to Collect CSI
+        // Set Peripheral/Central to Collect CSI. Keep a clone so the STA
+        // recovery path in run_sta_connect can re-apply after a stop/start
+        // cycle (stop clears the CSI filter/callback).
+        let csi_config_for_recovery = config.clone();
         set_csi(controller, config);
         let sniffer: &esp_radio::wifi::Sniffer<'_> = &interfaces.sniffer;
 
@@ -755,8 +758,13 @@ impl<'a> CSINode<'a> {
                     // 4. Spawn STA Network Operation Task
                     let (sta_stack, sta_runner) = sta_interface.unwrap();
 
-                    let main_task =
-                        run_sta_connect(controller, self.traffic_freq_hz, sta_stack, sta_runner);
+                    let main_task = run_sta_connect(
+                        controller,
+                        self.traffic_freq_hz,
+                        sta_stack,
+                        sta_runner,
+                        csi_config_for_recovery,
+                    );
                     join3(
                         main_task,
                         run_process_csi_packet(),
@@ -823,7 +831,10 @@ impl<'a> CSINode<'a> {
                 | Node::Central(CentralOpMode::EspNow(_))
         ));
 
-        // Set Peripheral/Central to Collect CSI
+        // Set Peripheral/Central to Collect CSI. Keep a clone so the STA
+        // recovery path in run_sta_connect can re-apply after a stop/start
+        // cycle (stop clears the CSI filter/callback).
+        let csi_config_for_recovery = config.clone();
         set_csi(controller, config);
         let sniffer: &esp_radio::wifi::Sniffer<'_> = &interfaces.sniffer;
 
@@ -878,8 +889,13 @@ impl<'a> CSINode<'a> {
                     // 4. Spawn STA Network Operation Task
                     let (sta_stack, sta_runner) = sta_interface.unwrap();
 
-                    let main_task =
-                        run_sta_connect(controller, self.traffic_freq_hz, sta_stack, sta_runner);
+                    let main_task = run_sta_connect(
+                        controller,
+                        self.traffic_freq_hz,
+                        sta_stack,
+                        sta_runner,
+                        csi_config_for_recovery,
+                    );
                     join(main_task, run_process_csi_packet()).await;
                     sniffer.set_promiscuous_mode(false).unwrap();
                 }
@@ -991,7 +1007,7 @@ pub fn get_two_way_latency() -> i64 {
 }
 
 /// Sets CSI Configuration.
-fn set_csi(controller: &mut WifiController, config: CsiConfig) {
+pub(crate) fn set_csi(controller: &mut WifiController, config: CsiConfig) {
     // Set CSI Configuration with callback
     controller
         .set_csi(config, |info: esp_radio::wifi::wifi_csi_info_t| {

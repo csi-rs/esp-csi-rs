@@ -3,9 +3,9 @@ use embassy_futures::join::{join4};
 use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_net::raw::{IpProtocol, IpVersion, PacketMetadata, RawSocket};
 use embassy_net::{Ipv4Address, Ipv4Cidr, Runner, Stack, StackResources};
-use embassy_time::{Duration, Timer};
+use embassy_time::{with_timeout, Duration, Timer};
 use enumset::enum_set;
-use esp_radio::wifi::{ModeConfig, WifiController, WifiDevice, WifiEvent};
+use esp_radio::wifi::{CsiConfig, ModeConfig, WifiController, WifiDevice, WifiEvent};
 use smoltcp::phy::ChecksumCapabilities;
 
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
@@ -13,7 +13,7 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal}
 use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, Ipv4Packet, Ipv4Repr};
 
 use crate::log_ln;
-use crate::{WifiStationConfig, STOP_SIGNAL};
+use crate::{set_csi, WifiStationConfig, STOP_SIGNAL};
 
 static DHCP_CLIENT_INFO: Signal<CriticalSectionRawMutex, IpInfo> = Signal::new();
 
@@ -69,29 +69,86 @@ pub async fn run_sta_connect(
     controller: &mut WifiController<'_>,
     freq: Option<u16>,
     sta_stack: Stack<'_>,
-    sta_runner: Runner<'_, &mut WifiDevice<'_>>
+    sta_runner: Runner<'_, &mut WifiDevice<'_>>,
+    csi_config: CsiConfig,
 ) {
+    // Settle, watchdog, and recovery policy: after a hard reset the radio can
+    // (a) hang inside connect_async, or (b) succeed on retry but deliver no
+    // CSI because the controller-level state got wedged. The first is caught
+    // by the timeout; the second is caught by re-applying set_csi after a
+    // full stop/start cycle.
+    const CONNECT_TIMEOUT_SECS: u64 = 10;
+    // Any connect failure wedges controller-level state badly enough that the
+    // retried association comes up with no CSI traffic, so always cycle the
+    // radio and re-apply CSI instead of relying on a bare retry.
+    const FAILURES_BEFORE_RADIO_CYCLE: u8 = 1;
+    let mut consecutive_failures: u8 = 0;
+
+    // Let the controller settle after start_async before the first connect.
+    // Without this, first-boot connect_async often races scan/state setup and
+    // returns Err(Disconnected), which wedges CSI on the retried association.
+    match select(STOP_SIGNAL.wait(), Timer::after(Duration::from_secs(2))).await {
+        Either::First(_) => {
+            STOP_SIGNAL.signal(());
+            return;
+        }
+        Either::Second(_) => {}
+    }
+
     // Connect WiFi (retry on transient failures)
     loop {
-        match select(STOP_SIGNAL.wait(), controller.connect_async()).await {
+        let connect_fut = with_timeout(
+            Duration::from_secs(CONNECT_TIMEOUT_SECS),
+            controller.connect_async(),
+        );
+        let failure_kind: &str = match select(STOP_SIGNAL.wait(), connect_fut).await {
             Either::First(_) => {
                 STOP_SIGNAL.signal(());
                 return;
             }
-            Either::Second(Ok(_)) => {
+            Either::Second(Ok(Ok(_))) => {
                 log_ln!("WiFi Connected");
                 break;
             }
-            Either::Second(Err(e)) => {
-                log_ln!("Failed to connect WiFi: {:?}. Retrying...", e);
-                match select(STOP_SIGNAL.wait(), Timer::after(Duration::from_secs(1))).await {
-                    Either::First(_) => {
-                        STOP_SIGNAL.signal(());
-                        return;
-                    }
-                    Either::Second(_) => {}
-                }
+            Either::Second(Ok(Err(e))) => {
+                log_ln!("Connect failed: {:?}", e);
+                "error"
             }
+            Either::Second(Err(_)) => {
+                log_ln!("connect_async timed out after {}s", CONNECT_TIMEOUT_SECS);
+                "timeout"
+            }
+        };
+
+        consecutive_failures = consecutive_failures.saturating_add(1);
+        // disconnect_async no-ops when not associated; cheap defensive cleanup.
+        let _ = controller.disconnect_async().await;
+
+        if consecutive_failures >= FAILURES_BEFORE_RADIO_CYCLE {
+            log_ln!(
+                "Cycling Wi-Fi controller after {} failures (last: {}) to clear stale state",
+                consecutive_failures,
+                failure_kind
+            );
+            let _ = controller.stop_async().await;
+            Timer::after(Duration::from_millis(300)).await;
+            match controller.start_async().await {
+                Ok(()) => {
+                    // Controller stop clears CSI filter/callback state; re-apply
+                    // before the next connect attempt so CSI keeps working.
+                    set_csi(controller, csi_config.clone());
+                }
+                Err(e) => log_ln!("Controller restart failed: {:?}", e),
+            }
+            consecutive_failures = 0;
+        }
+
+        match select(STOP_SIGNAL.wait(), Timer::after(Duration::from_secs(1))).await {
+            Either::First(_) => {
+                STOP_SIGNAL.signal(());
+                return;
+            }
+            Either::Second(_) => {}
         }
     }
 
