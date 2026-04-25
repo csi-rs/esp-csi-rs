@@ -3,15 +3,14 @@
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_net::tcp::client;
-use embassy_time::{with_timeout, Duration, Instant, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
+    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode,
     PeripheralOpMode,
 };
 use esp_csi_rs::{
-    CSINodeClient, CSINodeHardware, get_pps_rx, get_pps_tx, get_dropped_packets_rx, get_one_way_latency, get_two_way_latency, log_ln, WifiSnifferConfig
+    CSINodeClient, CSINodeHardware, get_total_rx_packets, log_ln, WifiSnifferConfig,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -45,6 +44,28 @@ macro_rules! mk_static {
     }};
 }
 
+async fn node_task(_client: &mut CSINodeClient) {
+    let mut last_sample = Instant::now();
+    let mut last_rx_total = get_total_rx_packets();
+
+    loop {
+        Timer::after_secs(1).await;
+
+        let elapsed_us = last_sample.elapsed().as_micros() as u64;
+        let rx_total = get_total_rx_packets();
+        let rx_rate_hz = if elapsed_us == 0 {
+            0
+        } else {
+            (rx_total.saturating_sub(last_rx_total) * 1_000_000 / elapsed_us) as u32
+        };
+
+        last_sample = Instant::now();
+        last_rx_total = rx_total;
+
+        log_ln!("RX: {}", rx_rate_hz)
+    }
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     // generator version: 1.1.0
@@ -53,7 +74,7 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
     init_logger(spawner, LogMode::ArrayList);
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     #[cfg(any(feature = "esp32c6", feature = "esp32c3"))]
@@ -66,14 +87,19 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting Wi-Fi Sniffer Peripheral Node");
+    log_ln!("Starting Wi-Fi Sniffer Peripheral Node (Exper)");
 
     let radio_init = mk_static!(
         Controller<'static>,
         esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
 
-    let mut config_radio = esp_radio::wifi::Config::default().with_power_save_mode(PowerSaveMode::None);
+    let mut config_radio = esp_radio::wifi::Config::default();
+    config_radio = config_radio
+        .with_power_save_mode(esp_radio::wifi::PowerSaveMode::None)
+        .with_static_rx_buf_num(32)
+        .with_dynamic_rx_buf_num(128)
+        .with_rx_queue_size(32);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
@@ -88,13 +114,12 @@ async fn main(spawner: Spawner) -> ! {
         )),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
-        Some(1000),
+        Some(10000),
         csi_hardware,
     );
-    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
+    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGN);
 
-    node.run_duration(1000, &mut node_handle).await;
+    join(node.run(), node_task(&mut node_handle)).await;
 
     loop {
         log_ln!("Hello world!");

@@ -178,10 +178,11 @@ use zerocopy::little_endian::{U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use embassy_futures::join::{join, join3};
-use embassy_futures::select::{select3, Either3};
+use embassy_futures::select::{select, select3, Either, Either3};
+use embassy_futures::yield_now;
 use embassy_sync::pubsub::{PubSubBehavior, Subscriber};
 
-use embassy_time::{with_timeout, Duration, Instant};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::{ClientConfig, CsiConfig, Interfaces, Protocol, WifiController};
 
@@ -207,9 +208,10 @@ use crate::config::CsiConfig as CsiConfiguration;
 use crate::csi::{CSIDataPacket, RxCSIFmt};
 use crate::peripheral::esp_now::run_esp_now_peripheral;
 
-const PROC_CSI_CH_CAPACITY: usize = 64;
+const PROC_CSI_CH_CAPACITY: usize = 32;
 const PROC_CSI_CH_SUBS: usize = 2;
 const MAX_TRACKED_PEERS: usize = 16;
+const CSI_PROCESS_YIELD_EVERY: u8 = 64;
 
 // PubSub Channels
 static CSI_PACKET: PubSubChannel<
@@ -222,6 +224,11 @@ static CSI_PACKET: PubSubChannel<
 
 static IS_COLLECTOR: AtomicBool = AtomicBool::new(false);
 static COLLECTION_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+// Lightweight wake-up signal fired from the CSI interrupt after publish_immediate().
+// Using a separate () signal keeps Either3<(), (), ()> at 1 byte instead of ~687 bytes
+// (CSIDataPacket size), which shrinks the async state machine for run_process_csi_packet
+// by ~686 bytes — critical since it is joined with the main ESP-NOW task.
+static CSI_PACKET_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static CENTRAL_MAGIC_NUMBER: u32 = 0xA8912BF0;
 static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
 #[cfg(feature = "statistics")]
@@ -313,6 +320,17 @@ async fn csi_data_collection(client: &mut CSINodeClient, duration: u64) {
     client.send_stop().await;
 }
 
+async fn wait_for_stop() {
+    STOP_SIGNAL.wait().await;
+    STOP_SIGNAL.signal(());
+}
+
+async fn stop_after_duration(duration: u64) {
+    match select(STOP_SIGNAL.wait(), Timer::after(Duration::from_secs(duration))).await {
+        Either::First(_) | Either::Second(_) => STOP_SIGNAL.signal(()),
+    }
+}
+
 /// Configuration for ESP-NOW traffic generation.
 ///
 /// Used by both Central and Peripheral nodes when operating in ESP-NOW mode.
@@ -334,11 +352,15 @@ impl Default for EspNowConfig {
 #[derive(Debug, Clone)]
 pub struct WifiSnifferConfig {
     mac_filter: Option<[u8; 6]>,
+    pub channel: u8,
 }
 
 impl Default for WifiSnifferConfig {
     fn default() -> Self {
-        Self { mac_filter: None }
+        Self {
+            mac_filter: None,
+            channel: 11,
+        }
     }
 }
 
@@ -381,6 +403,33 @@ pub enum CollectionMode {
     Collector,
     /// Enables CSI collection but does not process CSI data.
     Listener,
+}
+
+/// Controls whether TX and RX tasks are active for a node.
+///
+/// Defaults to both TX and RX enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IOTaskConfig {
+    /// Enable transmit-side task work for the selected operation mode.
+    pub tx_enabled: bool,
+    /// Enable receive/process-side task work for the selected operation mode.
+    pub rx_enabled: bool,
+}
+
+impl IOTaskConfig {
+    /// Create a task configuration with explicit TX/RX state.
+    pub const fn new(tx_enabled: bool, rx_enabled: bool) -> Self {
+        Self {
+            tx_enabled,
+            rx_enabled,
+        }
+    }
+}
+
+impl Default for IOTaskConfig {
+    fn default() -> Self {
+        Self::new(true, true)
+    }
 }
 
 /// Hardware handles required to operate a CSI node.
@@ -466,16 +515,18 @@ pub struct ControlPacket {
     pub is_collector: bool,
     pub central_send_uptime: u64,
     pub latency_offset: i64,
+    pub sequence_number: u32,
 }
 
 impl ControlPacket {
-    /// Create a new control packet with the provided collector flag and latency offset.
-    pub fn new(is_collector: bool, latency_offset: i64) -> Self {
+    /// Create a new control packet with collector flag, latency offset, and sequence number.
+    pub fn new(is_collector: bool, latency_offset: i64, sequence_number: u32) -> Self {
         Self {
             magic_number: CENTRAL_MAGIC_NUMBER.into(),
             is_collector,
             central_send_uptime: Instant::now().as_micros(),
             latency_offset,
+            sequence_number,
         }
     }
 }
@@ -523,6 +574,7 @@ fn reset_globals() {
 pub struct CSINode<'a> {
     kind: Node,
     collection_mode: CollectionMode,
+    io_tasks: IOTaskConfig,
     /// CSI Configuration
     csi_config: Option<CsiConfiguration>,
     /// Traffic Generation Frequency
@@ -544,11 +596,12 @@ impl<'a> CSINode<'a> {
         Self {
             kind,
             collection_mode,
+            io_tasks: IOTaskConfig::default(),
             csi_config,
             traffic_freq_hz,
             hardware,
             protocol: None,
-            rate: Some(WifiPhyRate::RateMcs0Lgi),
+            rate: Some(WifiPhyRate::RateMcs7Lgi),
         }
     }
 
@@ -563,11 +616,12 @@ impl<'a> CSINode<'a> {
         Self {
             kind: Node::Central(op_mode),
             collection_mode,
+            io_tasks: IOTaskConfig::default(),
             csi_config,
             traffic_freq_hz,
             hardware,
             protocol: None,
-            rate: Some(WifiPhyRate::RateMcs0Lgi),
+            rate: Some(WifiPhyRate::RateMcs7Lgi),
         }
     }
 
@@ -617,6 +671,26 @@ impl<'a> CSINode<'a> {
     /// Set collection mode for the node.
     pub fn set_collection_mode(&mut self, mode: CollectionMode) {
         self.collection_mode = mode;
+    }
+
+    /// Set TX/RX task enablement for the node.
+    pub fn set_io_tasks(&mut self, io_tasks: IOTaskConfig) {
+        self.io_tasks = io_tasks;
+    }
+
+    /// Enable or disable TX task work.
+    pub fn set_tx_enabled(&mut self, enabled: bool) {
+        self.io_tasks.tx_enabled = enabled;
+    }
+
+    /// Enable or disable RX task work.
+    pub fn set_rx_enabled(&mut self, enabled: bool) {
+        self.io_tasks.rx_enabled = enabled;
+    }
+
+    /// Get current TX/RX task configuration.
+    pub fn get_io_tasks(&self) -> IOTaskConfig {
+        self.io_tasks
     }
 
     /// Replace the node kind/mode.
@@ -707,23 +781,36 @@ impl<'a> CSINode<'a> {
                         &mut interfaces.esp_now,
                         esp_now_config,
                         self.traffic_freq_hz,
+                        self.io_tasks,
                     );
-                    join3(
-                        main_task,
-                        run_process_csi_packet(),
-                        csi_data_collection(client, duration),
-                    )
-                    .await;
+                    if self.io_tasks.rx_enabled {
+                        join3(
+                            main_task,
+                            run_process_csi_packet(),
+                            csi_data_collection(client, duration),
+                        )
+                        .await;
+                    } else {
+                        join3(main_task, wait_for_stop(), stop_after_duration(duration)).await;
+                    }
                 }
                 PeripheralOpMode::WifiSniffer(sniffer_config) => {
+                    interfaces
+                        .esp_now
+                        .set_channel(sniffer_config.channel)
+                        .unwrap();
                     let sniffer = &interfaces.sniffer;
                     sniffer.set_promiscuous_mode(true).unwrap();
-                    join(
-                        run_process_csi_packet(),
-                        csi_data_collection(client, duration),
-                    )
-                    .await;
-                    run_process_csi_packet().await;
+                    if self.io_tasks.rx_enabled {
+                        join(
+                            run_process_csi_packet(),
+                            csi_data_collection(client, duration),
+                        )
+                        .await;
+                        run_process_csi_packet().await;
+                    } else {
+                        stop_after_duration(duration).await;
+                    }
                     sniffer.set_promiscuous_mode(false).unwrap();
                 }
             },
@@ -742,13 +829,18 @@ impl<'a> CSINode<'a> {
                         esp_now_config,
                         self.traffic_freq_hz,
                         is_collector,
+                        self.io_tasks,
                     );
-                    join3(
-                        main_task,
-                        run_process_csi_packet(),
-                        csi_data_collection(client, duration),
-                    )
-                    .await;
+                    if self.io_tasks.rx_enabled {
+                        join3(
+                            main_task,
+                            run_process_csi_packet(),
+                            csi_data_collection(client, duration),
+                        )
+                        .await;
+                    } else {
+                        join3(main_task, wait_for_stop(), stop_after_duration(duration)).await;
+                    }
                 }
                 CentralOpMode::WifiStation(sta_config) => {
                     // Initialize as Wifi Station Collector with WifiStationConfig
@@ -764,13 +856,18 @@ impl<'a> CSINode<'a> {
                         sta_stack,
                         sta_runner,
                         csi_config_for_recovery,
+                        self.io_tasks,
                     );
-                    join3(
-                        main_task,
-                        run_process_csi_packet(),
-                        csi_data_collection(client, duration),
-                    )
-                    .await;
+                    if self.io_tasks.rx_enabled {
+                        join3(
+                            main_task,
+                            run_process_csi_packet(),
+                            csi_data_collection(client, duration),
+                        )
+                        .await;
+                    } else {
+                        join3(main_task, wait_for_stop(), stop_after_duration(duration)).await;
+                    }
                 }
             },
         }
@@ -853,13 +950,26 @@ impl<'a> CSINode<'a> {
                         &mut interfaces.esp_now,
                         esp_now_config,
                         self.traffic_freq_hz,
+                        self.io_tasks,
                     );
-                    join(main_task, run_process_csi_packet()).await;
+                    if self.io_tasks.rx_enabled {
+                        join(main_task, run_process_csi_packet()).await;
+                    } else {
+                        join(main_task, wait_for_stop()).await;
+                    }
                 }
                 PeripheralOpMode::WifiSniffer(sniffer_config) => {
+                    interfaces
+                        .esp_now
+                        .set_channel(sniffer_config.channel)
+                        .unwrap();
                     let sniffer = &interfaces.sniffer;
                     sniffer.set_promiscuous_mode(true).unwrap();
-                    run_process_csi_packet().await;
+                    if self.io_tasks.rx_enabled {
+                        run_process_csi_packet().await;
+                    } else {
+                        wait_for_stop().await;
+                    }
                     sniffer.set_promiscuous_mode(false).unwrap();
                 }
             },
@@ -878,8 +988,13 @@ impl<'a> CSINode<'a> {
                         esp_now_config,
                         self.traffic_freq_hz,
                         is_collector,
+                        self.io_tasks,
                     );
-                    join(main_task, run_process_csi_packet()).await;
+                    if self.io_tasks.rx_enabled {
+                        join(main_task, run_process_csi_packet()).await;
+                    } else {
+                        join(main_task, wait_for_stop()).await;
+                    }
                 }
                 CentralOpMode::WifiStation(sta_config) => {
                     // Initialize as Wifi Station Collector with WifiStationConfig
@@ -895,8 +1010,13 @@ impl<'a> CSINode<'a> {
                         sta_stack,
                         sta_runner,
                         csi_config_for_recovery,
+                        self.io_tasks,
                     );
-                    join(main_task, run_process_csi_packet()).await;
+                    if self.io_tasks.rx_enabled {
+                        join(main_task, run_process_csi_packet()).await;
+                    } else {
+                        join(main_task, wait_for_stop()).await;
+                    }
                     sniffer.set_promiscuous_mode(false).unwrap();
                 }
             },
@@ -1116,6 +1236,7 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
     };
 
     CSI_PACKET.publish_immediate(csi_packet);
+    CSI_PACKET_READY.signal(());
     #[cfg(feature = "statistics")]
     STATS.rx_count.fetch_add(1, Ordering::Relaxed);
 }
@@ -1142,10 +1263,12 @@ pub async fn run_process_csi_packet() {
     let mut is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
 
     loop {
+        // Wait on signals that all return () so Either3<(), (), ()> = 1 byte in the
+        // async state machine. The CSIDataPacket is never part of the suspended future.
         match select3(
             STOP_SIGNAL.wait(),
             COLLECTION_MODE_CHANGED.wait(),
-            csi_packet_sub.next_message_pure(),
+            CSI_PACKET_READY.wait(),
         )
         .await
         {
@@ -1168,60 +1291,63 @@ pub async fn run_process_csi_packet() {
                     last_tx_count = STATS.tx_count.load(Ordering::Relaxed);
                 }
             }
-            Either3::Third(csi_packet) => {
-                #[cfg(feature = "statistics")]
-                {
-                    rate_calc_decimator = rate_calc_decimator.wrapping_add(1);
+            Either3::Third(_) => {
+                // Drain all packets queued since the last wake. CSIDataPacket lives
+                // on the real stack here, not in the async state machine.
+                let mut packets_since_yield: u8 = 0;
+                while let Some(csi_packet) = csi_packet_sub.try_next_message_pure() {
+                    #[cfg(not(feature = "statistics"))]
+                    let _ = csi_packet;
 
-                    if is_collector && seq_drop_detection_enabled() {
-                        let current_seq = csi_packet.sequence_number;
+                    #[cfg(feature = "statistics")]
+                    {
+                        rate_calc_decimator = rate_calc_decimator.wrapping_add(1);
 
-                        // Check if we have seen this MAC before
-                        if let Some(&last_seq) = peer_tracker.get(&csi_packet.mac) {
-                            // Station Mode / Hardware Sequence Number Fix:
-                            // WiFi hardware sequence numbers (802.11) are 12-bit (0-4095).
-                            // We use '& 0x0FFF' to handle the wraparound from 4095 -> 0 correctly.
-                            let diff = (current_seq.wrapping_sub(last_seq)) & 0x0FFF;
+                        if is_collector && seq_drop_detection_enabled() {
+                            let current_seq = csi_packet.sequence_number;
 
-                            if diff > 1 {
-                                let lost = (diff - 1) as u32;
-
-                                // Sanity check for huge gaps (e.g. router reset)
-                                if lost < 500 {
-                                    STATS.rx_drop_count.fetch_add(lost, Ordering::Relaxed);
+                            if let Some(&last_seq) = peer_tracker.get(&csi_packet.mac) {
+                                // 802.11 sequence numbers are 12-bit; mask for correct wraparound.
+                                let diff = (current_seq.wrapping_sub(last_seq)) & 0x0FFF;
+                                if diff > 1 {
+                                    let lost = (diff - 1) as u32;
+                                    if lost < 500 {
+                                        STATS.rx_drop_count.fetch_add(lost, Ordering::Relaxed);
+                                    }
                                 }
+                            }
+
+                            if peer_tracker.insert(csi_packet.mac, current_seq).is_err() {
+                                peer_tracker.clear();
+                                let _ = peer_tracker.insert(csi_packet.mac, current_seq);
                             }
                         }
 
-                        // Update tracker with new sequence. If the tracker is full,
-                        // reset it to keep the hot path non-blocking.
-                        if peer_tracker.insert(csi_packet.mac, current_seq).is_err() {
-                            peer_tracker.clear();
-                            let _ = peer_tracker.insert(csi_packet.mac, current_seq);
+                        if rate_calc_decimator & 0x0F == 0 {
+                            let elapsed_secs = last_rate_update.elapsed().as_secs() as u64;
+                            if elapsed_secs >= 1 {
+                                let current_rx = STATS.rx_count.load(Ordering::Relaxed);
+                                let current_tx = STATS.tx_count.load(Ordering::Relaxed);
+
+                                let rx_rate = ((current_rx.saturating_sub(last_rx_count))
+                                    / elapsed_secs) as u32;
+                                let tx_rate = ((current_tx.saturating_sub(last_tx_count))
+                                    / elapsed_secs) as u32;
+
+                                STATS.rx_rate_hz.store(rx_rate, Ordering::Relaxed);
+                                STATS.tx_rate_hz.store(tx_rate, Ordering::Relaxed);
+
+                                last_rx_count = current_rx;
+                                last_tx_count = current_tx;
+                                last_rate_update = Instant::now();
+                            }
                         }
-                        // --- DROP DETECTION LOGIC END ---
                     }
 
-                    // Recompute rates periodically instead of every packet to keep
-                    // callback processing overhead low at high packet rates.
-                    if rate_calc_decimator & 0x0F == 0 {
-                        let elapsed_secs = last_rate_update.elapsed().as_secs() as u64;
-                        if elapsed_secs >= 1 {
-                            let current_rx = STATS.rx_count.load(Ordering::Relaxed);
-                            let current_tx = STATS.tx_count.load(Ordering::Relaxed);
-
-                            let rx_rate =
-                                ((current_rx.saturating_sub(last_rx_count)) / elapsed_secs) as u32;
-                            let tx_rate =
-                                ((current_tx.saturating_sub(last_tx_count)) / elapsed_secs) as u32;
-
-                            STATS.rx_rate_hz.store(rx_rate, Ordering::Relaxed);
-                            STATS.tx_rate_hz.store(tx_rate, Ordering::Relaxed);
-
-                            last_rx_count = current_rx;
-                            last_tx_count = current_tx;
-                            last_rate_update = Instant::now();
-                        }
+                    packets_since_yield = packets_since_yield.wrapping_add(1);
+                    if packets_since_yield >= CSI_PROCESS_YIELD_EVERY {
+                        packets_since_yield = 0;
+                        yield_now().await;
                     }
                 }
             }

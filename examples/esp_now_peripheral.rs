@@ -17,6 +17,7 @@ use esp_csi_rs::{
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
+use esp_radio::wifi::PowerSaveMode;
 use esp_radio::{
     wifi::{ClientConfig, Interfaces, WifiController},
     Controller,
@@ -120,19 +121,7 @@ async fn main(spawner: Spawner) -> ! {
         esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
 
-    let mut config_radio = esp_radio::wifi::Config::default();
-    // Raise Wi-Fi buffer budget for sustained ESP-NOW + CSI traffic.
-    config_radio = config_radio
-        .with_power_save_mode(esp_radio::wifi::PowerSaveMode::None)
-        .with_static_rx_buf_num(32)
-        .with_dynamic_rx_buf_num(64)
-        .with_static_tx_buf_num(32)
-        .with_dynamic_tx_buf_num(64)
-        .with_rx_queue_size(32)
-        .with_tx_queue_size(32)
-        .with_ampdu_rx_enable(true)
-        .with_ampdu_tx_enable(true)
-        .with_rx_ba_win(16);
+    let mut config_radio = esp_radio::wifi::Config::default().with_power_save_mode(PowerSaveMode::None);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
@@ -147,11 +136,11 @@ async fn main(spawner: Spawner) -> ! {
         )),
         CollectionMode::Listener,
         Some(CsiConfig::default()),
-        Some(1500),
+        Some(1000),
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::P802D11BGN);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs3Lgi);
+    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
 
     join(node.run(), node_task(&mut node_handle)).await;
 

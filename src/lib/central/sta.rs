@@ -1,5 +1,5 @@
 use core::{net::Ipv4Addr};
-use embassy_futures::join::{join4};
+use embassy_futures::join::{join3, join4};
 use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_net::raw::{IpProtocol, IpVersion, PacketMetadata, RawSocket};
 use embassy_net::{Ipv4Address, Ipv4Cidr, Runner, Stack, StackResources};
@@ -13,7 +13,7 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal}
 use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, Ipv4Packet, Ipv4Repr};
 
 use crate::log_ln;
-use crate::{set_csi, WifiStationConfig, STOP_SIGNAL};
+use crate::{set_csi, IOTaskConfig, WifiStationConfig, STOP_SIGNAL};
 
 static DHCP_CLIENT_INFO: Signal<CriticalSectionRawMutex, IpInfo> = Signal::new();
 
@@ -71,6 +71,7 @@ pub async fn run_sta_connect(
     sta_stack: Stack<'_>,
     sta_runner: Runner<'_, &mut WifiDevice<'_>>,
     csi_config: CsiConfig,
+    io_tasks: IOTaskConfig,
 ) {
     // Settle, watchdog, and recovery policy: after a hard reset the radio can
     // (a) hang inside connect_async, or (b) succeed on retry but deliver no
@@ -152,13 +153,22 @@ pub async fn run_sta_connect(
         }
     }
 
-    join4(
-        sta_connection(controller),
-        sta_network_ops(sta_stack, freq),
-        run_net_task(sta_runner),
-        run_dhcp_client(sta_stack)
-    )
-    .await;
+    if io_tasks.tx_enabled {
+        join4(
+            sta_connection(controller),
+            sta_network_ops(sta_stack, freq),
+            run_net_task(sta_runner),
+            run_dhcp_client(sta_stack),
+        )
+        .await;
+    } else {
+        join3(
+            sta_connection(controller),
+            run_net_task(sta_runner),
+            run_dhcp_client(sta_stack),
+        )
+        .await;
+    }
 }
 
 /// Run the embassy-net runner until a stop signal is received.

@@ -4,10 +4,10 @@ use heapless::String;
 use portable_atomic::{AtomicU8, Ordering};
 use postcard::experimental::max_size::MaxSize;
 
-const CSI_LOG_CHANNEL_CAPACITY: usize = 64;
+const CSI_LOG_CHANNEL_CAPACITY: usize = 32;
 const TEXT_LOG_CHANNEL_CAPACITY: usize = 64;
 const DEFMT_LOG_CHANNEL_CAPACITY: usize = 64;
-const UART_LOG_BAUDRATE: u32 = 460_800;
+const UART_LOG_BAUDRATE: u32 = 115200;
 
 #[cfg(all(
     any(feature = "uart", feature = "jtag-serial", feature = "auto"),
@@ -933,6 +933,18 @@ pub async fn logger_backend(mut driver: LogOutput) {
                     LogMode::ArrayList => write_text_array_packet(packet, &mut driver).await,
                     LogMode::Text => write_text_packet(packet, &mut driver).await,
                 };
+
+                // Drain pending text messages after each CSI write to prevent
+                // starvation: at high CSI rates CSI_CHANNEL is always ready so
+                // `select` never reaches Either::Second on its own.
+                #[cfg(all(feature = "println", not(feature = "defmt")))]
+                while let Ok(message) = log_impl::LOG_CHANNEL.try_receive() {
+                    let _ = driver.write_all(message.as_bytes()).await;
+                }
+                #[cfg(feature = "defmt")]
+                while let Ok(message) = defmt_impl::DEFMT_CHANNEL.try_receive() {
+                    let _ = driver.write_all(&message).await;
+                }
 
                 if CSI_CHANNEL.is_empty() {
                     let _ = driver.flush().await;
