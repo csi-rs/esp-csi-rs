@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 // Date Time Struct
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct DateTimeCapture {
     captured_at: Instant,
     captured_secs: u64,

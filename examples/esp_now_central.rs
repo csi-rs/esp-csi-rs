@@ -1,26 +1,24 @@
 #![no_std]
 #![no_main]
 
+use portable_atomic::{AtomicI32, AtomicU32, Ordering};
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_time::{with_timeout, Duration, Instant, Timer};
+use embassy_time::{Duration, Instant, Timer};
+use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
     config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
-    PeripheralOpMode,
 };
 use esp_csi_rs::{
     get_dropped_packets_rx, get_one_way_latency, get_pps_rx, get_pps_tx, get_total_rx_packets,
-    get_total_tx_packets, get_two_way_latency, log_ln, CSINodeClient, CSINodeHardware,
+    get_total_tx_packets, get_two_way_latency, log_ln, set_csi_callback, CSINodeClient,
+    CSINodeHardware,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_println::println;
 use esp_radio::wifi::PowerSaveMode;
-use esp_radio::{
-    wifi::{ClientConfig, Interfaces, WifiController},
-    Controller,
-};
+use esp_radio::{wifi::WifiController, Controller};
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
@@ -46,7 +44,18 @@ macro_rules! mk_static {
     }};
 }
 
-async fn node_task(client: &mut CSINodeClient) {
+// Shared state written from the inline CSI callback and read by `node_task`.
+static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
+static CSI_CB_COUNT: AtomicU32 = AtomicU32::new(0);
+
+// On-device CSI processing hook. Runs inline in the WiFi task — keep it
+// fast: no heap allocation, no locking, no blocking I/O.
+fn on_csi(packet: &CSIDataPacket) {
+    LATEST_RSSI.store(packet.rssi as i32, Ordering::Relaxed);
+    CSI_CB_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+async fn node_task(_client: &mut CSINodeClient) {
     let mut last_sample = Instant::now();
     let mut last_rx_total = get_total_rx_packets();
     let mut last_tx_total = get_total_tx_packets();
@@ -73,7 +82,7 @@ async fn node_task(client: &mut CSINodeClient) {
         last_tx_total = tx_total;
 
         log_ln!(
-                "RX PPS(avg): {}, TX PPS(avg): {}, RX Hz(inst): {}, TX Hz(inst): {}, RX Total: {}, TX Total: {}, RX Dropped Packets: {}, One Way Latency: {}, Two Way Latency: {}",
+                "RX PPS(avg): {}, TX PPS(avg): {}, RX Hz(inst): {}, TX Hz(inst): {}, RX Total: {}, TX Total: {}, RX Dropped Packets: {}, One Way Latency: {}, Two Way Latency: {}, Callback Invocations: {}, Latest RSSI: {}",
                 get_pps_rx(),
                 get_pps_tx(),
                 rx_rate_hz,
@@ -82,7 +91,9 @@ async fn node_task(client: &mut CSINodeClient) {
                 tx_total,
                 get_dropped_packets_rx(),
                 get_one_way_latency(),
-                get_two_way_latency()
+                get_two_way_latency(),
+                CSI_CB_COUNT.load(Ordering::Relaxed),
+                LATEST_RSSI.load(Ordering::Relaxed),
             )
     }
 }
@@ -113,7 +124,7 @@ async fn main(spawner: Spawner) -> ! {
         esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
 
-    let mut config_radio = esp_radio::wifi::Config::default().with_power_save_mode(PowerSaveMode::None);
+    let config_radio = esp_radio::wifi::Config::default().with_power_save_mode(PowerSaveMode::None);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
@@ -131,6 +142,9 @@ async fn main(spawner: Spawner) -> ! {
     );
     node.set_protocol(esp_radio::wifi::Protocol::P802D11BGN);
     node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
+
+    // Register the on-device CSI processing hook before starting the node.
+    set_csi_callback(on_csi);
 
     join(node.run(), node_task(&mut node_handle)).await;
 

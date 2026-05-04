@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rustc-env=UART_LOG_BAUDRATE={}", baud);
 }
 
+#[allow(dead_code)]
 fn linker_be_nice() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {

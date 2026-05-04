@@ -6,10 +6,10 @@
 //! and pushes results into the runtime statistics channel when the
 //! `statistics` feature is enabled.
 
+#[cfg(feature = "statistics")]
 use core::sync::atomic::Ordering;
 
 use embassy_futures::select::{select, Either};
-use embassy_time::Duration;
 use embassy_time::Instant;
 use embassy_time::Timer;
 use heapless::LinearMap;
@@ -83,6 +83,7 @@ fn hz_to_interval_us(hz: u64) -> u64 {
     (1_000_000u64 / hz.max(1)).max(1)
 }
 
+#[cfg_attr(not(feature = "statistics"), allow(unused_variables))]
 fn handle_peripheral_packet(
     esp_now: &mut EspNow<'static>,
     r: PoolFrame,

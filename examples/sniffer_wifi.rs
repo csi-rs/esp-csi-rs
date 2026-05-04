@@ -1,23 +1,17 @@
 #![no_std]
 #![no_main]
 
+use portable_atomic::{AtomicI32, AtomicU32, Ordering};
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
-use embassy_net::tcp::client;
-use embassy_time::{with_timeout, Duration, Instant, Timer};
+use embassy_time::{Duration, Timer};
+use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::LogMode;
-use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
-    PeripheralOpMode,
-};
-use esp_csi_rs::{
-    CSINodeClient, CSINodeHardware, get_pps_rx, get_pps_tx, get_dropped_packets_rx, get_one_way_latency, get_two_way_latency, log_ln, WifiSnifferConfig
-};
+use esp_csi_rs::{config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode};
+use esp_csi_rs::{log_ln, set_csi_callback, CSINodeClient, CSINodeHardware, WifiSnifferConfig};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_println::println;
 use esp_radio::{
-    wifi::{ClientConfig, Interfaces, WifiController},
+    wifi::{PowerSaveMode, WifiController},
     Controller,
 };
 use {esp_backtrace as _, esp_println as _};
@@ -43,6 +37,19 @@ macro_rules! mk_static {
         let x = STATIC_CELL.uninit().write(($val));
         x
     }};
+}
+
+// Shared state written from the inline CSI callback. A typical sniffer
+// application processes packets in this hook (e.g. compute statistics,
+// extract subcarriers, run a model) without spawning a polling task.
+static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
+static CSI_CB_COUNT: AtomicU32 = AtomicU32::new(0);
+
+// On-device CSI processing hook. Runs inline in the WiFi task — keep it
+// fast: no heap allocation, no locking, no blocking I/O.
+fn on_csi(packet: &CSIDataPacket) {
+    LATEST_RSSI.store(packet.rssi as i32, Ordering::Relaxed);
+    CSI_CB_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 #[esp_rtos::main]
@@ -73,7 +80,7 @@ async fn main(spawner: Spawner) -> ! {
         esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
 
-    let mut config_radio = esp_radio::wifi::Config::default().with_power_save_mode(PowerSaveMode::None);
+    let config_radio = esp_radio::wifi::Config::default().with_power_save_mode(PowerSaveMode::None);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
@@ -84,7 +91,7 @@ async fn main(spawner: Spawner) -> ! {
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
         esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(
-            (WifiSnifferConfig::default()),
+            WifiSnifferConfig::default(),
         )),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
@@ -94,7 +101,17 @@ async fn main(spawner: Spawner) -> ! {
     node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR);
     node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
 
+    // Register the on-device CSI processing hook before starting the node.
+    // Each sniffed CSI report invokes `on_csi` inline in the WiFi task.
+    set_csi_callback(on_csi);
+
     node.run_duration(1000, &mut node_handle).await;
+
+    log_ln!(
+        "Sniffer stopped. Total CSI callback invocations: {}, Last observed RSSI: {}",
+        CSI_CB_COUNT.load(Ordering::Relaxed),
+        LATEST_RSSI.load(Ordering::Relaxed),
+    );
 
     loop {
         log_ln!("Hello world!");

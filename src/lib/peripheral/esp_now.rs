@@ -147,6 +147,7 @@ fn u64_to_mac(v: u64) -> [u8; 6] {
 }
 
 /// Shared responder state.
+#[allow(dead_code)]
 struct Shared {
     is_connected: AtomicBool,
     is_collector: AtomicBool,
