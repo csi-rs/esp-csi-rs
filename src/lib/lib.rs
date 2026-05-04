@@ -1253,21 +1253,22 @@ pub(crate) fn set_csi(controller: &mut WifiController, config: CsiConfig) {
 
 // Function to capture CSI info from callback and publish to channel
 fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
-    // Count every CSI report regardless of mode so `rx_count` / `rx_rate_hz`
-    // / `pps_rx` reflect actual radio CSI throughput. This is the only path
-    // that fires for sniffer / STA / ESP-NOW collection — counting here keeps
-    // the metric consistent across all node modes.
-    #[cfg(feature = "statistics")]
-    STATS.rx_count.fetch_add(1, Ordering::Relaxed);
-
-    // Single-atomic fast path: returns immediately in Listener mode and in
-    // Collector mode when no CSINodeClient subscriber exists. Building the
-    // CSIDataPacket and calling publish_immediate acquires CriticalSectionRawMutex
-    // and on `riscv32imc` every other atomic op also takes a critical section,
-    // so additional gate atomics in the hot ISR path delay the Embassy timer ISR.
+    // Single-atomic fast path: a relaxed load + branch. Listener nodes and
+    // any collector that has explicitly disabled the gate return here in a
+    // handful of cycles. CRITICAL: this MUST come before any read-modify-write
+    // atomic op — `AtomicU64::fetch_add` on `riscv32imc` (no native AMO)
+    // is implemented as a critical-section block which disables interrupts.
+    // Every CS we take in the WiFi callback delays the WiFi TX-completion
+    // ISR; doing one per CSI capture event measurably caps central TX rate.
     if !CSI_PUBLISH_ENABLED.load(Ordering::Relaxed) {
         return;
     }
+
+    // Count CSI reports we actually process. Reflects "throughput we acted
+    // on" rather than "raw radio CSI events" — matches pre-refactor semantics
+    // and keeps the cost out of the disabled/Listener fast path above.
+    #[cfg(feature = "statistics")]
+    STATS.rx_count.fetch_add(1, Ordering::Relaxed);
 
     let rssi = if info.rx_ctrl.rssi() > 127 {
         info.rx_ctrl.rssi() - 256
