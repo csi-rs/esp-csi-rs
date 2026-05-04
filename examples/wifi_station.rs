@@ -70,7 +70,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Keep reclaimed heap moderate so internal RAM remains available for
     // Wi-Fi/RTOS task stacks during STA scan/connect.
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98152);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     #[cfg(any(feature = "esp32c6", feature = "esp32c3"))]
@@ -93,16 +93,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut config_radio = esp_radio::wifi::Config::default().with_power_save_mode(esp_radio::wifi::PowerSaveMode::None);
     // Raise Wi-Fi buffer budget for sustained ESP-NOW + CSI traffic.
     config_radio = config_radio
-        .with_power_save_mode(esp_radio::wifi::PowerSaveMode::None)
-        .with_static_rx_buf_num(32)
-        .with_dynamic_rx_buf_num(64)
-        .with_static_tx_buf_num(32)
-        .with_dynamic_tx_buf_num(64)
-        .with_rx_queue_size(32)
-        .with_tx_queue_size(32)
-        .with_ampdu_rx_enable(true)
-        .with_ampdu_tx_enable(true)
-        .with_rx_ba_win(16);
+        .with_power_save_mode(esp_radio::wifi::PowerSaveMode::None);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
