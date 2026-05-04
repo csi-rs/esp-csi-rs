@@ -28,7 +28,7 @@ rustflags = [
   "-C",
   "link-arg=-Tlinkall.x",
   # Uncomment the following two lines if you want to use defmt
-  # "-C", 
+  # "-C",
   # "link-arg=-Tdefmt.x",
 ]
 

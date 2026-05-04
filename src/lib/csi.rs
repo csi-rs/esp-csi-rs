@@ -1,3 +1,9 @@
+//! CSI packet types and frame-format definitions.
+//!
+//! Defines the wire-level [`CSIDataPacket`] emitted to host tooling and the
+//! [`RxCSIFmt`] enumeration mirroring Espressif's HT/non-HT/HE-SU receive
+//! mode classification used to decode CSI tones.
+
 use heapless::Vec;
 use postcard::experimental::max_size::MaxSize;
 use serde::{Deserialize, Serialize};
@@ -158,11 +164,13 @@ pub struct CSIDataPacket {
 
 #[cfg(not(feature = "esp32c6"))]
 impl CSIDataPacket {
-    /// Prints Recieved CSI Data Packet with it's Metadata
-    pub fn print_csi_w_metadata(&self) {
+    /// Prints Recieved CSI Data Packet with it's Metadata.
+    ///
+    /// Consumes the packet — passes it directly to `log_csi` without a clone.
+    pub fn print_csi_w_metadata(self) {
         use crate::logging::logging::log_csi;
 
-        log_csi(self.clone());
+        log_csi(self);
     }
 
     /// Derive and set `data_format` from captured radio metadata fields.
@@ -444,11 +452,13 @@ pub struct CSIDataPacket {
 
 #[cfg(feature = "esp32c6")]
 impl CSIDataPacket {
-    pub fn print_csi_w_metadata(&self) {
-        // Calculate Elapsed time here and add offset to date_time then call to calculate new time
+    /// Prints Recieved CSI Data Packet with it's Metadata.
+    ///
+    /// Consumes the packet — passes it directly to `log_csi` without a clone.
+    pub fn print_csi_w_metadata(self) {
         use crate::logging::logging::log_csi;
 
-        log_csi(self.clone());
+        log_csi(self);
     }
     pub fn csi_fmt_from_params(&mut self) {
         self.data_format = RxCSIFmt::Undefined;

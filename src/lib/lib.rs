@@ -179,16 +179,13 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use embassy_futures::join::{join, join3};
 use embassy_futures::select::{select, select3, Either, Either3};
-use embassy_futures::yield_now;
-use embassy_sync::pubsub::{PubSubBehavior, Subscriber};
 
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::{ClientConfig, CsiConfig, Interfaces, Protocol, WifiController};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-
-use embassy_sync::pubsub::PubSubChannel;
+use embassy_sync::channel::{Channel, TrySendError};
 use embassy_sync::signal::Signal;
 
 use heapless::{LinearMap, Vec};
@@ -198,6 +195,7 @@ use serde::{Deserialize, Serialize};
 pub mod central;
 pub mod config;
 pub mod csi;
+pub mod esp_now_pool;
 pub mod logging;
 pub mod peripheral;
 pub mod time;
@@ -209,26 +207,49 @@ use crate::csi::{CSIDataPacket, RxCSIFmt};
 use crate::peripheral::esp_now::run_esp_now_peripheral;
 
 const PROC_CSI_CH_CAPACITY: usize = 32;
-const PROC_CSI_CH_SUBS: usize = 2;
 const MAX_TRACKED_PEERS: usize = 16;
-const CSI_PROCESS_YIELD_EVERY: u8 = 64;
 
-// PubSub Channels
-static CSI_PACKET: PubSubChannel<
-    CriticalSectionRawMutex,
-    CSIDataPacket,
-    PROC_CSI_CH_CAPACITY,
-    PROC_CSI_CH_SUBS,
-    2,
-> = PubSubChannel::new();
+// Single SPSC channel: ISR (capture_csi_info) is the only producer,
+// CSINodeClient is the only consumer.
+static CSI_PACKET: Channel<CriticalSectionRawMutex, CSIDataPacket, PROC_CSI_CH_CAPACITY> =
+    Channel::new();
 
 static IS_COLLECTOR: AtomicBool = AtomicBool::new(false);
+// CSI publish gate. The WiFi callback checks this in a single relaxed load
+// to decide whether to build and emit a CSIDataPacket.
+//
+// Decoupled from `IS_COLLECTOR` on purpose: `CollectionMode` controls the
+// ESP-NOW responder/initiator behavior (Listener stays passive on TX), but
+// it must NOT block a `CSINodeClient` from reading CSI — that conflation
+// silently breaks sniffer + Listener configurations where the user wants
+// to passively read CSI without participating in any control protocol.
+static CSI_PUBLISH_ENABLED: AtomicBool = AtomicBool::new(false);
 static COLLECTION_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-// Lightweight wake-up signal fired from the CSI interrupt after publish_immediate().
-// Using a separate () signal keeps Either3<(), (), ()> at 1 byte instead of ~687 bytes
-// (CSIDataPacket size), which shrinks the async state machine for run_process_csi_packet
-// by ~686 bytes — critical since it is joined with the main ESP-NOW task.
-static CSI_PACKET_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// Enable or disable CSI publishing.
+///
+/// When disabled, the WiFi CSI callback returns immediately at the gate check
+/// — no formatting, no enqueue, no print. Use this to keep `log_ln!` output
+/// visible without the per-packet CSI line flood, while leaving the WiFi
+/// stack and stats counters running normally.
+///
+/// `init_logger` enables this automatically in sync mode (no `async-print`
+/// feature) because the WiFi callback formats and writes CSI lines directly
+/// in that mode. In async-print mode `CSINodeClient::get_csi_data` enables
+/// it lazily on first await.
+///
+/// Call this AFTER `init_logger` to override either default.
+pub fn set_csi_logging_enabled(enabled: bool) {
+    CSI_PUBLISH_ENABLED.store(enabled, Ordering::Release);
+}
+
+/// Returns whether CSI publishing is currently enabled.
+pub fn csi_logging_enabled() -> bool {
+    CSI_PUBLISH_ENABLED.load(Ordering::Relaxed)
+}
+// Signals run_process_csi_packet to clear PEER_SEQ_TRACKER on the next ISR entry.
+#[cfg(feature = "statistics")]
+static RESET_SEQ_TRACKER: AtomicBool = AtomicBool::new(false);
 static CENTRAL_MAGIC_NUMBER: u32 = 0xA8912BF0;
 static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
 #[cfg(feature = "statistics")]
@@ -309,6 +330,12 @@ fn seq_drop_detection_enabled() -> bool {
     }
 }
 
+// Drives the per-`run_duration` lifecycle. In async-print mode this is the
+// loop that pulls packets out of `CSI_PACKET` and forwards them to the
+// logger task — without it, the channel would fill and packets would drop.
+// In sync mode the WiFi callback writes inline, so we just wait for the
+// duration and then signal stop.
+#[cfg(feature = "async-print")]
 async fn csi_data_collection(client: &mut CSINodeClient, duration: u64) {
     with_timeout(Duration::from_secs(duration), async {
         loop {
@@ -317,6 +344,12 @@ async fn csi_data_collection(client: &mut CSINodeClient, duration: u64) {
     })
     .await
     .unwrap_err();
+    client.send_stop().await;
+}
+
+#[cfg(not(feature = "async-print"))]
+async fn csi_data_collection(client: &mut CSINodeClient, duration: u64) {
+    Timer::after(Duration::from_secs(duration)).await;
     client.send_stop().await;
 }
 
@@ -352,6 +385,7 @@ impl Default for EspNowConfig {
 #[derive(Debug, Clone)]
 pub struct WifiSnifferConfig {
     mac_filter: Option<[u8; 6]>,
+    /// 2.4 GHz channel (1–14) the sniffer should lock to.
     pub channel: u8,
 }
 
@@ -367,6 +401,7 @@ impl Default for WifiSnifferConfig {
 /// Configuration for Wi-Fi Station mode.
 #[derive(Debug, Clone)]
 pub struct WifiStationConfig {
+    /// Underlying esp-radio client configuration (SSID, auth, etc.).
     pub client_config: ClientConfig,
 }
 
@@ -374,21 +409,28 @@ pub struct WifiStationConfig {
 
 /// Central node operational modes.
 pub enum CentralOpMode {
+    /// Drive an ESP-NOW exchange with a peripheral node.
     EspNow(EspNowConfig),
+    /// Associate as a Wi-Fi station to harvest CSI from received frames.
     WifiStation(WifiStationConfig),
 }
 
 // Enum for Peripheral modes, each wrapping its specific config.
 /// Peripheral node operational modes.
 pub enum PeripheralOpMode {
+    /// Reply to a central's ESP-NOW control frames.
     EspNow(EspNowConfig),
+    /// Run as a Wi-Fi promiscuous sniffer; CSI is captured from every
+    /// frame received on the locked channel.
     WifiSniffer(WifiSnifferConfig),
 }
 
 /// High-level node type and mode.
 pub enum Node {
-    Peripheral(PeripheralOpMode), // Mode is implicit (only EspNow), directly holds config.
-    Central(CentralOpMode),       // Uses the sub-enum for mode selection.
+    /// Run as the peripheral side of the chosen [`PeripheralOpMode`].
+    Peripheral(PeripheralOpMode),
+    /// Run as the central side of the chosen [`CentralOpMode`].
+    Central(CentralOpMode),
 }
 
 /// CSI collection behavior for the node.
@@ -451,55 +493,47 @@ impl<'a> CSINodeHardware<'a> {
     }
 }
 
-type CSIRxSubscriber = Subscriber<
-    'static,
-    CriticalSectionRawMutex,
-    CSIDataPacket,
-    PROC_CSI_CH_CAPACITY,
-    PROC_CSI_CH_SUBS,
-    2,
->;
-
-/// Client helper to receive CSI packets via a pub/sub channel.
+/// Client helper to receive CSI packets via the global SPSC channel.
 pub struct CSINodeClient {
-    csi_subscriber: Option<CSIRxSubscriber>,
+    _private: (),
 }
 
 impl CSINodeClient {
     /// Create a new CSI node client.
     ///
-    /// The CSI subscriber is created lazily on first call to `get_csi_data()`.
-    /// This allows creating a control-only handle (e.g. just calling `send_stop()`)
-    /// without consuming one of the CSI pub/sub subscriber slots.
+    /// In async-print mode the publish gate is opened lazily on the first
+    /// `get_csi_data()` await, so constructing a client purely for
+    /// `send_stop()` does not cause the WiFi callback to enqueue packets.
+    /// In sync mode CSI publishing is controlled by `init_logger` /
+    /// `set_csi_logging_enabled` — `CSINodeClient` only owns the stop signal.
     pub fn new() -> Self {
-        Self {
-            csi_subscriber: None,
-        }
-    }
-
-    fn subscriber_mut(&mut self) -> &mut CSIRxSubscriber {
-        if self.csi_subscriber.is_none() {
-            self.csi_subscriber = Some(
-                CSI_PACKET
-                    .subscriber()
-                    .expect("failed to create CSI subscriber"),
-            );
-        }
-
-        self.csi_subscriber
-            .as_mut()
-            .expect("CSI subscriber unexpectedly missing")
+        Self { _private: () }
     }
 
     /// Wait for the next CSI packet.
+    ///
+    /// Only available with the `async-print` feature: in sync mode the WiFi
+    /// callback formats and writes CSI lines directly without enqueueing,
+    /// so there is no channel to drain.
+    #[cfg(feature = "async-print")]
     pub async fn get_csi_data(&mut self) -> CSIDataPacket {
-        self.subscriber_mut().next_message_pure().await
+        // Lazily open the publish gate on first wait so the WiFi callback
+        // starts enqueueing. Idempotent for subsequent calls.
+        set_csi_logging_enabled(true);
+        CSI_PACKET.receive().await
     }
 
     /// Receive and print CSI data with metadata (uses crate logging).
+    ///
+    /// Only available with the `async-print` feature: in sync mode the CSI
+    /// line is emitted directly from the WiFi callback (`capture_csi_info`)
+    /// — there is nothing for user code to drive. Use
+    /// `set_csi_logging_enabled(false)` to suppress sync-mode output.
+    #[cfg(feature = "async-print")]
     pub async fn print_csi_w_metadata(&mut self) {
         let packet = self.get_csi_data().await;
         packet.print_csi_w_metadata();
+        embassy_futures::yield_now().await;
     }
 
     /// Signal the running node to stop.
@@ -512,9 +546,16 @@ impl CSINodeClient {
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ControlPacket {
     magic_number: u32,
+    /// Whether the central is currently in collector mode; the peripheral
+    /// mirrors this flag to keep the pair in sync.
     pub is_collector: bool,
+    /// Microseconds-since-boot timestamp captured when the central queued
+    /// this packet for transmit.
     pub central_send_uptime: u64,
+    /// Latency offset (μs) the central has observed for this peer; sent
+    /// so the peripheral can compensate when stamping its reply.
     pub latency_offset: i64,
+    /// Monotonic sequence number used to detect drops/reordering.
     pub sequence_number: u32,
 }
 
@@ -759,6 +800,16 @@ impl<'a> CSINode<'a> {
                 | Node::Central(CentralOpMode::EspNow(_))
         ));
 
+        // Replace esp-radio's heap-allocating ESP-NOW receive dispatcher with
+        // our static-pool variant *before* CSI starts. If we waited until the
+        // mode-specific arm runs (after `set_csi`), the CSI callback could
+        // already have begun its UART spin and a vendor frame arriving in
+        // that window would still hit esp-radio's `rcv_cb` and risk the
+        // 384 B grow panic. Doing it here covers all peripheral/central
+        // EspNow modes; sniffer modes also call `esp_now_unregister_recv_cb`
+        // later which overrides this — also fine.
+        crate::esp_now_pool::install();
+
         // Set Peripheral/Central to Collect CSI. Keep a clone so the STA
         // recovery path in run_sta_connect can re-apply after a stop/start
         // cycle (stop clears the CSI filter/callback).
@@ -799,6 +850,25 @@ impl<'a> CSINode<'a> {
                         .esp_now
                         .set_channel(sniffer_config.channel)
                         .unwrap();
+                    // Drop the ESP-NOW receive callback at the C layer.
+                    // Rationale: in Rust esp-radio, `rcv_cb` runs for every
+                    // ESP-NOW vendor action frame the 802.11 MAC sees and
+                    // unconditionally `Box::new`s the payload + push_back's
+                    // to a heap-backed VecDeque. While the sync CSI callback
+                    // CPU-spins UART for ~11 ms per line, those frames pile
+                    // up inside the WiFi task; once the spin returns, rcv_cb
+                    // burst-fires hundreds of allocs back-to-back, fragmenting
+                    // the heap until a 384 B VecDeque grow fails → panic.
+                    // Hernandez never hits this because in C, no recv_cb is
+                    // registered → frames are silently dropped at the C layer
+                    // with zero allocation. Replicate that here for sniffer
+                    // mode (we don't consume ESP-NOW data anyway).
+                    extern "C" {
+                        fn esp_now_unregister_recv_cb() -> i32;
+                    }
+                    unsafe {
+                        let _ = esp_now_unregister_recv_cb();
+                    }
                     let sniffer = &interfaces.sniffer;
                     sniffer.set_promiscuous_mode(true).unwrap();
                     if self.io_tasks.rx_enabled {
@@ -928,6 +998,16 @@ impl<'a> CSINode<'a> {
                 | Node::Central(CentralOpMode::EspNow(_))
         ));
 
+        // Replace esp-radio's heap-allocating ESP-NOW receive dispatcher with
+        // our static-pool variant *before* CSI starts. If we waited until the
+        // mode-specific arm runs (after `set_csi`), the CSI callback could
+        // already have begun its UART spin and a vendor frame arriving in
+        // that window would still hit esp-radio's `rcv_cb` and risk the
+        // 384 B grow panic. Doing it here covers all peripheral/central
+        // EspNow modes; sniffer modes also call `esp_now_unregister_recv_cb`
+        // later which overrides this — also fine.
+        crate::esp_now_pool::install();
+
         // Set Peripheral/Central to Collect CSI. Keep a clone so the STA
         // recovery path in run_sta_connect can re-apply after a stop/start
         // cycle (stop clears the CSI filter/callback).
@@ -963,6 +1043,13 @@ impl<'a> CSINode<'a> {
                         .esp_now
                         .set_channel(sniffer_config.channel)
                         .unwrap();
+                    // See the sniffer-Collector arm above for rationale.
+                    extern "C" {
+                        fn esp_now_unregister_recv_cb() -> i32;
+                    }
+                    unsafe {
+                        let _ = esp_now_unregister_recv_cb();
+                    }
                     let sniffer = &interfaces.sniffer;
                     sniffer.set_promiscuous_mode(true).unwrap();
                     if self.io_tasks.rx_enabled {
@@ -1138,7 +1225,32 @@ pub(crate) fn set_csi(controller: &mut WifiController, config: CsiConfig) {
 
 // Function to capture CSI info from callback and publish to channel
 fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
-    if IS_COLLECTOR.load(Ordering::Relaxed) == false {
+    // Count every CSI report regardless of mode so `rx_count` / `rx_rate_hz`
+    // / `pps_rx` reflect actual radio CSI throughput. This is the only path
+    // that fires for sniffer / STA / ESP-NOW collection — counting here keeps
+    // the metric consistent across all node modes.
+    #[cfg(feature = "statistics")]
+    STATS.rx_count.fetch_add(1, Ordering::Relaxed);
+
+    // Single-atomic fast path: returns immediately in Listener mode and in
+    // Collector mode when no CSINodeClient subscriber exists. Building the
+    // CSIDataPacket and calling publish_immediate acquires CriticalSectionRawMutex
+    // and on `riscv32imc` every other atomic op also takes a critical section,
+    // so additional gate atomics in the hot ISR path delay the Embassy timer ISR.
+    if !CSI_PUBLISH_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    // In async-print mode the consumer is a separate logger task that
+    // drains `CSI_PACKET`. If that channel is already full there's no
+    // point constructing the heavy ~700-byte CSIDataPacket — fast-drop
+    // and return. In sync mode this gate is irrelevant because the
+    // emission happens inline below (no channel involved), so we skip
+    // the CS-locked is_full check entirely.
+    #[cfg(feature = "async-print")]
+    if CSI_PACKET.is_full() {
+        #[cfg(feature = "statistics")]
+        STATS.rx_drop_count.fetch_add(1, Ordering::Relaxed);
         return;
     }
 
@@ -1235,15 +1347,59 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
         csi_data: csi_data,
     };
 
-    CSI_PACKET.publish_immediate(csi_packet);
-    CSI_PACKET_READY.signal(());
     #[cfg(feature = "statistics")]
-    STATS.rx_count.fetch_add(1, Ordering::Relaxed);
+    {
+        if seq_drop_detection_enabled() {
+            static mut PEER_SEQ_TRACKER: LinearMap<[u8; 6], u16, MAX_TRACKED_PEERS> =
+                LinearMap::new();
+            unsafe {
+                if RESET_SEQ_TRACKER.swap(false, Ordering::Relaxed) {
+                    PEER_SEQ_TRACKER.clear();
+                }
+                let current_seq = csi_packet.sequence_number;
+                if let Some(&last_seq) = PEER_SEQ_TRACKER.get(&csi_packet.mac) {
+                    let diff = (current_seq.wrapping_sub(last_seq)) & 0x0FFF;
+                    if diff > 1 {
+                        let lost = (diff - 1) as u32;
+                        if lost < 500 {
+                            STATS.rx_drop_count.fetch_add(lost, Ordering::Relaxed);
+                        }
+                    }
+                }
+                if PEER_SEQ_TRACKER.insert(csi_packet.mac, current_seq).is_err() {
+                    PEER_SEQ_TRACKER.clear();
+                    let _ = PEER_SEQ_TRACKER.insert(csi_packet.mac, current_seq);
+                }
+            }
+        }
+    }
+
+    // Sync mode: format and write the CSI line directly here, in the WiFi
+    // task callback context — exactly like ESP32-CSI-Tool's `_wifi_csi_cb`.
+    // No channel hop, no separate task, no executor scheduling round-trip.
+    // This is the architectural change that closes the gap to Hernandez:
+    // they format inline in the WiFi callback, we used to round-trip
+    // through CSI_PACKET → node_task → log_csi → format. With the
+    // async-print feature *off*, we now match Hernandez 1:1.
+    #[cfg(not(feature = "async-print"))]
+    {
+        crate::logging::logging::log_csi(csi_packet);
+        return;
+    }
+
+    // Async-print mode: enqueue for the spawned `logger_backend` task
+    // to drain. Channel had space when we checked is_full() above. The
+    // only way this try_send fails is if the consumer drained between
+    // then and now — harmless.
+    #[cfg(feature = "async-print")]
+    let _ = CSI_PACKET.try_send(csi_packet);
 }
 
-/// Internal task that processes CSI packets from the pub/sub channel.
+/// Internal task that handles collection-mode changes and rate statistics.
+///
+/// Seq drop detection runs inside `capture_csi_info` (ISR context) so this task
+/// never drains `CSI_PACKET`, leaving the channel exclusively for `CSINodeClient`.
 pub async fn run_process_csi_packet() {
-    // Initialize CSI process start time
     #[cfg(feature = "statistics")]
     STATS
         .capture_start_time
@@ -1254,21 +1410,12 @@ pub async fn run_process_csi_packet() {
     let mut last_rx_count = STATS.rx_count.load(Ordering::Relaxed);
     #[cfg(feature = "statistics")]
     let mut last_tx_count = STATS.tx_count.load(Ordering::Relaxed);
-    #[cfg(feature = "statistics")]
-    let mut rate_calc_decimator: u8 = 0;
-    // Subscribe to CSI packet capture updates
-    let mut csi_packet_sub = CSI_PACKET.subscriber().unwrap();
-    // Fixed-capacity map avoids heap traffic in the per-packet path.
-    let mut peer_tracker: LinearMap<[u8; 6], u16, MAX_TRACKED_PEERS> = LinearMap::new();
-    let mut is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
 
     loop {
-        // Wait on signals that all return () so Either3<(), (), ()> = 1 byte in the
-        // async state machine. The CSIDataPacket is never part of the suspended future.
         match select3(
             STOP_SIGNAL.wait(),
             COLLECTION_MODE_CHANGED.wait(),
-            CSI_PACKET_READY.wait(),
+            Timer::after_millis(500),
         )
         .await
         {
@@ -1278,76 +1425,37 @@ pub async fn run_process_csi_packet() {
             }
             Either3::Second(_) => {
                 COLLECTION_MODE_CHANGED.reset();
-                is_collector = IS_COLLECTOR.load(Ordering::Relaxed);
                 reset_globals();
                 #[cfg(feature = "statistics")]
-                STATS
-                    .capture_start_time
-                    .store(Instant::now().as_ticks(), Ordering::Relaxed);
-                #[cfg(feature = "statistics")]
                 {
+                    STATS
+                        .capture_start_time
+                        .store(Instant::now().as_ticks(), Ordering::Relaxed);
                     last_rate_update = Instant::now();
                     last_rx_count = STATS.rx_count.load(Ordering::Relaxed);
                     last_tx_count = STATS.tx_count.load(Ordering::Relaxed);
+                    RESET_SEQ_TRACKER.store(true, Ordering::Relaxed);
                 }
             }
             Either3::Third(_) => {
-                // Drain all packets queued since the last wake. CSIDataPacket lives
-                // on the real stack here, not in the async state machine.
-                let mut packets_since_yield: u8 = 0;
-                while let Some(csi_packet) = csi_packet_sub.try_next_message_pure() {
-                    #[cfg(not(feature = "statistics"))]
-                    let _ = csi_packet;
+                #[cfg(feature = "statistics")]
+                {
+                    let elapsed_secs = last_rate_update.elapsed().as_secs() as u64;
+                    if elapsed_secs >= 1 {
+                        let current_rx = STATS.rx_count.load(Ordering::Relaxed);
+                        let current_tx = STATS.tx_count.load(Ordering::Relaxed);
 
-                    #[cfg(feature = "statistics")]
-                    {
-                        rate_calc_decimator = rate_calc_decimator.wrapping_add(1);
+                        let rx_rate = ((current_rx.saturating_sub(last_rx_count))
+                            / elapsed_secs) as u32;
+                        let tx_rate = ((current_tx.saturating_sub(last_tx_count))
+                            / elapsed_secs) as u32;
 
-                        if is_collector && seq_drop_detection_enabled() {
-                            let current_seq = csi_packet.sequence_number;
+                        STATS.rx_rate_hz.store(rx_rate, Ordering::Relaxed);
+                        STATS.tx_rate_hz.store(tx_rate, Ordering::Relaxed);
 
-                            if let Some(&last_seq) = peer_tracker.get(&csi_packet.mac) {
-                                // 802.11 sequence numbers are 12-bit; mask for correct wraparound.
-                                let diff = (current_seq.wrapping_sub(last_seq)) & 0x0FFF;
-                                if diff > 1 {
-                                    let lost = (diff - 1) as u32;
-                                    if lost < 500 {
-                                        STATS.rx_drop_count.fetch_add(lost, Ordering::Relaxed);
-                                    }
-                                }
-                            }
-
-                            if peer_tracker.insert(csi_packet.mac, current_seq).is_err() {
-                                peer_tracker.clear();
-                                let _ = peer_tracker.insert(csi_packet.mac, current_seq);
-                            }
-                        }
-
-                        if rate_calc_decimator & 0x0F == 0 {
-                            let elapsed_secs = last_rate_update.elapsed().as_secs() as u64;
-                            if elapsed_secs >= 1 {
-                                let current_rx = STATS.rx_count.load(Ordering::Relaxed);
-                                let current_tx = STATS.tx_count.load(Ordering::Relaxed);
-
-                                let rx_rate = ((current_rx.saturating_sub(last_rx_count))
-                                    / elapsed_secs) as u32;
-                                let tx_rate = ((current_tx.saturating_sub(last_tx_count))
-                                    / elapsed_secs) as u32;
-
-                                STATS.rx_rate_hz.store(rx_rate, Ordering::Relaxed);
-                                STATS.tx_rate_hz.store(tx_rate, Ordering::Relaxed);
-
-                                last_rx_count = current_rx;
-                                last_tx_count = current_tx;
-                                last_rate_update = Instant::now();
-                            }
-                        }
-                    }
-
-                    packets_since_yield = packets_since_yield.wrapping_add(1);
-                    if packets_since_yield >= CSI_PROCESS_YIELD_EVERY {
-                        packets_since_yield = 0;
-                        yield_now().await;
+                        last_rx_count = current_rx;
+                        last_tx_count = current_tx;
+                        last_rate_update = Instant::now();
                     }
                 }
             }

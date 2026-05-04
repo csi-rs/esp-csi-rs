@@ -74,7 +74,7 @@ impl Default for CsiConfig {
             htltf_en: true,
             stbc_htltf2_en: true,
             ltf_merge_en: true,
-            channel_filter_en: true,
+            channel_filter_en: false,
             manu_scale: false,
             shift: 0,
             dump_ack_en: false,

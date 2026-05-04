@@ -1,6 +1,15 @@
+//! Central-side ESP-NOW driver task.
+//!
+//! Drives the timed control/reply exchange with the peripheral node:
+//! transmits [`crate::ControlPacket`]s on a balanced TX/RX schedule, ingests
+//! [`crate::PeripheralPacket`] replies for round-trip latency tracking,
+//! and pushes results into the runtime statistics channel when the
+//! `statistics` feature is enabled.
+
 use core::sync::atomic::Ordering;
 
 use embassy_futures::select::{select, Either};
+use embassy_time::Duration;
 use embassy_time::Instant;
 use embassy_time::Timer;
 use heapless::LinearMap;
@@ -12,7 +21,9 @@ use crate::PERIPHERAL_MAGIC_NUMBER;
 #[cfg(feature = "statistics")]
 use crate::STATS;
 use crate::STOP_SIGNAL;
-use esp_radio::esp_now::{Error as EspNowInnerError, EspNow, EspNowError, PeerInfo, ReceivedData, BROADCAST_ADDRESS};
+use esp_radio::esp_now::{Error as EspNowInnerError, EspNow, EspNowError, PeerInfo, BROADCAST_ADDRESS};
+
+use crate::esp_now_pool::PoolFrame;
 #[cfg(feature = "statistics")]
 use portable_atomic::AtomicU64;
 
@@ -47,16 +58,22 @@ fn reset_tx_diagnostics() {
     TX_FAILED_COUNT.store(0, Ordering::Relaxed);
 }
 
+/// Returns the cumulative number of ESP-NOW frames the central has handed
+/// off for transmission since boot.
 #[cfg(feature = "statistics")]
 pub fn get_tx_queued_packets() -> u64 {
     TX_QUEUED_COUNT.load(Ordering::Relaxed)
 }
 
+/// Returns the number of queued ESP-NOW frames the radio has confirmed
+/// as transmitted (TX-success callback fired).
 #[cfg(feature = "statistics")]
 pub fn get_tx_confirmed_packets() -> u64 {
     TX_CONFIRMED_COUNT.load(Ordering::Relaxed)
 }
 
+/// Returns the number of queued ESP-NOW frames the radio reported as
+/// failed (TX-failure callback fired).
 #[cfg(feature = "statistics")]
 pub fn get_tx_failed_packets() -> u64 {
     TX_FAILED_COUNT.load(Ordering::Relaxed)
@@ -68,7 +85,7 @@ fn hz_to_interval_us(hz: u64) -> u64 {
 
 fn handle_peripheral_packet(
     esp_now: &mut EspNow<'static>,
-    r: ReceivedData,
+    r: PoolFrame,
     channel: u8,
     latency_offset: &mut i64,
     known_peers: &mut LinearMap<[u8; 6], (), RX_TRACKED_PEERS_CAPACITY>,
@@ -145,6 +162,10 @@ pub async fn run_esp_now_central(
     // Configure
     esp_now.set_channel(config.channel).unwrap();
     log_ln!("esp-now version {}", esp_now.version().unwrap());
+
+    // The static-pool `rcv_cb` is installed in `lib::run` before `set_csi`,
+    // so by the time we reach this function ESP-NOW receives are already
+    // landing in BSS slots rather than the heap-backed `VecDeque`.
 
     let freq = match frequency_hz {
         Some(freq) => u64::from(freq.max(1)),
@@ -313,7 +334,7 @@ pub async fn run_esp_now_central(
                     break;
                 }
 
-                let Some(r) = esp_now.receive() else {
+                let Some(r) = crate::esp_now_pool::receive() else {
                     break;
                 };
 
@@ -325,6 +346,7 @@ pub async fn run_esp_now_central(
                     &mut known_peers,
                 );
                 rx_packets = rx_packets.saturating_add(1);
+                embassy_futures::yield_now().await;
             }
 
             // If there is more RX work and TX is not immediately due, loop

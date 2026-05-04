@@ -1,3 +1,12 @@
+//! Peripheral-side ESP-NOW driver task.
+//!
+//! Receives [`crate::ControlPacket`] frames from the central, mirrors the
+//! collector mode advertised by the central, stamps the receive/send
+//! uptimes, and replies with a [`crate::PeripheralPacket`] for the
+//! central's latency-tracking pipeline. Operates against the lock-free
+//! [`crate::esp_now_pool`] receive queue to avoid heap churn in the
+//! ESP-NOW interrupt path.
+
 use core::sync::atomic::Ordering;
 
 use crate::log_ln;
@@ -11,11 +20,14 @@ use crate::STATS;
 use crate::STOP_SIGNAL;
 
 use embassy_futures::select::{select, Either};
+use embassy_futures::yield_now;
 use embassy_time::Instant;
 use embassy_time::Timer;
-use esp_radio::esp_now::{Error as EspNowInnerError, EspNow, EspNowError, PeerInfo, ReceivedData};
+use esp_radio::esp_now::{Error as EspNowInnerError, EspNow, EspNowError, PeerInfo};
 
-use portable_atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64};
+use crate::esp_now_pool::PoolFrame;
+
+use portable_atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8};
 
 use crate::{EspNowConfig, IOTaskConfig};
 
@@ -33,6 +45,14 @@ const TX_CATCH_UP_BURST_NO_WAIT: u8 = 16;
 const RX_BURST_MAX_WITH_TX: u16 = 16;
 const RX_RESERVED_TX_GUARD_US: u64 = 15;
 const PEER_HEALTHCHECK_PERIOD: u16 = 256;
+// Cap any single drain burst so an arbitrarily large RX queue cannot keep the
+// loop in the synchronous drain without an executor turn. Sized to absorb a
+// full 802.11n AMPDU in one pass (max 64 subframes) so we don't bounce in/out
+// of yield_now mid-aggregate and let the driver overrun.
+const RX_BURST_MAX_RX_ONLY: u16 = 64;
+// Number of consecutive packets that must agree on a mode before applying it.
+// Filters out single-packet noise/corruption flips.
+const MODE_SWITCH_HYSTERESIS: u8 = 3;
 
 #[cfg(feature = "statistics")]
 static RX_PARSE_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -57,31 +77,44 @@ fn reset_rx_diagnostics() {
     RX_TX_GUARD_BREAK_COUNT.store(0, Ordering::Relaxed);
 }
 
+/// Returns the number of received ESP-NOW frames that failed
+/// `ControlPacket` deserialization (postcard parse error).
 #[cfg(feature = "statistics")]
 pub fn get_rx_parse_fail_packets() -> u64 {
     RX_PARSE_FAIL_COUNT.load(Ordering::Relaxed)
 }
 
+/// Returns the number of received frames dropped because the magic
+/// number did not match [`crate::CENTRAL_MAGIC_NUMBER`].
 #[cfg(feature = "statistics")]
 pub fn get_rx_magic_drop_packets() -> u64 {
     RX_MAGIC_DROP_COUNT.load(Ordering::Relaxed)
 }
 
+/// Returns the number of received frames dropped because the source MAC
+/// did not match the currently locked-in central peer.
 #[cfg(feature = "statistics")]
 pub fn get_rx_source_filter_drop_packets() -> u64 {
     RX_SOURCE_FILTER_DROP_COUNT.load(Ordering::Relaxed)
 }
 
+/// Returns the number of times adding the central as an ESP-NOW peer
+/// failed (e.g., peer table full).
 #[cfg(feature = "statistics")]
 pub fn get_rx_peer_add_fail_packets() -> u64 {
     RX_PEER_ADD_FAIL_COUNT.load(Ordering::Relaxed)
 }
 
+/// Returns the number of detected gaps in the central's
+/// `sequence_number` (drops or reordering).
 #[cfg(feature = "statistics")]
 pub fn get_rx_sequence_miss_packets() -> u64 {
     RX_SEQUENCE_MISS_COUNT.load(Ordering::Relaxed)
 }
 
+/// Returns the number of times an RX completed inside the TX guard
+/// window — i.e. the peripheral's reply landed before the central had
+/// finished its previous transmit slot.
 #[cfg(feature = "statistics")]
 pub fn get_rx_tx_guard_breaks() -> u64 {
     RX_TX_GUARD_BREAK_COUNT.load(Ordering::Relaxed)
@@ -124,6 +157,10 @@ struct Shared {
     pending_recv_time: AtomicU64,
     pending_csu: AtomicU64,
     pending_flag: AtomicBool,
+    /// Last `!packet.is_collector` value seen; used to detect direction changes.
+    last_central_is_listener: AtomicBool,
+    /// Consecutive-packet streak counter for mode-switch hysteresis.
+    mode_streak: AtomicU8,
 }
 
 /// Parse and ingest one received control packet into responder state.
@@ -132,7 +169,7 @@ struct Shared {
 fn ingest_control_packet(
     esp_now: &EspNow<'static>,
     channel: u8,
-    r: ReceivedData,
+    r: PoolFrame,
     shared: &Shared,
     tx_enabled: bool,
 ) {
@@ -240,17 +277,36 @@ fn ingest_control_packet(
         shared.pending_flag.store(true, Ordering::Release);
     }
 
-    #[cfg(feature = "statistics")]
-    STATS.rx_count.fetch_add(1, Ordering::Relaxed);
+    // Peripheral mode policy: only follow the central when it becomes a listener,
+    // ensuring someone is always collecting. When central is a collector, the
+    // peripheral keeps its configured mode — both nodes can collect simultaneously.
+    //
+    // Hysteresis: require MODE_SWITCH_HYSTERESIS consecutive packets with the same
+    // value before acting, so a single noise-corrupted packet cannot flip the mode.
+    let central_is_listener = !packet.is_collector;
+    let prev_seen = shared.last_central_is_listener.load(Ordering::Relaxed);
 
-    // Keep central/peripheral roles complementary.
-    let desired_collector = !packet.is_collector;
-    let prev = shared.is_collector.load(Ordering::Relaxed);
-    if desired_collector != prev {
-        set_runtime_collection_mode(desired_collector);
+    if central_is_listener != prev_seen {
         shared
-            .is_collector
-            .store(desired_collector, Ordering::Relaxed);
+            .last_central_is_listener
+            .store(central_is_listener, Ordering::Relaxed);
+        shared.mode_streak.store(1, Ordering::Relaxed);
+    } else {
+        let streak = shared
+            .mode_streak
+            .load(Ordering::Relaxed)
+            .saturating_add(1);
+        shared.mode_streak.store(streak, Ordering::Relaxed);
+
+        if streak == MODE_SWITCH_HYSTERESIS && central_is_listener {
+            // Central has consistently been a listener → switch peripheral to collector.
+            if !shared.is_collector.load(Ordering::Relaxed) {
+                set_runtime_collection_mode(true);
+                shared.is_collector.store(true, Ordering::Relaxed);
+            }
+        }
+        // When central is consistently a collector, do NOT force peripheral to
+        // listener — peripheral and central are allowed to both collect.
     }
 }
 
@@ -266,6 +322,10 @@ pub async fn run_esp_now_peripheral(
 ) {
     esp_now.set_channel(config.channel).unwrap();
     log_ln!("esp-now version {}", esp_now.version().unwrap());
+
+    // The static-pool `rcv_cb` is installed in `lib::run` before `set_csi`,
+    // so by the time we reach this function ESP-NOW receives are already
+    // landing in BSS slots rather than the heap-backed `VecDeque`.
 
     let freq = match freq_hz {
         Some(freq) => freq as u64,
@@ -297,6 +357,8 @@ async fn responder(
         pending_recv_time: AtomicU64::new(0),
         pending_csu: AtomicU64::new(0),
         pending_flag: AtomicBool::new(false),
+        last_central_is_listener: AtomicBool::new(false),
+        mode_streak: AtomicU8::new(0),
     };
 
     // Adaptive reply pacing: start from configured target and automatically
@@ -433,7 +495,7 @@ async fn responder(
             let rx_burst_drain_limit = if tx_reply_pending {
                 RX_BURST_MAX_WITH_TX
             } else {
-                u16::MAX
+                RX_BURST_MAX_RX_ONLY
             };
 
             let mut rx_packets: u16 = 0;
@@ -444,7 +506,7 @@ async fn responder(
                     break;
                 }
 
-                let Some(r) = esp_now.receive() else {
+                let Some(r) = crate::esp_now_pool::receive() else {
                     break;
                 };
 
@@ -453,9 +515,13 @@ async fn responder(
             }
 
             // If there is more RX work and TX is not immediately due, loop
-            // again without sleeping to reduce queueing latency.
+            // again without sleeping to reduce queueing latency.  Yield once
+            // first so that co-scheduled tasks (e.g. node_task) get at least
+            // one executor turn between drain cycles; without this the inner
+            // join never returns Poll::Pending and the outer join starves them.
             if rx_packets > 0 {
                 if !tx_reply_pending || Instant::now().as_micros() < next_tx_us {
+                    yield_now().await;
                     continue;
                 }
             }
@@ -464,7 +530,7 @@ async fn responder(
         if !io_tasks.tx_enabled && io_tasks.rx_enabled {
             // RX-only: block until the driver ISR wakes us with the next frame.
             // This eliminates the polling sleep and its variable wake-up latency.
-            match select(STOP_SIGNAL.wait(), esp_now.receive_async()).await {
+            match select(STOP_SIGNAL.wait(), crate::esp_now_pool::receive_async()).await {
                 Either::First(_) => {
                     log_ln!("STOP signal received, shutting down responder...");
                     STOP_SIGNAL.signal(());
@@ -473,8 +539,13 @@ async fn responder(
                 Either::Second(r) => {
                     ingest_control_packet(esp_now, channel, r, &shared, false);
                     // Drain any frames that stacked up while we were processing.
-                    while let Some(r) = esp_now.receive() {
+                    // Bound the synchronous drain so a sustained inflow can't
+                    // hold the executor here past the next loop iteration.
+                    let mut drained: u16 = 0;
+                    while drained < RX_BURST_MAX_RX_ONLY {
+                        let Some(r) = crate::esp_now_pool::receive() else { break; };
                         ingest_control_packet(esp_now, channel, r, &shared, false);
+                        drained = drained.saturating_add(1);
                     }
                 }
             }

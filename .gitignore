@@ -18,3 +18,4 @@ rustc-ice-*
 
 # Visual Studio Code settings folder
 .vscode/
+specs/

@@ -1,3 +1,10 @@
+//! Wi-Fi station mode central driver.
+//!
+//! Connects to a configured access point, brings up an embassy-net stack
+//! with DHCP, and drives the network/ICMP plumbing required to keep CSI
+//! flowing while the device is associated. The Wi-Fi driver delivers CSI
+//! samples for received frames out-of-band via the global CSI channel.
+
 use core::{net::Ipv4Addr};
 use embassy_futures::join::{join3, join4};
 use embassy_futures::select::{select, select3, Either, Either3};

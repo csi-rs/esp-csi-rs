@@ -2,6 +2,10 @@ fn main() {
     // linker_be_nice();
     // // // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     // println!("cargo:rustc-link-arg=-Tlinkall.x");
+
+    println!("cargo:rerun-if-env-changed=MONITOR_BAUD");
+    let baud = std::env::var("MONITOR_BAUD").unwrap_or_else(|_| "115200".to_string());
+    println!("cargo:rustc-env=UART_LOG_BAUDRATE={}", baud);
 }
 
 fn linker_be_nice() {

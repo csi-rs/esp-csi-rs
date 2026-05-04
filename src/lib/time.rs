@@ -1,3 +1,9 @@
+//! Calendar-time helpers for stamping CSI packets.
+//!
+//! Provides [`DateTime`] — a serializable wall-clock representation
+//! attached to every captured CSI sample so host tooling can correlate
+//! packets across nodes.
+
 use embassy_time::Instant;
 use postcard::experimental::max_size::MaxSize;
 use serde::{Deserialize, Serialize};

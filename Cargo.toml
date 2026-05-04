@@ -18,15 +18,13 @@ path = "src/lib/lib.rs"
 [features]
 #! ⚠️ At minimum you are required to choose only ONE of the device options. For the most efficient (and fastest) logging, you should combine defmt with the jtag-serial features.
 
-default = ["no-std", "println", "auto", "async-print"]
+default = ["no-std", "println", "auto"]
 ## Build without the standard library.
 no-std = []
 ## Enable logging via `println!()`.
 println = ["dep:log", "esp-backtrace/println"]
 ## Automatically select the best available backend for the target.
 auto = ["esp-println/auto"]
-## Non-blocking async logging. This is an unstable feature and may cause unexpected behavior. Use with caution.
-async-print = []
 ## Enable logging via defmt.
 defmt = [
     "dep:defmt",
@@ -44,6 +42,8 @@ uart = ["esp-println/uart"]
 no-print = ["esp-println/no-op"]
 ## Enable collection of runtime statistics (e.g., latency, dropped packets).
 statistics = []
+## Non-blocking async logging. This is an unstable feature and may cause unexpected behavior. Use with caution.
+async-print = []
 
 ## Support for the ESP32
 esp32 = [
@@ -135,7 +135,6 @@ embassy-net = { version = "0.7.1", features = [
     "udp",
     "raw",
 ] }
-embedded-io = { version = "0.7.1", optional = false }
 embedded-io-async = { version = "0.7.0", optional = false }
 esp-alloc = { version = "0.9.0", optional = false }
 esp-backtrace = { version = "0.18.1", optional = false, features = [
