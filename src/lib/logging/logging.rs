@@ -14,6 +14,7 @@
 //! enabled without `async-print`, `defmt-rtt` is pulled in as the global
 //! logger.
 
+#[cfg(feature = "async-print")]
 use embedded_io_async::Write;
 use esp_hal::peripherals::Peripherals;
 use heapless::String;
@@ -23,8 +24,11 @@ use postcard::experimental::max_size::MaxSize;
 #[cfg(all(feature = "defmt", not(feature = "async-print")))]
 use defmt_rtt as _;
 
+#[allow(dead_code)]
 const CSI_LOG_CHANNEL_CAPACITY: usize = 32;
+#[allow(dead_code)]
 const TEXT_LOG_CHANNEL_CAPACITY: usize = 64;
+#[allow(dead_code)]
 const DEFMT_LOG_CHANNEL_CAPACITY: usize = 64;
 const fn parse_u32(s: &str) -> u32 {
     let bytes = s.as_bytes();
@@ -46,6 +50,7 @@ mod csi_interface {
     use crate::csi::CSIDataPacket;
     use crate::logging::logging::CSI_LOG_CHANNEL_CAPACITY;
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
+    #[cfg(feature = "statistics")]
     use portable_atomic::AtomicU32;
     /// Bounded channel between the WiFi callback (producer) and the
     /// async drainer task (consumer) on the async-print path.
@@ -156,7 +161,7 @@ pub fn get_log_packet_drops() -> u32 {
 #[cfg(all(feature = "println", feature = "async-print"))]
 mod log_impl {
     use crate::logging::logging::TEXT_LOG_CHANNEL_CAPACITY;
-    use core::{fmt::Write, panic};
+    use core::fmt::Write;
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
     use heapless::String;
 
@@ -413,6 +418,7 @@ macro_rules! log_ln {
 }
 
 /// Print raw bytes to the active logging backend (async-print only).
+#[allow(unused_variables)]
 pub fn print_raw_bytes(bytes: &[u8]) {
     #[cfg(all(
         any(feature = "uart", feature = "jtag-serial", feature = "auto"),
@@ -531,8 +537,6 @@ pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
                 #[cfg(feature = "esp32c3")]
                 const USB_DEVICE_INT_RAW: *const u32 = 0x60043008 as *const u32;
                 #[cfg(feature = "esp32c6")]
-                const USB_DEVICE_INT_RAW: *const u32 = 0x6000f008 as *const u32;
-                #[cfg(feature = "esp32h2")]
                 const USB_DEVICE_INT_RAW: *const u32 = 0x6000f008 as *const u32;
                 #[cfg(feature = "esp32s3")]
                 const USB_DEVICE_INT_RAW: *const u32 = 0x60038000 as *const u32;
@@ -655,6 +659,7 @@ async fn write_text_array_packet(packet: CSIDataPacket, driver: &mut LogOutput) 
             }
         };
     }
+    #[allow(unused_macros)]
     macro_rules! write_last_field {
         ($arg:expr) => {
             buf.clear();
@@ -744,6 +749,7 @@ fn write_text_array_packet(packet: CSIDataPacket) {
             }
         };
     }
+    #[allow(unused_macros)]
     macro_rules! write_last_field {
         ($arg:expr) => {
             buf.clear();
@@ -1147,6 +1153,7 @@ fn uart0_write_bytes_fast(bytes: &[u8]) {
     any(feature = "uart", feature = "jtag-serial", feature = "auto"),
     not(feature = "esp32")
 ))]
+#[allow(dead_code)]
 fn uart0_write_bytes_fast(bytes: &[u8]) {
     esp_println::Printer::write_bytes(bytes);
 }
@@ -1340,10 +1347,6 @@ async fn write_text_packet(packet: CSIDataPacket, driver: &mut LogOutput) -> Res
 
 #[cfg(not(feature = "async-print"))]
 fn write_text_packet(packet: CSIDataPacket) {
-    use core::fmt::Write as FmtWrite;
-
-    let mut buf = String::<128>::new();
-
     if let Some(dt) = &packet.date_time {
         log_ln!(
             "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",

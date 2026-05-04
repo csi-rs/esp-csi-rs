@@ -128,6 +128,28 @@
 //!
 //!
 //!
+//! ### On-Device CSI Processing
+//!
+//! Every captured CSI packet is delivered inline from the WiFi callback to:
+//! 1. The configured `LogMode` formatter (UART / JTAG output), and
+//! 2. An optional user callback registered with [`set_csi_callback`].
+//!
+//! The user callback is the supported path for processing CSI packets on
+//! the device itself — zero channel hops, lowest possible latency. The
+//! callback runs in the WiFi task hot path, so it MUST be fast and
+//! non-blocking. If you need heavier work, copy what you need out of the
+//! `&CSIDataPacket` borrow and post it to your own task.
+//!
+//! ```rust,ignore
+//! use esp_csi_rs::{set_csi_callback, csi::CSIDataPacket};
+//!
+//! fn on_csi(packet: &CSIDataPacket) {
+//!     // your processing — keep it fast
+//! }
+//!
+//! set_csi_callback(on_csi);
+//! ```
+//!
 //! ### Example for creating WiFi Station Central Collector
 //! There are more examples in the repository. The example below demonstrates how to collect CSI data with an ESP configured in WIFI Station mode.
 //!
@@ -150,7 +172,7 @@
 //!    client_config,  // Pass the config we created above
 //! };
 //! ```
-//! #### Step 3: Create a CSI Collection Node Instance with the Desired Configuration
+//! #### Step 4: Create a CSI Collection Node Instance with the Desired Configuration
 //! ```rust
 //! let mut node = CSINode::new(
 //!     esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::WifiStation(station_config)),
@@ -160,11 +182,17 @@
 //!     csi_hardware,
 //! );
 //! ```
-//! #### Step 4: Create a CSI Node Client to Control the Node and Receive CSI Data
+//! #### Step 5: (Optional) Register an On-Device CSI Callback
+//! ```rust
+//! set_csi_callback(|packet| {
+//!     // process `packet` here — runs inline in the WiFi task, keep it fast
+//! });
+//! ```
+//! #### Step 6: Create a CSI Node Client to Control the Node
 //! ```rust
 //! let mut node_handle = CSINodeClient::new();
 //! ```
-//! #### Step 5: Create Handler for Printing for Certain Duration
+//! #### Step 7: Run the Node for a Fixed Duration
 //! ```rust
 //! node.run_duration(1000, &mut node_handle).await;
 //! ```
@@ -172,23 +200,23 @@
 
 #![no_std]
 
+use core::sync::atomic::AtomicPtr;
+#[cfg(feature = "statistics")]
 use portable_atomic::AtomicI64;
-
-use zerocopy::little_endian::{U32, U64};
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use embassy_futures::join::{join, join3};
 use embassy_futures::select::{select, select3, Either, Either3};
 
-use embassy_time::{with_timeout, Duration, Instant, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::{ClientConfig, CsiConfig, Interfaces, Protocol, WifiController};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Channel, TrySendError};
 use embassy_sync::signal::Signal;
 
-use heapless::{LinearMap, Vec};
+use heapless::Vec;
+#[cfg(feature = "statistics")]
+use heapless::LinearMap;
 extern crate alloc;
 use serde::{Deserialize, Serialize};
 
@@ -206,13 +234,15 @@ use crate::config::CsiConfig as CsiConfiguration;
 use crate::csi::{CSIDataPacket, RxCSIFmt};
 use crate::peripheral::esp_now::run_esp_now_peripheral;
 
-const PROC_CSI_CH_CAPACITY: usize = 32;
+#[cfg(feature = "statistics")]
 const MAX_TRACKED_PEERS: usize = 16;
 
-// Single SPSC channel: ISR (capture_csi_info) is the only producer,
-// CSINodeClient is the only consumer.
-static CSI_PACKET: Channel<CriticalSectionRawMutex, CSIDataPacket, PROC_CSI_CH_CAPACITY> =
-    Channel::new();
+// Optional user callback invoked inline from the WiFi CSI callback for every
+// captured packet. Stored as a raw fn pointer in an `AtomicPtr` so the WiFi
+// callback can load it with a single relaxed atomic op without locking. A
+// null pointer means "no callback registered". Use `set_csi_callback` to
+// install one and `clear_csi_callback` to remove it.
+static CSI_CALLBACK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 static IS_COLLECTOR: AtomicBool = AtomicBool::new(false);
 // CSI publish gate. The WiFi callback checks this in a single relaxed load
@@ -229,16 +259,14 @@ static COLLECTION_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::ne
 /// Enable or disable CSI publishing.
 ///
 /// When disabled, the WiFi CSI callback returns immediately at the gate check
-/// — no formatting, no enqueue, no print. Use this to keep `log_ln!` output
-/// visible without the per-packet CSI line flood, while leaving the WiFi
-/// stack and stats counters running normally.
+/// — no callback invocation, no formatting, no print. Use this to keep
+/// `log_ln!` output visible without the per-packet CSI line flood, while
+/// leaving the WiFi stack and stats counters running normally.
 ///
-/// `init_logger` enables this automatically in sync mode (no `async-print`
-/// feature) because the WiFi callback formats and writes CSI lines directly
-/// in that mode. In async-print mode `CSINodeClient::get_csi_data` enables
-/// it lazily on first await.
-///
-/// Call this AFTER `init_logger` to override either default.
+/// `init_logger` enables this automatically. `set_csi_callback` also enables
+/// it lazily on first registration so a user-installed callback fires without
+/// a separate enable call. Call this AFTER `init_logger` /
+/// `set_csi_callback` to override the default.
 pub fn set_csi_logging_enabled(enabled: bool) {
     CSI_PUBLISH_ENABLED.store(enabled, Ordering::Release);
 }
@@ -246,6 +274,52 @@ pub fn set_csi_logging_enabled(enabled: bool) {
 /// Returns whether CSI publishing is currently enabled.
 pub fn csi_logging_enabled() -> bool {
     CSI_PUBLISH_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Register a user callback invoked inline for every captured CSI packet.
+///
+/// The callback runs in the WiFi task context (the same context that
+/// `init_logger`'s sync formatter writes from), with a borrow of the
+/// `CSIDataPacket` *before* it is consumed by the logging path. This is the
+/// supported path for **on-device CSI processing**: zero channel hops, zero
+/// scheduler round-trip, the lowest-latency hook the crate exposes.
+///
+/// **Constraints.** The callback runs on the WiFi task's hot path and
+/// MUST be fast and non-blocking — anything you do here delays the next
+/// RX. Avoid heap allocation, locking, and long format/write work; if you
+/// need heavier processing, copy what you need out and post to your own
+/// task or queue.
+///
+/// Registering a callback also enables `CSI_PUBLISH_ENABLED` lazily, so you
+/// don't need to call `set_csi_logging_enabled(true)` separately. Call
+/// `clear_csi_callback` to remove the hook (the gate stays enabled — toggle
+/// it explicitly with `set_csi_logging_enabled` if needed).
+///
+/// Replacing an existing callback is a single atomic store; the previous
+/// callback may still fire briefly on packets that were already in flight.
+///
+/// # Example
+/// ```ignore
+/// use esp_csi_rs::{set_csi_callback, csi::CSIDataPacket};
+///
+/// fn on_csi(packet: &CSIDataPacket) {
+///     // your processing — keep it fast
+/// }
+///
+/// set_csi_callback(on_csi);
+/// ```
+pub fn set_csi_callback(cb: fn(&CSIDataPacket)) {
+    CSI_CALLBACK.store(cb as *mut (), Ordering::Release);
+    set_csi_logging_enabled(true);
+}
+
+/// Remove the user CSI callback registered via `set_csi_callback`.
+///
+/// Subsequent CSI packets will not invoke any user callback. The publish
+/// gate is left untouched — call `set_csi_logging_enabled(false)` if you
+/// also want to suppress logging output.
+pub fn clear_csi_callback() {
+    CSI_CALLBACK.store(core::ptr::null_mut(), Ordering::Release);
 }
 // Signals run_process_csi_packet to clear PEER_SEQ_TRACKER on the next ISR entry.
 #[cfg(feature = "statistics")]
@@ -255,7 +329,9 @@ static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
 #[cfg(feature = "statistics")]
 static SEQ_DROP_DETECTION_ENABLED: AtomicBool = AtomicBool::new(false);
 
-use portable_atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use portable_atomic::{AtomicBool, Ordering};
+#[cfg(feature = "statistics")]
+use portable_atomic::{AtomicU32, AtomicU64};
 /// Global statistics counters (enabled with the `statistics` feature).
 #[cfg(feature = "statistics")]
 struct GlobalStats {
@@ -318,36 +394,14 @@ fn set_seq_drop_detection(enabled: bool) {
     }
 }
 
+#[cfg(feature = "statistics")]
 fn seq_drop_detection_enabled() -> bool {
-    #[cfg(feature = "statistics")]
-    {
-        SEQ_DROP_DETECTION_ENABLED.load(Ordering::Relaxed)
-    }
-
-    #[cfg(not(feature = "statistics"))]
-    {
-        false
-    }
+    SEQ_DROP_DETECTION_ENABLED.load(Ordering::Relaxed)
 }
 
-// Drives the per-`run_duration` lifecycle. In async-print mode this is the
-// loop that pulls packets out of `CSI_PACKET` and forwards them to the
-// logger task — without it, the channel would fill and packets would drop.
-// In sync mode the WiFi callback writes inline, so we just wait for the
-// duration and then signal stop.
-#[cfg(feature = "async-print")]
-async fn csi_data_collection(client: &mut CSINodeClient, duration: u64) {
-    with_timeout(Duration::from_secs(duration), async {
-        loop {
-            client.print_csi_w_metadata().await;
-        }
-    })
-    .await
-    .unwrap_err();
-    client.send_stop().await;
-}
-
-#[cfg(not(feature = "async-print"))]
+// Drives the per-`run_duration` lifecycle. The WiFi callback delivers every
+// CSI packet inline (logging + optional `set_csi_callback` hook), so this
+// task just waits the requested duration and signals stop.
 async fn csi_data_collection(client: &mut CSINodeClient, duration: u64) {
     Timer::after(Duration::from_secs(duration)).await;
     client.send_stop().await;
@@ -367,6 +421,7 @@ async fn stop_after_duration(duration: u64) {
 /// Configuration for ESP-NOW traffic generation.
 ///
 /// Used by both Central and Peripheral nodes when operating in ESP-NOW mode.
+#[allow(dead_code)]
 pub struct EspNowConfig {
     phy_rate: WifiPhyRate,
     channel: u8,
@@ -383,6 +438,7 @@ impl Default for EspNowConfig {
 
 /// Configuration for Wi-Fi Promiscuous Sniffer mode.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct WifiSnifferConfig {
     mac_filter: Option<[u8; 6]>,
     /// 2.4 GHz channel (1–14) the sniffer should lock to.
@@ -493,47 +549,20 @@ impl<'a> CSINodeHardware<'a> {
     }
 }
 
-/// Client helper to receive CSI packets via the global SPSC channel.
+/// Handle for controlling a running [`CSINode`] from user code.
+///
+/// CSI packets are delivered to user code via [`set_csi_callback`], which
+/// runs inline in the WiFi task — there is no per-client receive queue. The
+/// client exists solely to signal the running node to stop early via
+/// [`CSINodeClient::send_stop`].
 pub struct CSINodeClient {
     _private: (),
 }
 
 impl CSINodeClient {
     /// Create a new CSI node client.
-    ///
-    /// In async-print mode the publish gate is opened lazily on the first
-    /// `get_csi_data()` await, so constructing a client purely for
-    /// `send_stop()` does not cause the WiFi callback to enqueue packets.
-    /// In sync mode CSI publishing is controlled by `init_logger` /
-    /// `set_csi_logging_enabled` — `CSINodeClient` only owns the stop signal.
     pub fn new() -> Self {
         Self { _private: () }
-    }
-
-    /// Wait for the next CSI packet.
-    ///
-    /// Only available with the `async-print` feature: in sync mode the WiFi
-    /// callback formats and writes CSI lines directly without enqueueing,
-    /// so there is no channel to drain.
-    #[cfg(feature = "async-print")]
-    pub async fn get_csi_data(&mut self) -> CSIDataPacket {
-        // Lazily open the publish gate on first wait so the WiFi callback
-        // starts enqueueing. Idempotent for subsequent calls.
-        set_csi_logging_enabled(true);
-        CSI_PACKET.receive().await
-    }
-
-    /// Receive and print CSI data with metadata (uses crate logging).
-    ///
-    /// Only available with the `async-print` feature: in sync mode the CSI
-    /// line is emitted directly from the WiFi callback (`capture_csi_info`)
-    /// — there is nothing for user code to drive. Use
-    /// `set_csi_logging_enabled(false)` to suppress sync-mode output.
-    #[cfg(feature = "async-print")]
-    pub async fn print_csi_w_metadata(&mut self) {
-        let packet = self.get_csi_data().await;
-        packet.print_csi_w_metadata();
-        embassy_futures::yield_now().await;
     }
 
     /// Signal the running node to stop.
@@ -752,7 +781,7 @@ impl<'a> CSINode<'a> {
     /// Run the node until duration in seconds with internal collection.
     ///
     /// This initializes Wi-Fi, configures CSI, and starts mode-specific tasks.
-    pub async fn run_duration(&mut self, duration: u64, mut client: &mut CSINodeClient) {
+    pub async fn run_duration(&mut self, duration: u64, client: &mut CSINodeClient) {
         let interfaces = &mut self.hardware.interfaces;
         let controller = &mut self.hardware.controller;
 
@@ -815,7 +844,6 @@ impl<'a> CSINode<'a> {
         // cycle (stop clears the CSI filter/callback).
         let csi_config_for_recovery = config.clone();
         set_csi(controller, config);
-        let sniffer: &esp_radio::wifi::Sniffer<'_> = &interfaces.sniffer;
 
         // Initialize Nodes based on type
         match &self.kind {
@@ -912,7 +940,7 @@ impl<'a> CSINode<'a> {
                         join3(main_task, wait_for_stop(), stop_after_duration(duration)).await;
                     }
                 }
-                CentralOpMode::WifiStation(sta_config) => {
+                CentralOpMode::WifiStation(_sta_config) => {
                     // Initialize as Wifi Station Collector with WifiStationConfig
                     // 1. Connect to Wi-Fi network, etc.
                     // 2. Run DHCP, NTP sync if enabled in config, etc.
@@ -1083,7 +1111,7 @@ impl<'a> CSINode<'a> {
                         join(main_task, wait_for_stop()).await;
                     }
                 }
-                CentralOpMode::WifiStation(sta_config) => {
+                CentralOpMode::WifiStation(_sta_config) => {
                     // Initialize as Wifi Station Collector with WifiStationConfig
                     // 1. Connect to Wi-Fi network, etc.
                     // 2. Run DHCP, NTP sync if enabled in config, etc.
@@ -1225,34 +1253,22 @@ pub(crate) fn set_csi(controller: &mut WifiController, config: CsiConfig) {
 
 // Function to capture CSI info from callback and publish to channel
 fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
-    // Count every CSI report regardless of mode so `rx_count` / `rx_rate_hz`
-    // / `pps_rx` reflect actual radio CSI throughput. This is the only path
-    // that fires for sniffer / STA / ESP-NOW collection — counting here keeps
-    // the metric consistent across all node modes.
-    #[cfg(feature = "statistics")]
-    STATS.rx_count.fetch_add(1, Ordering::Relaxed);
-
-    // Single-atomic fast path: returns immediately in Listener mode and in
-    // Collector mode when no CSINodeClient subscriber exists. Building the
-    // CSIDataPacket and calling publish_immediate acquires CriticalSectionRawMutex
-    // and on `riscv32imc` every other atomic op also takes a critical section,
-    // so additional gate atomics in the hot ISR path delay the Embassy timer ISR.
+    // Single-atomic fast path: a relaxed load + branch. Listener nodes and
+    // any collector that has explicitly disabled the gate return here in a
+    // handful of cycles. CRITICAL: this MUST come before any read-modify-write
+    // atomic op — `AtomicU64::fetch_add` on `riscv32imc` (no native AMO)
+    // is implemented as a critical-section block which disables interrupts.
+    // Every CS we take in the WiFi callback delays the WiFi TX-completion
+    // ISR; doing one per CSI capture event measurably caps central TX rate.
     if !CSI_PUBLISH_ENABLED.load(Ordering::Relaxed) {
         return;
     }
 
-    // In async-print mode the consumer is a separate logger task that
-    // drains `CSI_PACKET`. If that channel is already full there's no
-    // point constructing the heavy ~700-byte CSIDataPacket — fast-drop
-    // and return. In sync mode this gate is irrelevant because the
-    // emission happens inline below (no channel involved), so we skip
-    // the CS-locked is_full check entirely.
-    #[cfg(feature = "async-print")]
-    if CSI_PACKET.is_full() {
-        #[cfg(feature = "statistics")]
-        STATS.rx_drop_count.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
+    // Count CSI reports we actually process. Reflects "throughput we acted
+    // on" rather than "raw radio CSI events" — matches pre-refactor semantics
+    // and keeps the cost out of the disabled/Listener fast path above.
+    #[cfg(feature = "statistics")]
+    STATS.rx_count.fetch_add(1, Ordering::Relaxed);
 
     let rssi = if info.rx_ctrl.rssi() > 127 {
         info.rx_ctrl.rssi() - 256
@@ -1348,6 +1364,7 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
     };
 
     #[cfg(feature = "statistics")]
+    #[allow(static_mut_refs)]
     {
         if seq_drop_detection_enabled() {
             static mut PEER_SEQ_TRACKER: LinearMap<[u8; 6], u16, MAX_TRACKED_PEERS> =
@@ -1374,31 +1391,28 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
         }
     }
 
-    // Sync mode: format and write the CSI line directly here, in the WiFi
-    // task callback context — exactly like ESP32-CSI-Tool's `_wifi_csi_cb`.
-    // No channel hop, no separate task, no executor scheduling round-trip.
-    // This is the architectural change that closes the gap to Hernandez:
-    // they format inline in the WiFi callback, we used to round-trip
-    // through CSI_PACKET → node_task → log_csi → format. With the
-    // async-print feature *off*, we now match Hernandez 1:1.
-    #[cfg(not(feature = "async-print"))]
-    {
-        crate::logging::logging::log_csi(csi_packet);
-        return;
+    // User callback hook (set via `set_csi_callback`). Runs inline in the
+    // WiFi task context — same context that formats and writes CSI lines —
+    // so it must be fast and non-blocking. Loaded with a single relaxed
+    // atomic op; null pointer means no callback is registered.
+    let cb_ptr = CSI_CALLBACK.load(Ordering::Relaxed);
+    if !cb_ptr.is_null() {
+        let cb: fn(&CSIDataPacket) =
+            unsafe { core::mem::transmute::<*mut (), fn(&CSIDataPacket)>(cb_ptr) };
+        cb(&csi_packet);
     }
 
-    // Async-print mode: enqueue for the spawned `logger_backend` task
-    // to drain. Channel had space when we checked is_full() above. The
-    // only way this try_send fails is if the consumer drained between
-    // then and now — harmless.
-    #[cfg(feature = "async-print")]
-    let _ = CSI_PACKET.try_send(csi_packet);
+    // Format and write (or, with `async-print`, enqueue to the logger task)
+    // directly here in the WiFi callback. `log_csi` consumes the packet and
+    // handles its own internal branching on the `async-print` feature.
+    crate::logging::logging::log_csi(csi_packet);
 }
 
 /// Internal task that handles collection-mode changes and rate statistics.
 ///
-/// Seq drop detection runs inside `capture_csi_info` (ISR context) so this task
-/// never drains `CSI_PACKET`, leaving the channel exclusively for `CSINodeClient`.
+/// Seq drop detection and the user callback both run inline in
+/// `capture_csi_info` (WiFi callback context); this task only drives stop
+/// signaling, mode-change resets, and per-second rate accounting.
 pub async fn run_process_csi_packet() {
     #[cfg(feature = "statistics")]
     STATS
@@ -1464,7 +1478,7 @@ pub async fn run_process_csi_packet() {
 }
 
 #[cfg(feature = "statistics")]
-use crate::logging::logging::{get_log_packet_drops, reset_global_log_drops};
+use crate::logging::logging::reset_global_log_drops;
 
 fn reconstruct_wifi_rate(rate: &WifiPhyRate) -> WifiPhyRate {
     match rate {
