@@ -19,3 +19,6 @@ rustc-ice-*
 # Visual Studio Code settings folder
 .vscode/
 specs/
+
+# Experimental Examples
+examples/*_exper.rs
