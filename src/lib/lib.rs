@@ -198,6 +198,8 @@
 
 #![no_std]
 
+#[cfg(feature = "async-print")]
+use embassy_time::with_timeout;
 use portable_atomic::AtomicI64;
 
 use embassy_futures::join::{join, join3};
