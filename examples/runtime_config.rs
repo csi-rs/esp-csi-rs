@@ -3,21 +3,18 @@
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_time::{with_timeout, Duration, Instant, Timer};
+use embassy_time::{with_timeout, Duration, Timer};
+use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
     config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
-    PeripheralOpMode,
 };
 use esp_csi_rs::{
-    CSINodeClient, CSINodeHardware, get_pps_rx, get_pps_tx, get_dropped_packets_rx, get_one_way_latency, get_two_way_latency, log_ln,
+    CSINodeClient, CSINodeHardware, get_pps_rx, get_pps_tx, get_dropped_packets_rx,
+    get_one_way_latency, get_two_way_latency, log_ln,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_println::println;
-use esp_radio::{
-    wifi::{ClientConfig, Interfaces, WifiController},
-    Controller,
-};
+use esp_radio::{wifi::WifiController, Controller};
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
@@ -43,9 +40,8 @@ macro_rules! mk_static {
     }};
 }
 
-async fn node_task_listener(mut client: &mut CSINodeClient) {
+async fn node_task_listener(client: &mut CSINodeClient) {
     log_ln!("Starting Listener Task");
-    let mut last_log_time = Instant::now();
 
     with_timeout(Duration::from_secs(10), async {
         loop {
@@ -57,7 +53,7 @@ async fn node_task_listener(mut client: &mut CSINodeClient) {
     client.send_stop().await;
 }
 
-async fn node_task_collector(mut client: &mut CSINodeClient) {
+async fn node_task_collector(client: &mut CSINodeClient) {
     log_ln!("Starting Collector Task");
 
     with_timeout(Duration::from_secs(10), async {
@@ -106,8 +102,8 @@ async fn main(spawner: Spawner) -> ! {
         esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
 
-    let mut config_radio = esp_radio::wifi::Config::default();
-    config_radio = config_radio.with_power_save_mode(esp_radio::wifi::PowerSaveMode::None);
+    let config_radio = esp_radio::wifi::Config::default()
+        .with_power_save_mode(esp_radio::wifi::PowerSaveMode::None);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
@@ -115,10 +111,10 @@ async fn main(spawner: Spawner) -> ! {
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let mut node_handle = CSINodeClient::new();
-    let mut csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
         esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(
-            (EspNowConfig::default()),
+            EspNowConfig::default(),
         )),
         CollectionMode::Collector,
         Some(CsiConfig::default()),

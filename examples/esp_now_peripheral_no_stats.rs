@@ -2,25 +2,15 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
-use embassy_time::{with_timeout, Duration, Instant, Timer};
+use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
     config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
-    PeripheralOpMode,
 };
-use esp_csi_rs::{
-    get_dropped_packets_rx, get_one_way_latency, get_pps_rx, get_pps_tx, get_total_rx_packets,
-    get_total_tx_packets, get_two_way_latency, log_ln,
-    CSINodeClient, CSINodeHardware,
-};
+use esp_csi_rs::{log_ln, CSINodeClient, CSINodeHardware};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_println::println;
-use esp_radio::{
-    wifi::{ClientConfig, Interfaces, WifiController},
-    Controller,
-};
+use esp_radio::{wifi::WifiController, Controller};
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
@@ -74,9 +64,8 @@ async fn main(spawner: Spawner) -> ! {
         esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
 
-    let mut config_radio = esp_radio::wifi::Config::default();
     // Raise Wi-Fi buffer budget for sustained ESP-NOW + CSI traffic.
-    config_radio = config_radio
+    let config_radio = esp_radio::wifi::Config::default()
         .with_power_save_mode(esp_radio::wifi::PowerSaveMode::None)
         .with_static_rx_buf_num(32)
         .with_dynamic_rx_buf_num(64)
@@ -93,11 +82,11 @@ async fn main(spawner: Spawner) -> ! {
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    let mut node_handle = CSINodeClient::new();
+    let _node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
         esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
-            (EspNowConfig::default()),
+            EspNowConfig::default(),
         )),
         CollectionMode::Listener,
         Some(CsiConfig::default()),

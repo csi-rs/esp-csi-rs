@@ -3,7 +3,7 @@
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
     config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
@@ -40,27 +40,20 @@ macro_rules! mk_static {
 }
 
 async fn node_task(_client: &mut CSINodeClient) {
-    let mut last_sample = Instant::now();
+    // Diagnostic counters: TX rate, TX-fail delta (WiFi-driver OOM / SendFailed
+    // per second), and heap-free. A monotonically declining heap-free that
+    // tracks a declining TX rate indicates esp-radio internal heap
+    // fragmentation from sustained dynamic-tx-buf churn.
     let mut last_tx_total = get_total_tx_packets();
-
     loop {
         Timer::after_secs(1).await;
-
-        let elapsed_us = last_sample.elapsed().as_micros() as u64;
         let tx_total = get_total_tx_packets();
-        let tx_rate_hz = if elapsed_us == 0 {
-            0
-        } else {
-            (tx_total.saturating_sub(last_tx_total) * 1_000_000 / elapsed_us) as u32
-        };
-
-        last_sample = Instant::now();
+        let tx_delta = tx_total.saturating_sub(last_tx_total);
         last_tx_total = tx_total;
-
         log_ln!(
             "TX: {}",
-            tx_rate_hz
-        )
+            tx_delta
+        );
     }
 }
 
@@ -101,7 +94,8 @@ async fn main(spawner: Spawner) -> ! {
         .with_power_save_mode(esp_radio::wifi::PowerSaveMode::None)
         .with_static_tx_buf_num(25)
         .with_dynamic_tx_buf_num(128)
-        .with_ampdu_tx_enable(false);
+        .with_ampdu_tx_enable(false).
+        with_tx_queue_size(32);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");

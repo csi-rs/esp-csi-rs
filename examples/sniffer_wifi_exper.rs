@@ -5,20 +5,13 @@ use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::LogMode;
-use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode,
-    PeripheralOpMode,
-};
+use esp_csi_rs::{config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode};
 use esp_csi_rs::{
     CSINodeClient, CSINodeHardware, get_total_rx_packets, log_ln, WifiSnifferConfig,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_println::println;
-use esp_radio::{
-    wifi::{ClientConfig, Interfaces, WifiController},
-    Controller,
-};
+use esp_radio::{wifi::WifiController, Controller};
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
@@ -110,7 +103,7 @@ async fn main(spawner: Spawner) -> ! {
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
         esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(
-            (WifiSnifferConfig::default()),
+            WifiSnifferConfig::default(),
         )),
         CollectionMode::Collector,
         Some(CsiConfig::default()),

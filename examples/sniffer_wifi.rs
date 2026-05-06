@@ -7,7 +7,9 @@ use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode};
-use esp_csi_rs::{log_ln, set_csi_callback, CSINodeClient, CSINodeHardware, WifiSnifferConfig};
+use esp_csi_rs::{
+    log_ln, set_csi_callback, CSINodeClient, CSINodeHardware, WifiSnifferConfig,
+};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::{
@@ -39,17 +41,17 @@ macro_rules! mk_static {
     }};
 }
 
-// Shared state written from the inline CSI callback. A typical sniffer
+// Shared state written by the inline CSI callback. A typical sniffer
 // application processes packets in this hook (e.g. compute statistics,
-// extract subcarriers, run a model) without spawning a polling task.
+// extract subcarriers, run a model) without spawning a consumer task.
 static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
-static CSI_CB_COUNT: AtomicU32 = AtomicU32::new(0);
+static CSI_PKT_COUNT: AtomicU32 = AtomicU32::new(0);
 
-// On-device CSI processing hook. Runs inline in the WiFi task — keep it
-// fast: no heap allocation, no locking, no blocking I/O.
+// On-device CSI processing hook. Runs inline in the WiFi callback — keep
+// it fast: no heap allocation, no locking, no blocking I/O.
 fn on_csi(packet: &CSIDataPacket) {
     LATEST_RSSI.store(packet.rssi as i32, Ordering::Relaxed);
-    CSI_CB_COUNT.fetch_add(1, Ordering::Relaxed);
+    CSI_PKT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 #[esp_rtos::main]
@@ -102,14 +104,14 @@ async fn main(spawner: Spawner) -> ! {
     node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
 
     // Register the on-device CSI processing hook before starting the node.
-    // Each sniffed CSI report invokes `on_csi` inline in the WiFi task.
+    // Each sniffed CSI report invokes `on_csi` inline in the WiFi callback.
     set_csi_callback(on_csi);
 
     node.run_duration(1000, &mut node_handle).await;
 
     log_ln!(
-        "Sniffer stopped. Total CSI callback invocations: {}, Last observed RSSI: {}",
-        CSI_CB_COUNT.load(Ordering::Relaxed),
+        "Sniffer stopped. Total CSI packets: {}, Last observed RSSI: {}",
+        CSI_PKT_COUNT.load(Ordering::Relaxed),
         LATEST_RSSI.load(Ordering::Relaxed),
     );
 

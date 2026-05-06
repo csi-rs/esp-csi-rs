@@ -43,24 +43,24 @@ macro_rules! mk_static {
     }};
 }
 
-// Shared state written from the inline CSI callback and read by `node_task`.
+// Shared state written by the inline CSI callback and read by `stats_task`.
 static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
-static CSI_CB_COUNT: AtomicU32 = AtomicU32::new(0);
+static CSI_PKT_COUNT: AtomicU32 = AtomicU32::new(0);
 
-// On-device CSI processing hook. Runs inline in the WiFi task — keep it
+// On-device CSI processing hook. Runs inline in the WiFi callback — keep it
 // fast: no heap allocation, no locking, no blocking I/O. For heavier work,
 // copy what you need out of `packet` and post it to your own task.
 fn on_csi(packet: &CSIDataPacket) {
     LATEST_RSSI.store(packet.rssi as i32, Ordering::Relaxed);
-    CSI_CB_COUNT.fetch_add(1, Ordering::Relaxed);
+    CSI_PKT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
-async fn node_task(client: &mut CSINodeClient) {
+async fn stats_task() {
     with_timeout(Duration::from_secs(1000), async {
         loop {
             Timer::after_secs(1).await;
             log_ln!(
-                "RX PPS(avg): {}, TX PPS(avg): {}, RX Rate(Hz): {}, TX Rate(Hz): {}, RX Dropped Packets: {}, One Way Latency: {}, Two Way Latency: {}, Callback Invocations: {}, Latest RSSI: {}",
+                "RX PPS(avg): {}, TX PPS(avg): {}, RX Rate(Hz): {}, TX Rate(Hz): {}, RX Dropped Packets: {}, One Way Latency: {}, Two Way Latency: {}, CSI Packets: {}, Latest RSSI: {}",
                 get_pps_rx(),
                 get_pps_tx(),
                 get_rx_rate_hz(),
@@ -68,14 +68,13 @@ async fn node_task(client: &mut CSINodeClient) {
                 get_dropped_packets_rx(),
                 get_one_way_latency(),
                 get_two_way_latency(),
-                CSI_CB_COUNT.load(Ordering::Relaxed),
+                CSI_PKT_COUNT.load(Ordering::Relaxed),
                 LATEST_RSSI.load(Ordering::Relaxed),
             )
         }
     })
     .await
     .unwrap_err();
-    client.send_stop().await;
 }
 
 #[esp_rtos::main]
@@ -141,12 +140,13 @@ async fn main(spawner: Spawner) -> ! {
     #[cfg(not(feature = "esp32c6"))]
     node.set_protocol(esp_radio::wifi::Protocol::P802D11BGN);
 
-    // Register the on-device CSI processing hook before starting the node.
-    // `set_csi_callback` also enables the CSI publish gate, so per-packet
-    // logging continues to work alongside the callback.
+    // Register the on-device CSI processing hook. Runs inline in the WiFi
+    // callback for every CSI packet — also implicitly enables the publish
+    // gate so the callback fires.
     set_csi_callback(on_csi);
 
-    join(node.run(), node_task(&mut node_handle)).await;
+    let _ = &mut node_handle;
+    join(node.run(), stats_task()).await;
 
     loop {
         log_ln!("Hello world!");

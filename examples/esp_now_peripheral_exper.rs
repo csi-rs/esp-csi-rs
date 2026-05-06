@@ -3,20 +3,15 @@
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_time::{with_timeout, Duration, Instant, Timer};
+use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
     config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
-    PeripheralOpMode,
 };
-use esp_csi_rs::{get_total_rx_packets, log_ln, CSINodeClient, CSINodeHardware};
+use esp_csi_rs::{CSINodeClient, CSINodeHardware, get_total_rx_packets, log_ln, set_csi_logging_enabled};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_println::println;
-use esp_radio::{
-    wifi::{ClientConfig, Interfaces, WifiController},
-    Controller,
-};
+use esp_radio::{wifi::WifiController, Controller};
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
@@ -42,25 +37,17 @@ macro_rules! mk_static {
     }};
 }
 
-async fn node_task(client: &mut CSINodeClient) {
-    let mut last_sample = Instant::now();
+async fn node_task(_client: &mut CSINodeClient) {
+    // `get_total_rx_packets` increments unconditionally inside
+    // `capture_csi_info` before the publish gate, so it counts raw radio
+    // events even with `set_csi_logging_enabled(false)`.
     let mut last_rx_total = get_total_rx_packets();
-
     loop {
         Timer::after_secs(1).await;
-
-        let elapsed_us = last_sample.elapsed().as_micros() as u64;
         let rx_total = get_total_rx_packets();
-        let rx_rate_hz = if elapsed_us == 0 {
-            0
-        } else {
-            (rx_total.saturating_sub(last_rx_total) * 1_000_000 / elapsed_us) as u32
-        };
-
-        last_sample = Instant::now();
+        let rx_delta = rx_total.saturating_sub(last_rx_total);
         last_rx_total = rx_total;
-
-        log_ln!("RX: {}", rx_rate_hz)
+        log_ln!("RX: {}", rx_delta);
     }
 }
 
@@ -71,6 +58,7 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     init_logger(spawner, LogMode::Text);
+    set_csi_logging_enabled(false);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98440);
 
@@ -92,14 +80,13 @@ async fn main(spawner: Spawner) -> ! {
         esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
 
-    let mut config_radio = esp_radio::wifi::Config::default();
     // Raise Wi-Fi buffer budget for sustained ESP-NOW + CSI traffic.
-    config_radio = config_radio
+    let config_radio = esp_radio::wifi::Config::default()
         .with_power_save_mode(esp_radio::wifi::PowerSaveMode::None)
-        .with_static_rx_buf_num(32)
+        .with_static_rx_buf_num(25)
         .with_dynamic_rx_buf_num(128)
-        .with_rx_queue_size(32).
-        with_ampdu_rx_enable(false);
+        .with_ampdu_rx_enable(false)
+        .with_rx_queue_size(32);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
@@ -110,7 +97,7 @@ async fn main(spawner: Spawner) -> ! {
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
         esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
-            (EspNowConfig::default()),
+            EspNowConfig::default().with_channel(1),
         )),
         CollectionMode::Listener,
         Some(CsiConfig::default()),
@@ -118,7 +105,6 @@ async fn main(spawner: Spawner) -> ! {
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::P802D11BGN);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
     node.set_tx_enabled(false);
 
     join(node.run(), node_task(&mut node_handle)).await;

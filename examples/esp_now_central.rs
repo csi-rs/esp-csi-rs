@@ -1,9 +1,6 @@
 #![no_std]
 #![no_main]
 
-mod esp_now_peripheral_exper;
-mod esp_now_central_exper;
-
 use portable_atomic::{AtomicI32, AtomicU32, Ordering};
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
@@ -47,18 +44,18 @@ macro_rules! mk_static {
     }};
 }
 
-// Shared state written from the inline CSI callback and read by `node_task`.
+// Shared state written by the inline CSI callback and read by `stats_task`.
 static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
-static CSI_CB_COUNT: AtomicU32 = AtomicU32::new(0);
+static CSI_PKT_COUNT: AtomicU32 = AtomicU32::new(0);
 
-// On-device CSI processing hook. Runs inline in the WiFi task — keep it
-// fast: no heap allocation, no locking, no blocking I/O.
+// On-device CSI processing hook. Runs inline in the WiFi callback — keep
+// it fast: no heap allocation, no locking, no blocking I/O.
 fn on_csi(packet: &CSIDataPacket) {
     LATEST_RSSI.store(packet.rssi as i32, Ordering::Relaxed);
-    CSI_CB_COUNT.fetch_add(1, Ordering::Relaxed);
+    CSI_PKT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
-async fn node_task(_client: &mut CSINodeClient) {
+async fn stats_task() {
     let mut last_sample = Instant::now();
     let mut last_rx_total = get_total_rx_packets();
     let mut last_tx_total = get_total_tx_packets();
@@ -85,7 +82,7 @@ async fn node_task(_client: &mut CSINodeClient) {
         last_tx_total = tx_total;
 
         log_ln!(
-                "RX PPS(avg): {}, TX PPS(avg): {}, RX Hz(inst): {}, TX Hz(inst): {}, RX Total: {}, TX Total: {}, RX Dropped Packets: {}, One Way Latency: {}, Two Way Latency: {}, Callback Invocations: {}, Latest RSSI: {}",
+                "RX PPS(avg): {}, TX PPS(avg): {}, RX Hz(inst): {}, TX Hz(inst): {}, RX Total: {}, TX Total: {}, RX Dropped Packets: {}, One Way Latency: {}, Two Way Latency: {}, CSI Packets: {}, Latest RSSI: {}",
                 get_pps_rx(),
                 get_pps_tx(),
                 rx_rate_hz,
@@ -95,7 +92,7 @@ async fn node_task(_client: &mut CSINodeClient) {
                 get_dropped_packets_rx(),
                 get_one_way_latency(),
                 get_two_way_latency(),
-                CSI_CB_COUNT.load(Ordering::Relaxed),
+                CSI_PKT_COUNT.load(Ordering::Relaxed),
                 LATEST_RSSI.load(Ordering::Relaxed),
             )
     }
@@ -146,10 +143,9 @@ async fn main(spawner: Spawner) -> ! {
     node.set_protocol(esp_radio::wifi::Protocol::P802D11BGN);
     node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
 
-    // Register the on-device CSI processing hook before starting the node.
     set_csi_callback(on_csi);
-
-    join(node.run(), node_task(&mut node_handle)).await;
+    let _ = &mut node_handle;
+    join(node.run(), stats_task()).await;
 
     loop {
         log_ln!("Hello world!");
