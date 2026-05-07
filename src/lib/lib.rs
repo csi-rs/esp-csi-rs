@@ -210,9 +210,8 @@ use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::{ClientConfig, CsiConfig, Interfaces, Protocol, WifiController};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-#[cfg(feature = "async-print")]
-use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
+use embassy_sync::waitqueue::AtomicWaker;
 
 use heapless::{LinearMap, Vec};
 extern crate alloc;
@@ -232,18 +231,23 @@ use crate::config::CsiConfig as CsiConfiguration;
 use crate::csi::{CSIDataPacket, RxCSIFmt};
 use crate::peripheral::esp_now::run_esp_now_peripheral;
 
-// `CSI_PACKET` (and its capacity) is only used on the async-print path —
-// in sync mode the WiFi callback writes inline via `log_csi`. Gate the
-// constant to avoid a dead-code warning in the default sync build.
-#[cfg(feature = "async-print")]
-const PROC_CSI_CH_CAPACITY: usize = 32;
 const MAX_TRACKED_PEERS: usize = 16;
 
-// Single SPSC channel: ISR (capture_csi_info) is the only producer,
-// CSINodeClient is the only consumer. Only used on the async-print path.
-#[cfg(feature = "async-print")]
-static CSI_PACKET: Channel<CriticalSectionRawMutex, CSIDataPacket, PROC_CSI_CH_CAPACITY> =
-    Channel::new();
+/// Lock-free 32-slot MPMC ring used by the WiFi callback to deliver
+/// captured `CSIDataPacket`s to user code via
+/// [`CSINodeClient::next_csi_packet`]. Mirrors the `esp_now_pool`
+/// pattern (`src/lib/esp_now_pool.rs`): the producer is the WiFi-task
+/// callback, the consumer is one async task, and the queue is
+/// **lock-free** — no critical section on enqueue, so the WiFi-task
+/// hot path is never delayed.
+///
+/// 32 × `sizeof(CSIDataPacket)` ≈ 20 KB BSS. Drop-on-full; drops are
+/// counted via `STATS.rx_drop_count`.
+static CSI_QUEUE: heapless::mpmc::Q32<CSIDataPacket> = heapless::mpmc::Q32::new();
+/// Single-slot waker for the CSI consumer. Registered by
+/// [`CSINodeClient::next_csi_packet`] and woken from the WiFi callback
+/// after a successful `CSI_QUEUE.enqueue`.
+static CSI_WAKER: AtomicWaker = AtomicWaker::new();
 
 static IS_COLLECTOR: AtomicBool = AtomicBool::new(false);
 // CSI publish gate. The WiFi callback checks this in a single relaxed load
@@ -257,17 +261,51 @@ static IS_COLLECTOR: AtomicBool = AtomicBool::new(false);
 static CSI_PUBLISH_ENABLED: AtomicBool = AtomicBool::new(false);
 static COLLECTION_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-/// User CSI callback registered via [`set_csi_callback`]. Stored as a raw
-/// `fn` pointer in an `AtomicPtr` so the WiFi callback can load it with a
-/// single relaxed atomic op without locking. A null pointer means no
-/// callback is registered.
+/// CSI delivery mode — single-atomic dispatch in the WiFi callback.
+///
+/// Per-packet, the callback loads `CSI_DELIVERY_MODE` once and branches
+/// on it. Exactly one of the user-facing delivery paths runs, so users
+/// pay only for what they asked for:
+/// - `Off`: nothing past the publish gate (apart from seq-drop tracking).
+/// - `Callback`: dispatch to the `fn` stored in `CSI_CALLBACK` with a
+///   `&CSIDataPacket` borrow. Lowest latency, runs on the WiFi-task
+///   hot path. **Picked by [`set_csi_callback`].**
+/// - `Async`: move the packet into the lock-free `CSI_QUEUE` and wake
+///   the consumer registered via [`CSI_WAKER`]. Doesn't block the WiFi
+///   task. **Picked lazily by the first
+///   [`CSINodeClient::next_csi_packet`].`**
+///
+/// The two are **mutually exclusive** so the WiFi callback never pays
+/// for both a callback dispatch and a 640 B memcpy on the same packet.
+/// Toggle explicitly with [`set_csi_delivery_mode`].
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CsiDeliveryMode {
+    /// No user delivery. Inline `log_csi` may still run if its gate is
+    /// open (controlled by [`set_csi_logging_enabled`]).
+    Off = 0,
+    /// Dispatch to the `fn` registered with [`set_csi_callback`] inline
+    /// in the WiFi callback context.
+    Callback = 1,
+    /// Move the packet into the lock-free `CSI_QUEUE` and wake the
+    /// async consumer awaiting [`CSINodeClient::next_csi_packet`].
+    Async = 2,
+}
+
+/// Single-atomic dispatch select for the WiFi callback. Read once per
+/// CSI event in `capture_csi_info`. See [`CsiDeliveryMode`] for the
+/// branch semantics.
+static CSI_DELIVERY_MODE: portable_atomic::AtomicU8 = portable_atomic::AtomicU8::new(0);
+
+/// User CSI callback registered via [`set_csi_callback`]. Loaded only
+/// when `CSI_DELIVERY_MODE == Callback`, so callers in `Off` / `Async`
+/// modes don't pay for an extra atomic load.
 static CSI_CALLBACK: core::sync::atomic::AtomicPtr<()> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
-/// Inline-logging gate. Independent of the master publish gate
-/// ([`CSI_PUBLISH_ENABLED`]) so a registered [`set_csi_callback`] hook
-/// can fire while the per-packet UART/JTAG `log_csi` path is suppressed.
-/// Toggled by [`set_csi_logging_enabled`].
+/// Inline-logging gate. Independent of [`CSI_DELIVERY_MODE`] so the
+/// per-packet UART/JTAG `log_csi` path is controlled separately
+/// (toggle with [`set_csi_logging_enabled`]).
 static CSI_INLINE_LOG_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Enable or disable inline CSI **logging** (per-packet UART/JTAG output).
@@ -306,6 +344,35 @@ pub fn csi_logging_enabled() -> bool {
     CSI_INLINE_LOG_ENABLED.load(Ordering::Relaxed)
 }
 
+/// Set the active CSI delivery mode (callback / async / off).
+///
+/// The WiFi callback dispatches to **exactly one** path per packet —
+/// callers pay no overhead for the path they didn't pick. Switching
+/// with this fn is a single relaxed atomic store; the next CSI event
+/// follows the new mode.
+///
+/// You normally don't call this directly:
+/// - [`set_csi_callback`] sets the mode to [`CsiDeliveryMode::Callback`].
+/// - First await of [`CSINodeClient::next_csi_packet`] sets it to
+///   [`CsiDeliveryMode::Async`].
+/// - [`clear_csi_callback`] sets it to [`CsiDeliveryMode::Off`].
+///
+/// Use this fn when you want to **switch** between paths at runtime
+/// without re-registering, or to fully disable user delivery while
+/// leaving inline logging running.
+pub fn set_csi_delivery_mode(mode: CsiDeliveryMode) {
+    CSI_DELIVERY_MODE.store(mode as u8, Ordering::Release);
+}
+
+/// Returns the active CSI delivery mode.
+pub fn csi_delivery_mode() -> CsiDeliveryMode {
+    match CSI_DELIVERY_MODE.load(Ordering::Relaxed) {
+        1 => CsiDeliveryMode::Callback,
+        2 => CsiDeliveryMode::Async,
+        _ => CsiDeliveryMode::Off,
+    }
+}
+
 /// Register a user callback invoked inline for every captured CSI packet.
 ///
 /// The callback runs in the WiFi task context (the same context that
@@ -319,29 +386,32 @@ pub fn csi_logging_enabled() -> bool {
 /// format/write work. For heavier processing, copy what you need out of
 /// the packet and post to your own task.
 ///
-/// Registering opens only the master publish gate so the callback can
-/// fire — it does **not** touch the inline-logging gate
-/// ([`set_csi_logging_enabled`]). That decoupling lets you process CSI
-/// inline without paying for the per-packet UART/JTAG flood: register
-/// the callback then call `set_csi_logging_enabled(false)` (or call them
-/// in either order — they don't interfere).
+/// Registering opens the master publish gate and switches the
+/// delivery mode to [`CsiDeliveryMode::Callback`]. Any prior async
+/// drain mode is replaced — the WiFi callback only runs the inline
+/// callback path from this point. The inline-logging gate
+/// ([`set_csi_logging_enabled`]) is left untouched so `init_logger`'s
+/// UART output (or its absence) is preserved.
 ///
-/// Call [`clear_csi_callback`] to remove the hook (gates are left
-/// untouched).
+/// Call [`clear_csi_callback`] to remove the hook and return to
+/// [`CsiDeliveryMode::Off`].
 pub fn set_csi_callback(cb: fn(&CSIDataPacket)) {
+    // Store the fn pointer first so the WiFi callback never sees the
+    // mode flipped to `Callback` while `CSI_CALLBACK` is still null.
     CSI_CALLBACK.store(cb as *mut (), core::sync::atomic::Ordering::Release);
-    // Open only the master publish gate — leave the inline-logging gate
-    // alone so a prior `set_csi_logging_enabled(false)` keeps suppressing
-    // UART output while still letting the callback fire.
+    CSI_DELIVERY_MODE.store(CsiDeliveryMode::Callback as u8, Ordering::Release);
     CSI_PUBLISH_ENABLED.store(true, Ordering::Release);
 }
 
-/// Remove the user CSI callback registered via [`set_csi_callback`].
+/// Remove the user CSI callback registered via [`set_csi_callback`]
+/// and switch to [`CsiDeliveryMode::Off`].
 ///
-/// Subsequent CSI packets will not invoke any user callback. The publish
-/// gate is left untouched — call `set_csi_logging_enabled(false)` if you
-/// also want to suppress logging output.
+/// The publish gate and inline-logging gate are left untouched — call
+/// `set_csi_logging_enabled(false)` if you also want to suppress
+/// logging output, or `set_csi_delivery_mode(CsiDeliveryMode::Async)`
+/// to swap to async drain without re-driving lazy initialization.
 pub fn clear_csi_callback() {
+    CSI_DELIVERY_MODE.store(CsiDeliveryMode::Off as u8, Ordering::Release);
     CSI_CALLBACK.store(core::ptr::null_mut(), core::sync::atomic::Ordering::Release);
 }
 
@@ -651,29 +721,68 @@ impl CSINodeClient {
         Self { _private: () }
     }
 
-    /// Wait for the next CSI packet.
+    /// Await the next CSI packet captured by the WiFi callback.
     ///
-    /// Only available with the `async-print` feature: in sync mode the WiFi
-    /// callback formats and writes CSI lines directly without enqueueing,
-    /// so there is no channel to drain.
-    #[cfg(feature = "async-print")]
-    pub async fn get_csi_data(&mut self) -> CSIDataPacket {
-        // Lazily open the publish gate on first wait so the WiFi callback
-        // starts enqueueing. Idempotent for subsequent calls.
-        set_csi_logging_enabled(true);
-        CSI_PACKET.receive().await
+    /// Drains the lock-free `CSI_QUEUE`. Available in **both** sync and
+    /// `async-print` modes — same API, same delivery path. Mirrors
+    /// `crate::esp_now_pool::receive_async`: dequeue → register waker
+    /// → re-check (closes the lost-wakeup window).
+    ///
+    /// The first call lazily switches [`CsiDeliveryMode`] to
+    /// [`CsiDeliveryMode::Async`] and opens the master publish gate so
+    /// the WiFi callback starts enqueueing. **This replaces any prior
+    /// `set_csi_callback`** — the two delivery paths are mutually
+    /// exclusive so the WiFi callback only ever runs one of them per
+    /// packet (no double-dispatch overhead).
+    ///
+    /// **Single consumer**: the underlying `AtomicWaker` is single-slot.
+    /// Awaiting `next_csi_packet` from two different tasks at once will
+    /// cause one of them to miss wake-ups — register exactly one
+    /// drainer task per node.
+    pub async fn next_csi_packet(&mut self) -> CSIDataPacket {
+        // Conservative lazy init: only flip into `Async` mode if no
+        // delivery path is currently active (`Off`). If the user has
+        // already set `Callback` mode, we don't disrupt it — the
+        // drainer just parks on the waker until the user explicitly
+        // switches via `set_csi_delivery_mode(CsiDeliveryMode::Async)`.
+        // This lets the two APIs coexist as runtime-toggleable choices
+        // without one clobbering the other.
+        if CSI_DELIVERY_MODE.load(Ordering::Relaxed) == CsiDeliveryMode::Off as u8 {
+            CSI_DELIVERY_MODE.store(CsiDeliveryMode::Async as u8, Ordering::Release);
+            CSI_PUBLISH_ENABLED.store(true, Ordering::Release);
+        }
+        core::future::poll_fn(|cx| {
+            if let Some(p) = CSI_QUEUE.dequeue() {
+                return core::task::Poll::Ready(p);
+            }
+            CSI_WAKER.register(cx.waker());
+            // Re-check after register to close the lost-wakeup window:
+            // the WiFi callback could have enqueued + woken between our
+            // first dequeue and `register` if we hadn't checked again.
+            if let Some(p) = CSI_QUEUE.dequeue() {
+                core::task::Poll::Ready(p)
+            } else {
+                core::task::Poll::Pending
+            }
+        })
+        .await
     }
 
-    /// Receive and print CSI data with metadata (uses crate logging).
-    ///
-    /// Only available with the `async-print` feature: in sync mode the CSI
-    /// line is emitted directly from the WiFi callback (`capture_csi_info`)
-    /// — there is nothing for user code to drive. Use
-    /// `set_csi_logging_enabled(false)` to suppress sync-mode output.
-    #[cfg(feature = "async-print")]
+    /// Back-compat alias for [`Self::next_csi_packet`]. Older code paths
+    /// (and the `async-print` feature) referred to this name.
+    pub async fn get_csi_data(&mut self) -> CSIDataPacket {
+        self.next_csi_packet().await
+    }
+
+    /// Receive the next CSI packet and emit it via the crate logging
+    /// backend (`log_csi`). Convenience wrapper for "drain + log to
+    /// UART/JTAG" loops:
+    /// ```ignore
+    /// loop { client.print_csi_w_metadata().await; }
+    /// ```
     pub async fn print_csi_w_metadata(&mut self) {
-        let packet = self.get_csi_data().await;
-        packet.print_csi_w_metadata();
+        let packet = self.next_csi_packet().await;
+        crate::logging::logging::log_csi(packet);
         embassy_futures::yield_now().await;
     }
 
@@ -1401,18 +1510,11 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
         return;
     }
 
-    // In async-print mode the consumer is a separate logger task that
-    // drains `CSI_PACKET`. If that channel is already full there's no
-    // point constructing the heavy ~700-byte CSIDataPacket — fast-drop
-    // and return. In sync mode this gate is irrelevant because the
-    // emission happens inline below (no channel involved), so we skip
-    // the CS-locked is_full check entirely.
-    #[cfg(feature = "async-print")]
-    if CSI_PACKET.is_full() {
-        #[cfg(feature = "statistics")]
-        STATS.rx_drop_count.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
+    // No CS-locked early-drop pre-check: the lock-free `CSI_QUEUE`
+    // returns `Err` from `enqueue` when full, so we do drop accounting at
+    // the enqueue site below. The 640 B `CSIDataPacket` build still has
+    // to run unconditionally — there's no cheaper way to know if the
+    // packet is interesting until it's parsed.
 
     let rssi = if info.rx_ctrl.rssi() > 127 {
         info.rx_ctrl.rssi() - 256
@@ -1535,39 +1637,44 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
         }
     }
 
-    // User callback hook (set via `set_csi_callback`). Runs inline in the
-    // WiFi task context — same context that formats and writes CSI lines —
-    // so it must be fast and non-blocking. Loaded with a single relaxed
-    // atomic op; null pointer means no callback is registered.
-    let cb_ptr = CSI_CALLBACK.load(core::sync::atomic::Ordering::Relaxed);
-    if !cb_ptr.is_null() {
-        let cb: fn(&CSIDataPacket) = unsafe {
-            core::mem::transmute::<*mut (), fn(&CSIDataPacket)>(cb_ptr)
-        };
-        cb(&csi_packet);
+    // Single-atomic delivery dispatch. One relaxed load, one branch.
+    // Exactly one of Callback / Async / Off runs — the WiFi callback
+    // never pays for both a fn-pointer dispatch and a 640 B memcpy on
+    // the same packet. See `CsiDeliveryMode` for semantics.
+    match CSI_DELIVERY_MODE.load(Ordering::Relaxed) {
+        m if m == CsiDeliveryMode::Callback as u8 => {
+            // Inline callback: zero-copy `&CSIDataPacket` borrow.
+            let cb_ptr = CSI_CALLBACK.load(core::sync::atomic::Ordering::Relaxed);
+            if !cb_ptr.is_null() {
+                let cb: fn(&CSIDataPacket) =
+                    unsafe { core::mem::transmute::<*mut (), fn(&CSIDataPacket)>(cb_ptr) };
+                cb(&csi_packet);
+            }
+            return;
+        }
+        m if m == CsiDeliveryMode::Async as u8 => {
+            // Lock-free MPMC enqueue + wake. No critical section, no
+            // IRQ disable — the WiFi-task hot path is never blocked by
+            // the user's async drainer.
+            if CSI_QUEUE.enqueue(csi_packet).is_err() {
+                #[cfg(feature = "statistics")]
+                STATS.rx_drop_count.fetch_add(1, Ordering::Relaxed);
+            } else {
+                CSI_WAKER.wake();
+            }
+            return;
+        }
+        _ => {}
     }
 
-    // Sync mode: format and write the CSI line directly here, in the WiFi
-    // task callback context — exactly like ESP32-CSI-Tool's `_wifi_csi_cb`.
-    // Gated on `CSI_INLINE_LOG_ENABLED` so a registered `set_csi_callback`
-    // hook can fire without paying for the per-packet UART/JTAG flood.
-    #[cfg(not(feature = "async-print"))]
-    {
-        if CSI_INLINE_LOG_ENABLED.load(Ordering::Relaxed) {
-            crate::logging::logging::log_csi(csi_packet);
-        }
-        return;
-    }
-
-    // Async-print mode: enqueue for the spawned `logger_backend` task
-    // to drain. Same gate so a callback-only configuration suppresses
-    // UART output without disabling the publish gate that delivers to
-    // the user callback.
-    #[cfg(feature = "async-print")]
-    {
-        if CSI_INLINE_LOG_ENABLED.load(Ordering::Relaxed) {
-            let _ = CSI_PACKET.try_send(csi_packet);
-        }
+    // Off mode: fall through to the inline-log path. In sync mode
+    // `log_csi` writes the CSI line directly to UART/JTAG here in the
+    // WiFi callback (matches ESP32-CSI-Tool's `_wifi_csi_cb`); in
+    // async-print mode it enqueues to the logger backend's own channel
+    // (`logging::logging::CSI_CHANNEL`, drained by `logger_backend`).
+    // Either way the packet is consumed.
+    if CSI_INLINE_LOG_ENABLED.load(Ordering::Relaxed) {
+        crate::logging::logging::log_csi(csi_packet);
     }
 }
 
