@@ -82,11 +82,8 @@ jobs:
           done <<< "${chips}"
 
           all_matrix=$(printf '%s\n' "${entries[@]}" | jq -s -c '.')
-          pr_matrix=$(jq -c '[ .[] | select(.chip == "esp32" or .chip == "esp32c3") ]' <<< "${all_matrix}")
-
-          if [[ "${pr_matrix}" == "[]" ]]; then
-            pr_matrix="${all_matrix}"
-          fi
+          # Run every chip on PRs as well as pushes — keeps coverage uniform.
+          pr_matrix="${all_matrix}"
 
           echo "all_matrix=${all_matrix}" >> "$GITHUB_OUTPUT"
           echo "pr_matrix=${pr_matrix}" >> "$GITHUB_OUTPUT"

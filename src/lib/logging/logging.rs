@@ -548,30 +548,30 @@ pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
                 let res = unsafe { (USB_DEVICE_INT_RAW.read_volatile() & SOF_INT_MASK) != 0 };
                 if res == true {
                     let driver = LogOutput::new_jtag(periphs);
-                    spawner.spawn(logger_backend(driver)).unwrap();
+                    spawner.spawn(logger_backend(driver).unwrap());
                 } else {
                     let driver = LogOutput::new_uart(periphs);
-                    spawner.spawn(logger_backend(driver)).unwrap();
+                    spawner.spawn(logger_backend(driver).unwrap());
                 }
             }
             #[cfg(feature = "esp32")]
             {
                 let periphs = unsafe { Peripherals::steal() };
                 let driver = LogOutput::new_uart(periphs);
-                spawner.spawn(logger_backend(driver)).unwrap();
+                spawner.spawn(logger_backend(driver).unwrap());
             }
         }
         #[cfg(all(feature = "jtag-serial", not(feature = "esp32")))]
         {
             let periphs = unsafe { Peripherals::steal() };
             let driver = LogOutput::new_jtag(periphs);
-            spawner.spawn(logger_backend(driver)).unwrap();
+            spawner.spawn(logger_backend(driver).unwrap());
         }
         #[cfg(feature = "uart")]
         {
             let periphs = unsafe { Peripherals::steal() };
             let driver = LogOutput::new_uart(periphs);
-            spawner.spawn(logger_backend(driver)).unwrap();
+            spawner.spawn(logger_backend(driver).unwrap());
         }
 
         #[cfg(not(any(feature = "uart", feature = "jtag-serial", feature = "auto")))]
