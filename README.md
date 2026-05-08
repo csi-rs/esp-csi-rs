@@ -87,12 +87,33 @@ esp-generate --chip=esp32c3 your-project
 Add the crate to your `Cargo.toml`. At a minimum, you would need to specify the device and the desired logging framework (`println` or `defmt`):
 
 ```toml
+[dependencies]
 esp-csi-rs = { version = "0.5.2", features = ["esp32c3", "println"] }
 ```
 
 The crate uses Rust **edition 2024** and tracks the latest Espressif Rust ecosystem (`esp-hal` 1.1, `esp-radio` 0.18, `esp-rtos` 0.3).
 
 > ‼️ The selected logging framework needs to align with the selected framework for the `esp-backtrace` dependency. The `defmt` feature already pulls the matching `esp-backtrace/defmt`, `esp-hal/defmt`, and `esp-radio/defmt` flags for you.
+
+### Using `defmt` from your application
+
+When enabling the `defmt` feature, the user app needs three additional things on top of the crate dep:
+
+1. **Add `defmt` as a direct dependency** in your own `Cargo.toml`. Our `log_ln!` macro expands to `defmt::println!(...)` at the call site, so the `defmt` crate must be resolvable from your code. Plain `defmt = "1.0"` is enough — do **not** add `defmt-rtt` or any other logger; we already provide one via `esp-println/defmt-espflash`.
+2. **Add `-Tdefmt.x` to your linker flags** in your own `.cargo/config.toml` (Cargo doesn't propagate linker args from dependencies' build scripts):
+   ```toml
+   [target.'cfg(target_arch = "riscv32")']
+   rustflags = ["-C", "link-arg=-Tlinkall.x", "-C", "link-arg=-Tdefmt.x"]
+   ```
+3. **Decode with espflash**: `espflash flash --monitor --log-format defmt <elf>`. No probe-rs / J-Link needed — frames stream over the same USB-Serial-JTAG channel as `println!`.
+
+```toml
+[dependencies]
+esp-csi-rs = { version = "0.5.2", features = ["esp32c3", "defmt"] }
+defmt = "1.0"
+```
+
+If you're cribbing from this repo's examples, you don't need any of the above — the in-repo `.cargo/config.toml` aliases (`cargo esp32c3-defmt`, etc.) and `build.rs` handle all three steps automatically.
 
 ## Usage Examples
 
