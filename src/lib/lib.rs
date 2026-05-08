@@ -632,13 +632,34 @@ impl Default for WifiSnifferConfig {
 }
 
 impl WifiSnifferConfig {
-    /// Override the 2.4 GHz channel (1–14) the sniffer locks to.
+    /// Override the channel the sniffer locks to.
+    ///
+    /// Must be a valid IEEE 802.11 **primary** channel number — pass the
+    /// primary, not the wider-channel center notation that routers
+    /// commonly display:
+    ///
+    /// - **2.4 GHz**: `1`–`14`
+    /// - **5 GHz**: `36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112,
+    ///   116, 120, 124, 128, 132, 136, 140, 144, 149, 153, 157, 161, 165`
+    ///   (regulatory-domain dependent — some restricted by `country_info`)
+    ///
+    /// Center-channel labels (`38, 46, ...` for HT40; `42, 58, 106, ...`
+    /// for VHT80; `50, 114` for VHT160; `154` for the 153/157 HT40 pair)
+    /// are **not** accepted here — `esp_wifi_set_channel` panics with
+    /// `InvalidArguments`. For example, a router showing "channel 154"
+    /// is using primary `153` (or `157`); pass that primary and the chip
+    /// will sniff the full 40 MHz block automatically per 802.11.
+    ///
+    /// On dual-band chips (currently ESP32-C5), the band is auto-selected
+    /// from the channel number — channels `>= 36` switch the radio to
+    /// `BandMode::_5G`, otherwise `BandMode::_2_4G`. On 2.4-GHz-only
+    /// chips, passing any 5 GHz channel will fail at runtime.
     pub fn with_channel(mut self, channel: u8) -> Self {
         self.channel = channel;
         self
     }
 
-    /// Configured 2.4 GHz channel.
+    /// Configured channel (2.4 GHz: 1–14, 5 GHz: 36–165).
     pub fn channel(&self) -> u8 {
         self.channel
     }
