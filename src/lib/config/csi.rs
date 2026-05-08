@@ -1,6 +1,7 @@
 /// CSI Collection Configuration Struct
 #[derive(Debug, Clone)]
-#[cfg(not(feature = "esp32c6"))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
 pub struct CsiConfig {
     /// Enable to receive legacy long training field(lltf) data.
     pub lltf_en: bool,
@@ -27,6 +28,7 @@ pub struct CsiConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg(feature = "esp32c6")]
 pub struct CsiConfig {
     /// Enable to acquire CSI.
@@ -57,6 +59,42 @@ pub struct CsiConfig {
     pub reserved: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg(feature = "esp32c5")]
+pub struct CsiConfig {
+    /// Enable to acquire CSI.
+    pub enable: u32,
+    /// Enable to acquire L-LTF.
+    pub acquire_csi_legacy: u32,
+    /// Force-acquire L-LTF.
+    pub acquire_csi_force_lltf: bool,
+    /// Enable to acquire HT-LTF when receiving an HT20 PPDU.
+    pub acquire_csi_ht20: u32,
+    /// Enable to acquire HT-LTF when receiving an HT40 PPDU.
+    pub acquire_csi_ht40: u32,
+    /// Enable to acquire VHT-LTF when receiving a VHT20 PPDU.
+    pub acquire_csi_vht: bool,
+    /// Enable to acquire HE-LTF when receiving an HE20 SU PPDU.
+    pub acquire_csi_su: u32,
+    /// Enable to acquire HE-LTF when receiving an HE20 MU PPDU.
+    pub acquire_csi_mu: u32,
+    /// Enable to acquire HE-LTF when receiving an HE20 DCM applied PPDU.
+    pub acquire_csi_dcm: u32,
+    /// Enable to acquire HE-LTF when receiving an HE20 Beamformed applied PPDU.
+    pub acquire_csi_beamformed: u32,
+    /// When receiving an STBC applied HE PPDU, 0- acquire the complete
+    /// HE-LTF1,  1- acquire the complete HE-LTF2, 2- sample evenly among the
+    /// HE-LTF1 and HE-LTF2.
+    pub acquire_csi_he_stbc: u32,
+    /// Value 0-3.
+    pub val_scale_cfg: u32,
+    /// Enable to dump 802.11 ACK frame, default disabled.
+    pub dump_ack_en: u32,
+    /// Reserved.
+    pub reserved: u32,
+}
+
 impl Default for CsiConfig {
     /// Default implmentation for CSI Collection Configuration:
     /// - lltf is enabled
@@ -67,7 +105,7 @@ impl Default for CsiConfig {
     /// - manu scale is disabled
     /// - no bit shift
     /// - 802.11 ack frame dump disabled
-    #[cfg(not(feature = "esp32c6"))]
+    #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
     fn default() -> Self {
         Self {
             lltf_en: true,
@@ -96,6 +134,26 @@ impl Default for CsiConfig {
             val_scale_cfg: 2,
             dump_ack_en: 1,
             reserved: 19,
+        }
+    }
+    // ESP32-C5 (mac_version 3) — adds force_lltf and vht fields.
+    #[cfg(feature = "esp32c5")]
+    fn default() -> Self {
+        Self {
+            enable: 1,
+            acquire_csi_legacy: 1,
+            acquire_csi_force_lltf: true,
+            acquire_csi_ht20: 1,
+            acquire_csi_ht40: 1,
+            acquire_csi_vht: true,
+            acquire_csi_su: 1,
+            acquire_csi_mu: 1,
+            acquire_csi_dcm: 1,
+            acquire_csi_beamformed: 1,
+            acquire_csi_he_stbc: 2,
+            val_scale_cfg: 2,
+            dump_ack_en: 1,
+            reserved: 0,
         }
     }
 }

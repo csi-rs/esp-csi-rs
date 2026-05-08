@@ -15,18 +15,18 @@ A Rust crate for collecting **Channel State Information (CSI)** on **ESP32** ser
 
 ## Features
 ### ✅ Device Support
-`esp-csi-rs` supports several ESP devices including the ESP32-C6 which supports WiFi 6. The current list of supported devices are:
+`esp-csi-rs` supports both 2.4 GHz and dual-band ESP devices, including ESP32-C6 (WiFi 6) and ESP32-C5 (WiFi 6 dual-band 2.4/5 GHz). The current list of supported devices is:
 - ESP32
-- ESP32-C2
 - ESP32-C3
-- ESP32-C6
+- ESP32-C5 (2.4/5 GHz)
+- ESP32-C6 (WiFi 6)
 - ESP32-S3
 
 ### ✅ Host Interface
-With exception to the ESP32 and the ESP32-C2, `esp-csi-rs` leverages the `USB-JTAG-SERIAL` peripheral available on many recent ESP development boards. This allows for higher baud rates compared to using the UART interface.
+With exception to the ESP32, `esp-csi-rs` leverages the `USB-JTAG-SERIAL` peripheral available on most recent ESP development boards. This allows for higher baud rates compared to using the UART interface.
 
 ### ✅ `defmt` & Serialized Output
-`esp-csi-rs` reduces device to host transfer overhead further by supporting both serialized output and `defmt`. This allows for better CSI throughput when communicating the output to a host device. `defmt` is a highly efficient logging framework introduced by Ferrous Systems that targets resource-constrained devices. More detail about `defmt` can be found [here](https://defmt.ferrous-systems.com/).
+`esp-csi-rs` reduces device-to-host transfer overhead by supporting both serialized output and `defmt`. The defmt frames are emitted directly over USB-Serial-JTAG via `esp-println`'s `defmt-espflash` backend — `espflash --monitor --log-format defmt` decodes them inline. `defmt` is a highly efficient logging framework introduced by Ferrous Systems that targets resource-constrained devices. More detail about `defmt` can be found [here](https://defmt.ferrous-systems.com/).
 
 ### ✅ Async Logging
 By enabling the optional async-print feature, the crate delegates packet serialization and output to an asynchronous driver. This ensures that heavy I/O operations won't block the async executor. Keeping logging non-blocking is critical for maintaining higher throughput and preventing dropped CSI packets.
@@ -87,17 +87,46 @@ esp-generate --chip=esp32c3 your-project
 Add the crate to your `Cargo.toml`. At a minimum, you would need to specify the device and the desired logging framework (`println` or `defmt`):
 
 ```toml
-esp-csi-rs = { version = "0.3.0", features = ["esp32c3", "println"] }
+[dependencies]
+esp-csi-rs = { version = "0.5.2", features = ["esp32c3", "println"] }
 ```
 
-> ‼️ The selected logging framework needs to align with the selected framework for the `esp-backtrace` dependency
+The crate uses Rust **edition 2024** and tracks the latest Espressif Rust ecosystem (`esp-hal` 1.1, `esp-radio` 0.18, `esp-rtos` 0.3).
+
+> ‼️ The selected logging framework needs to align with the selected framework for the `esp-backtrace` dependency. The `defmt` feature already pulls the matching `esp-backtrace/defmt`, `esp-hal/defmt`, and `esp-radio/defmt` flags for you.
+
+### Using `defmt` from your application
+
+When enabling the `defmt` feature, the user app needs three additional things on top of the crate dep:
+
+1. **Add `defmt` as a direct dependency** in your own `Cargo.toml`. Our `log_ln!` macro expands to `defmt::println!(...)` at the call site, so the `defmt` crate must be resolvable from your code. Plain `defmt = "1.0"` is enough — do **not** add `defmt-rtt` or any other logger; we already provide one via `esp-println/defmt-espflash`.
+2. **Add `-Tdefmt.x` to your linker flags** in your own `.cargo/config.toml` (Cargo doesn't propagate linker args from dependencies' build scripts):
+   ```toml
+   [target.'cfg(target_arch = "riscv32")']
+   rustflags = ["-C", "link-arg=-Tlinkall.x", "-C", "link-arg=-Tdefmt.x"]
+   ```
+3. **Decode with espflash**: `espflash flash --monitor --log-format defmt <elf>`. No probe-rs / J-Link needed — frames stream over the same USB-Serial-JTAG channel as `println!`.
+
+```toml
+[dependencies]
+esp-csi-rs = { version = "0.5.2", features = ["esp32c3", "defmt"] }
+defmt = "1.0"
+```
+
+If you're cribbing from this repo's examples, you don't need any of the above — the in-repo `.cargo/config.toml` aliases (`cargo esp32c3-defmt`, etc.) and `build.rs` handle all three steps automatically.
 
 ## Usage Examples
-The repository contains an example folder that contains examples for various device configurations. To run any of the examples enter the following to your command line:
-```bash
-cargo esp32s3 --example <example-name>
-```
-Just replace `example-name` with the file name of any of the examples.
+
+The repository contains an `examples/` folder with configurations for each supported topology. Two flavors of cargo aliases ship in `.cargo/config.toml`:
+
+| Logging | Run alias | Build alias |
+|---|---|---|
+| `println` (default) | `cargo esp32c3 --example <name>` | `cargo esp32c3-build --example <name>` |
+| `defmt` | `cargo esp32c3-defmt --example <name>` | `cargo esp32c3-build-defmt --example <name>` |
+
+Replace `esp32c3` with any of: `esp32`, `esp32c3`, `esp32c5`, `esp32c6`, `esp32s3`. The `-defmt` aliases inject `--features=defmt`, override the espflash runner with `--log-format defmt`, and `build.rs` adds the `-Tdefmt.x` linker script automatically — no manual config edits required to switch between logging backends.
+
+Replace `<name>` with the file name of any example, e.g. `sniffer_wifi`, `esp_now_central`, `wifi_station`.
 
 ## Documentation
 

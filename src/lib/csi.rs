@@ -93,7 +93,7 @@ pub enum RxCSIFmt {
 // rxmatch0: Indicate whether the reception frame is from interface 0.
 
 /// CSI Received Packet w/ Radio Metadata
-#[cfg(not(feature = "esp32c6"))]
+#[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
 #[derive(Debug, Clone, Serialize, Deserialize, MaxSize)]
 pub struct CSIDataPacket {
     /// MAC address of the sender.
@@ -162,7 +162,7 @@ pub struct CSIDataPacket {
     pub csi_data: Vec<i8, 612>,
 }
 
-#[cfg(not(feature = "esp32c6"))]
+#[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
 impl CSIDataPacket {
     /// Prints Recieved CSI Data Packet with it's Metadata.
     ///
@@ -390,7 +390,7 @@ impl CSIDataPacket {
     }
 }
 
-#[cfg(feature = "esp32c6")]
+#[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
 #[derive(Debug, Clone, Serialize, Deserialize, MaxSize)]
 pub struct CSIDataPacket {
     /// MAC address of the sender.
@@ -412,8 +412,10 @@ pub struct CSIDataPacket {
     /// Length of dump buffer.
     pub dump_len: u32,
     /// Length of HE-SIG-B field (802.11ax).
+    #[cfg(feature = "esp32c6")]
     pub he_sigb_len: u32,
     /// Indicates if this is a single MPDU.
+    #[cfg(feature = "esp32c6")]
     pub cur_single_mpdu: u32,
     /// Current baseband format.
     pub cur_bb_format: u32,
@@ -436,6 +438,7 @@ pub struct CSIDataPacket {
     /// Indicate whether the reception frame is from interface 1.
     pub rxmatch1: u32,
     /// Indicate whether the reception frame is from interface 0.
+    #[cfg(feature = "esp32c6")]
     pub rxmatch0: u32,
     /// Optional NTP-based Timestamp Indicating the Time CSI Captured.
     pub date_time: Option<DateTime>,
@@ -450,7 +453,7 @@ pub struct CSIDataPacket {
     pub csi_data: Vec<i8, 612>,
 }
 
-#[cfg(feature = "esp32c6")]
+#[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
 impl CSIDataPacket {
     /// Prints Recieved CSI Data Packet with it's Metadata.
     ///
@@ -489,9 +492,11 @@ impl CSIDataPacket {
     pub fn dump_len(&self) -> u32 {
         self.dump_len
     }
+    #[cfg(feature = "esp32c6")]
     pub fn he_sigb_len(&self) -> u32 {
         self.he_sigb_len
     }
+    #[cfg(feature = "esp32c6")]
     pub fn cur_single_mpdu(&self) -> u32 {
         self.cur_single_mpdu
     }
@@ -525,6 +530,7 @@ impl CSIDataPacket {
     pub fn rxmatch1(&self) -> u32 {
         self.rxmatch1
     }
+    #[cfg(feature = "esp32c6")]
     pub fn rxmatch0(&self) -> u32 {
         self.rxmatch0
     }

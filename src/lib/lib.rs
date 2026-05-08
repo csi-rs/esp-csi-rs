@@ -7,9 +7,9 @@
 //! In terms of hardware, you need to make sure that the device you choose supports WiFi and CSI collection.
 //! Currently supported devices include:
 //! - ESP32
-//! - ESP32-C2
 //! - ESP32-C3
-//! - ESP32-C6
+//! - ESP32-C5 (dual-band 2.4/5 GHz)
+//! - ESP32-C6 (WiFi 6)
 //! - ESP32-S3
 //!
 //! In terms of project and software toolchain setup, you will need to specify the hardware you will be using. To minimize headache, it is recommended that you generate a project using `esp-generate` as explained next.
@@ -28,6 +28,22 @@
 //!
 //! ## Feature Flags
 #![doc = document_features::document_features!()]
+//! ## Logging Backends
+//!
+//! Two logging backends are supported and they are mutually exclusive:
+//!
+//! - **`println` (default)** — plain text via `esp-println`. Decoded by any serial monitor.
+//! - **`defmt`** — compact binary frames via `esp-println`'s `defmt-espflash` backend, decoded by `espflash --monitor --log-format defmt`. The `build.rs` adds `-Tdefmt.x` automatically when this feature is on, so no manual linker-script edits are needed.
+//!
+//! Per-chip cargo aliases ship in `.cargo/config.toml` for both flavors:
+//!
+//! ```bash
+//! cargo esp32c3 --example sniffer_wifi          # println
+//! cargo esp32c3-defmt --example sniffer_wifi    # defmt
+//! ```
+//!
+//! Replace `esp32c3` with any of: `esp32`, `esp32c3`, `esp32c5`, `esp32c6`, `esp32s3`. `-build` and `-build-defmt` variants compile without flashing.
+//!
 //! ## Using the Crate
 //!
 //! Each ESP device is represented as a node in a collection network. For each node, we need to configure its role in the network, the mode of operation, and the CSI collection behavior. The node role determines how the node participates in the network and interacts with other nodes, while the collection mode determines how the node handles CSI data.
@@ -161,15 +177,20 @@
 //! ```
 //! #### Step 3: Create a Station Configuration
 //! ```rust
-//! let client_config = ClientConfig::default()
-//!     .with_ssid("SSID".to_string())
+//! use esp_radio::wifi::sta::StationConfig;
+//! use esp_radio::wifi::AuthenticationMethod;
+//!
+//! let client_config = StationConfig::default()
+//!     .with_ssid("SSID")
 //!     .with_password("PASS".to_string())
-//!     .with_auth_method(esp_radio::wifi::AuthMethod::Wpa2Personal);
+//!     .with_auth_method(AuthenticationMethod::Wpa2Personal);
 //!
 //! let station_config = WifiStationConfig {
 //!    client_config,  // Pass the config we created above
 //! };
 //! ```
+//!
+//! `StationConfig` was renamed from `ClientConfig`, and `AuthMethod` was renamed to `AuthenticationMethod` in `esp-radio` 0.18. `with_ssid` now takes `impl Into<Ssid>`, so a `&str` literal works directly without `.to_string()`.
 //! #### Step 4: Create a CSI Collection Node Instance with the Desired Configuration
 //! ```rust
 //! let mut node = CSINode::new(
@@ -200,20 +221,28 @@
 
 #[cfg(feature = "async-print")]
 use embassy_time::with_timeout;
+#[cfg(feature = "statistics")]
 use portable_atomic::AtomicI64;
 
 use embassy_futures::join::{join, join3};
 use embassy_futures::select::{select, select3, Either, Either3};
 
 use embassy_time::{Duration, Instant, Timer};
+use enumset::EnumSet;
 use esp_radio::esp_now::WifiPhyRate;
-use esp_radio::wifi::{ClientConfig, CsiConfig, Interfaces, Protocol, WifiController};
+use esp_radio::wifi::csi::CsiConfig;
+use esp_radio::wifi::sta::StationConfig;
+use esp_radio::wifi::{Interfaces, Protocol, Protocols, SecondaryChannel, WifiController};
+#[cfg(feature = "esp32c5")]
+use esp_radio::wifi::BandMode;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_sync::waitqueue::AtomicWaker;
 
-use heapless::{LinearMap, Vec};
+#[cfg(feature = "statistics")]
+use heapless::LinearMap;
+use heapless::Vec;
 extern crate alloc;
 use serde::{Deserialize, Serialize};
 
@@ -231,6 +260,7 @@ use crate::config::CsiConfig as CsiConfiguration;
 use crate::csi::{CSIDataPacket, RxCSIFmt};
 use crate::peripheral::esp_now::run_esp_now_peripheral;
 
+#[cfg(feature = "statistics")]
 const MAX_TRACKED_PEERS: usize = 16;
 
 /// Lock-free 32-slot MPMC ring used by the WiFi callback to deliver
@@ -280,6 +310,7 @@ static COLLECTION_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::ne
 /// Toggle explicitly with [`set_csi_delivery_mode`].
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum CsiDeliveryMode {
     /// No user delivery. Inline `log_csi` may still run if its gate is
     /// open (controlled by [`set_csi_logging_enabled`]).
@@ -423,7 +454,9 @@ static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
 #[cfg(feature = "statistics")]
 static SEQ_DROP_DETECTION_ENABLED: AtomicBool = AtomicBool::new(false);
 
-use portable_atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use portable_atomic::{AtomicBool, Ordering};
+#[cfg(feature = "statistics")]
+use portable_atomic::{AtomicU32, AtomicU64};
 /// Global statistics counters (enabled with the `statistics` feature).
 #[cfg(feature = "statistics")]
 struct GlobalStats {
@@ -486,16 +519,9 @@ fn set_seq_drop_detection(enabled: bool) {
     }
 }
 
+#[cfg(feature = "statistics")]
 fn seq_drop_detection_enabled() -> bool {
-    #[cfg(feature = "statistics")]
-    {
-        SEQ_DROP_DETECTION_ENABLED.load(Ordering::Relaxed)
-    }
-
-    #[cfg(not(feature = "statistics"))]
-    {
-        false
-    }
+    SEQ_DROP_DETECTION_ENABLED.load(Ordering::Relaxed)
 }
 
 // Drives the per-`run_duration` lifecycle. In async-print mode this is the
@@ -582,14 +608,16 @@ impl EspNowConfig {
 }
 
 /// Configuration for Wi-Fi Promiscuous Sniffer mode.
+///
+/// Construct with `WifiSnifferConfig::default()` then chain `with_channel`
+/// to override defaults.
 #[derive(Debug, Clone)]
 pub struct WifiSnifferConfig {
     /// Optional MAC source filter (reserved — not yet wired into the
     /// promiscuous filter setup).
     #[allow(dead_code)]
     mac_filter: Option<[u8; 6]>,
-    /// 2.4 GHz channel (1–14) the sniffer should lock to.
-    pub channel: u8,
+    channel: u8,
 }
 
 impl Default for WifiSnifferConfig {
@@ -603,11 +631,52 @@ impl Default for WifiSnifferConfig {
     }
 }
 
+impl WifiSnifferConfig {
+    /// Override the channel the sniffer locks to.
+    ///
+    /// Must be a valid IEEE 802.11 **primary** channel number — pass the
+    /// primary, not the wider-channel center notation that routers
+    /// commonly display:
+    ///
+    /// - **2.4 GHz**: `1`–`14`
+    /// - **5 GHz**: `36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112,
+    ///   116, 120, 124, 128, 132, 136, 140, 144, 149, 153, 157, 161, 165`
+    ///   (regulatory-domain dependent — some restricted by `country_info`)
+    ///
+    /// Center-channel labels (`38, 46, ...` for HT40; `42, 58, 106, ...`
+    /// for VHT80; `50, 114` for VHT160; `154` for the 153/157 HT40 pair)
+    /// are **not** accepted here — `esp_wifi_set_channel` panics with
+    /// `InvalidArguments`. For example, a router showing "channel 154"
+    /// is using primary `153` (or `157`); pass that primary and the chip
+    /// will sniff the full 40 MHz block automatically per 802.11.
+    ///
+    /// On dual-band chips (currently ESP32-C5), the band is auto-selected
+    /// from the channel number — channels `>= 36` switch the radio to
+    /// `BandMode::_5G`, otherwise `BandMode::_2_4G`. On 2.4-GHz-only
+    /// chips, passing any 5 GHz channel will fail at runtime.
+    pub fn with_channel(mut self, channel: u8) -> Self {
+        self.channel = channel;
+        self
+    }
+
+    /// Configured channel (2.4 GHz: 1–14, 5 GHz: 36–165).
+    pub fn channel(&self) -> u8 {
+        self.channel
+    }
+}
+
 /// Configuration for Wi-Fi Station mode.
 #[derive(Debug, Clone)]
 pub struct WifiStationConfig {
-    /// Underlying esp-radio client configuration (SSID, auth, etc.).
-    pub client_config: ClientConfig,
+    /// Underlying esp-radio station configuration (SSID, auth, etc.).
+    pub client_config: StationConfig,
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for WifiStationConfig {
+    fn format(&self, fmt: defmt::Formatter<'_>) {
+        defmt::write!(fmt, "WifiStationConfig {{ client_config: <opaque> }}");
+    }
 }
 
 // Enum for Central modes, each wrapping its specific config.
@@ -1008,13 +1077,10 @@ impl<'a> CSINode<'a> {
 
         // Tasks Necessary for Central Station & Sniffer
         let sta_interface = if let Node::Central(CentralOpMode::WifiStation(config)) = &self.kind {
-            Some(sta_init(&mut interfaces.sta, config, controller))
+            Some(sta_init(&mut interfaces.station, config, controller))
         } else {
             None
         };
-
-        // Set Wi-Fi mode to Station for all node types
-        controller.set_mode(esp_radio::wifi::WifiMode::Sta).unwrap();
 
         // Build CSI Configuration
         let config = match self.csi_config {
@@ -1035,12 +1101,11 @@ impl<'a> CSINode<'a> {
         // Apply Protocol if specified
         if let Some(protocol) = self.protocol.take() {
             let old_protocol = reconstruct_protocol(&protocol);
-            controller.set_protocol(protocol.into()).unwrap();
+            let protocols = Protocols::default().with_2_4(EnumSet::only(protocol));
+            controller.set_protocols(protocols).unwrap();
             self.protocol = Some(old_protocol);
         }
 
-        // Start the controller
-        controller.start_async().await.unwrap();
         log_ln!("Wi-Fi Controller Started");
         let is_collector = self.collection_mode == CollectionMode::Collector;
         IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
@@ -1070,8 +1135,12 @@ impl<'a> CSINode<'a> {
         // task hot path, stealing cycles from the central TX-completion
         // ISR for no purpose.
         let csi_config_for_recovery = config.clone();
-        if self.io_tasks.rx_enabled {
-            set_csi(controller, config);
+        let is_sniffer = matches!(
+            &self.kind,
+            Node::Peripheral(PeripheralOpMode::WifiSniffer(_))
+        );
+        if self.io_tasks.rx_enabled && !is_sniffer {
+            set_csi(controller, config.clone());
         }
         // The `run_duration` path doesn't use `interfaces.sniffer` — the
         // WifiSniffer arm binds its own local. Only `run()` keeps an
@@ -1107,10 +1176,23 @@ impl<'a> CSINode<'a> {
                     }
                 }
                 PeripheralOpMode::WifiSniffer(sniffer_config) => {
-                    interfaces
-                        .esp_now
-                        .set_channel(sniffer_config.channel)
+                    #[cfg(feature = "esp32c5")]
+                    {
+                        let band = if sniffer_config.channel() >= 36 {
+                            BandMode::_5G
+                        } else {
+                            BandMode::_2_4G
+                        };
+                        controller.set_band_mode(band).unwrap();
+                    }
+                    let sniffer = &interfaces.sniffer;
+                    sniffer.set_promiscuous_mode(true).unwrap();
+                    controller
+                        .set_channel(sniffer_config.channel(), SecondaryChannel::None)
                         .unwrap();
+                    if self.io_tasks.rx_enabled {
+                        set_csi(controller, config.clone());
+                    }
                     // Drop the ESP-NOW receive callback at the C layer.
                     // Rationale: in Rust esp-radio, `rcv_cb` runs for every
                     // ESP-NOW vendor action frame the 802.11 MAC sees and
@@ -1124,14 +1206,12 @@ impl<'a> CSINode<'a> {
                     // registered → frames are silently dropped at the C layer
                     // with zero allocation. Replicate that here for sniffer
                     // mode (we don't consume ESP-NOW data anyway).
-                    extern "C" {
+                    unsafe extern "C" {
                         fn esp_now_unregister_recv_cb() -> i32;
                     }
                     unsafe {
                         let _ = esp_now_unregister_recv_cb();
                     }
-                    let sniffer = &interfaces.sniffer;
-                    sniffer.set_promiscuous_mode(true).unwrap();
                     if self.io_tasks.rx_enabled {
                         join(
                             run_process_csi_packet(),
@@ -1156,7 +1236,7 @@ impl<'a> CSINode<'a> {
 
                     let main_task = run_esp_now_central(
                         &mut interfaces.esp_now,
-                        interfaces.sta.mac_address(),
+                        interfaces.station.mac_address(),
                         esp_now_config,
                         self.traffic_freq_hz,
                         is_collector,
@@ -1204,7 +1284,6 @@ impl<'a> CSINode<'a> {
         }
 
         STOP_SIGNAL.reset();
-        let _ = controller.stop_async().await;
         reset_globals();
     }
 
@@ -1217,13 +1296,10 @@ impl<'a> CSINode<'a> {
 
         // Tasks Necessary for Central Station & Sniffer
         let sta_interface = if let Node::Central(CentralOpMode::WifiStation(config)) = &self.kind {
-            Some(sta_init(&mut interfaces.sta, config, controller))
+            Some(sta_init(&mut interfaces.station, config, controller))
         } else {
             None
         };
-
-        // Set Wi-Fi mode to Station for all node types
-        controller.set_mode(esp_radio::wifi::WifiMode::Sta).unwrap();
 
         // Build CSI Configuration
         let config = match self.csi_config {
@@ -1244,12 +1320,11 @@ impl<'a> CSINode<'a> {
         // Apply Protocol if specified
         if let Some(protocol) = self.protocol.take() {
             let old_protocol = reconstruct_protocol(&protocol);
-            controller.set_protocol(protocol.into()).unwrap();
+            let protocols = Protocols::default().with_2_4(EnumSet::only(protocol));
+            controller.set_protocols(protocols).unwrap();
             self.protocol = Some(old_protocol);
         }
 
-        // Start the controller
-        controller.start_async().await.unwrap();
         log_ln!("Wi-Fi Controller Started");
         let is_collector = self.collection_mode == CollectionMode::Collector;
         IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
@@ -1279,10 +1354,14 @@ impl<'a> CSINode<'a> {
         // task hot path, stealing cycles from the central TX-completion
         // ISR for no purpose.
         let csi_config_for_recovery = config.clone();
-        if self.io_tasks.rx_enabled {
-            set_csi(controller, config);
+        let is_sniffer = matches!(
+            &self.kind,
+            Node::Peripheral(PeripheralOpMode::WifiSniffer(_))
+        );
+        if self.io_tasks.rx_enabled && !is_sniffer {
+            set_csi(controller, config.clone());
         }
-        let sniffer: &esp_radio::wifi::Sniffer<'_> = &interfaces.sniffer;
+        let sniffer: &esp_radio::wifi::sniffer::Sniffer<'_> = &interfaces.sniffer;
 
         // Initialize Nodes based on type
         match &self.kind {
@@ -1308,19 +1387,29 @@ impl<'a> CSINode<'a> {
                     }
                 }
                 PeripheralOpMode::WifiSniffer(sniffer_config) => {
-                    interfaces
-                        .esp_now
-                        .set_channel(sniffer_config.channel)
+                    #[cfg(feature = "esp32c5")]
+                    {
+                        let band = if sniffer_config.channel() >= 36 {
+                            BandMode::_5G
+                        } else {
+                            BandMode::_2_4G
+                        };
+                        controller.set_band_mode(band).unwrap();
+                    }
+                    sniffer.set_promiscuous_mode(true).unwrap();
+                    controller
+                        .set_channel(sniffer_config.channel(), SecondaryChannel::None)
                         .unwrap();
+                    if self.io_tasks.rx_enabled {
+                        set_csi(controller, config.clone());
+                    }
                     // See the sniffer-Collector arm above for rationale.
-                    extern "C" {
+                    unsafe extern "C" {
                         fn esp_now_unregister_recv_cb() -> i32;
                     }
                     unsafe {
                         let _ = esp_now_unregister_recv_cb();
                     }
-                    let sniffer = &interfaces.sniffer;
-                    sniffer.set_promiscuous_mode(true).unwrap();
                     if self.io_tasks.rx_enabled {
                         run_process_csi_packet().await;
                     } else {
@@ -1340,7 +1429,7 @@ impl<'a> CSINode<'a> {
 
                     let main_task = run_esp_now_central(
                         &mut interfaces.esp_now,
-                        interfaces.sta.mac_address(),
+                        interfaces.station.mac_address(),
                         esp_now_config,
                         self.traffic_freq_hz,
                         is_collector,
@@ -1379,8 +1468,27 @@ impl<'a> CSINode<'a> {
         }
 
         STOP_SIGNAL.reset();
-        let _ = controller.stop_async().await;
         reset_globals();
+    }
+}
+
+#[cfg(feature = "esp32c5")]
+fn build_csi_config(csi_config: &CsiConfiguration) -> CsiConfig {
+    CsiConfig {
+        enable: csi_config.enable,
+        acquire_csi_legacy: csi_config.acquire_csi_legacy,
+        acquire_csi_force_lltf: csi_config.acquire_csi_force_lltf,
+        acquire_csi_ht20: csi_config.acquire_csi_ht20,
+        acquire_csi_ht40: csi_config.acquire_csi_ht40,
+        acquire_csi_vht: csi_config.acquire_csi_vht,
+        acquire_csi_su: csi_config.acquire_csi_su,
+        acquire_csi_mu: csi_config.acquire_csi_mu,
+        acquire_csi_dcm: csi_config.acquire_csi_dcm,
+        acquire_csi_beamformed: csi_config.acquire_csi_beamformed,
+        acquire_csi_he_stbc: csi_config.acquire_csi_he_stbc,
+        val_scale_cfg: csi_config.val_scale_cfg,
+        dump_ack_en: csi_config.dump_ack_en,
+        reserved: csi_config.reserved,
     }
 }
 
@@ -1402,7 +1510,7 @@ fn build_csi_config(csi_config: &CsiConfiguration) -> CsiConfig {
     }
 }
 
-#[cfg(not(feature = "esp32c6"))]
+#[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
 fn build_csi_config(csi_config: &CsiConfiguration) -> CsiConfig {
     CsiConfig {
         lltf_en: csi_config.lltf_en,
@@ -1486,14 +1594,14 @@ pub fn get_two_way_latency() -> i64 {
 pub(crate) fn set_csi(controller: &mut WifiController, config: CsiConfig) {
     // Set CSI Configuration with callback
     controller
-        .set_csi(config, |info: esp_radio::wifi::wifi_csi_info_t| {
+        .set_csi(config, |info: esp_radio::wifi::csi::WifiCsiInfo<'_>| {
             capture_csi_info(info);
         })
         .unwrap();
 }
 
 // Function to capture CSI info from callback and publish to channel
-fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
+fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
     // Count every CSI report regardless of mode so `rx_count` / `rx_rate_hz`
     // / `pps_rx` reflect actual radio CSI throughput. This is the only path
     // that fires for sniffer / STA / ESP-NOW collection — counting here keeps
@@ -1516,17 +1624,11 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
     // to run unconditionally — there's no cheaper way to know if the
     // packet is interesting until it's parsed.
 
-    let rssi = if info.rx_ctrl.rssi() > 127 {
-        info.rx_ctrl.rssi() - 256
-    } else {
-        info.rx_ctrl.rssi()
-    };
+    let rssi = info.rssi();
 
     let mut csi_data = Vec::<i8, 612>::new();
-    // let csi_buf = info.buf;
-    let csi_buf_len = info.len;
-    let csi_slice =
-        unsafe { core::slice::from_raw_parts(info.buf as *const i8, csi_buf_len as usize) };
+    let csi_slice = info.buf();
+    let csi_buf_len = csi_slice.len() as u16;
     match csi_data.extend_from_slice(csi_slice) {
         Ok(_) => {}
         Err(_) => {
@@ -1536,77 +1638,69 @@ fn capture_csi_info(info: esp_radio::wifi::wifi_csi_info_t) {
         }
     }
 
-    #[cfg(not(feature = "esp32c6"))]
+    let mac_arr = *info.mac();
+    let timestamp_us = info.timestamp().duration_since_epoch().as_micros() as u32;
+
+    #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
     let csi_packet = CSIDataPacket {
-        sequence_number: info.rx_seq,
+        sequence_number: info.rx_sequence(),
         data_format: RxCSIFmt::Undefined,
         date_time: None,
-        mac: [
-            info.mac[0],
-            info.mac[1],
-            info.mac[2],
-            info.mac[3],
-            info.mac[4],
-            info.mac[5],
-        ],
-        rssi,
-        bandwidth: info.rx_ctrl.cwb(),
-        antenna: info.rx_ctrl.ant(),
-        rate: info.rx_ctrl.rate(),
-        sig_mode: info.rx_ctrl.sig_mode(),
-        mcs: info.rx_ctrl.mcs(),
-        smoothing: info.rx_ctrl.smoothing(),
-        not_sounding: info.rx_ctrl.not_sounding(),
-        aggregation: info.rx_ctrl.aggregation(),
-        stbc: info.rx_ctrl.stbc(),
-        fec_coding: info.rx_ctrl.fec_coding(),
-        sgi: info.rx_ctrl.sgi(),
-        noise_floor: info.rx_ctrl.noise_floor(),
-        ampdu_cnt: info.rx_ctrl.ampdu_cnt(),
-        channel: info.rx_ctrl.channel(),
-        secondary_channel: info.rx_ctrl.secondary_channel(),
-        timestamp: info.rx_ctrl.timestamp(),
-        rx_state: info.rx_ctrl.rx_state(),
-        sig_len: info.rx_ctrl.sig_len(),
+        mac: mac_arr,
+        rssi: rssi as i32,
+        bandwidth: info.cwb() as u32,
+        antenna: info.antenna() as u32,
+        rate: info.rate() as u32,
+        sig_mode: info.packet_mode() as u32,
+        mcs: info.modulation_coding_scheme() as u32,
+        smoothing: info.smoothing() as u32,
+        not_sounding: info.not_sounding() as u32,
+        aggregation: info.aggregation() as u32,
+        stbc: info.space_time_block_code() as u32,
+        fec_coding: info.forward_error_correction_coding() as u32,
+        sgi: info.short_guide_interval() as u32,
+        noise_floor: info.noise_floor() as i32,
+        ampdu_cnt: info.ampdu_count() as u32,
+        channel: info.channel() as u32,
+        secondary_channel: info.secondary_channel() as u32,
+        timestamp: timestamp_us,
+        rx_state: info.rx_state() as u32,
+        sig_len: info.signal_length() as u32,
         csi_data_len: csi_buf_len,
-        csi_data: csi_data,
+        csi_data,
     };
 
-    #[cfg(feature = "esp32c6")]
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
     let csi_packet = CSIDataPacket {
-        mac: [
-            info.mac[0],
-            info.mac[1],
-            info.mac[2],
-            info.mac[3],
-            info.mac[4],
-            info.mac[5],
-        ],
-        rssi,
-        timestamp: info.rx_ctrl.timestamp(),
-        rate: info.rx_ctrl.rate(),
-        noise_floor: info.rx_ctrl.noise_floor(),
-        sig_len: info.rx_ctrl.sig_len(),
-        rx_state: info.rx_ctrl.rx_state(),
-        dump_len: info.rx_ctrl.dump_len(),
-        he_sigb_len: info.rx_ctrl.he_sigb_len(),
-        cur_single_mpdu: info.rx_ctrl.cur_single_mpdu(),
-        cur_bb_format: info.rx_ctrl.cur_bb_format(),
-        rx_channel_estimate_info_vld: info.rx_ctrl.rx_channel_estimate_info_vld(),
-        rx_channel_estimate_len: info.rx_ctrl.rx_channel_estimate_len(),
-        second: info.rx_ctrl.second(),
-        channel: info.rx_ctrl.channel(),
-        is_group: info.rx_ctrl.is_group(),
-        rxend_state: info.rx_ctrl.rxend_state(),
-        rxmatch3: info.rx_ctrl.rxmatch3(),
-        rxmatch2: info.rx_ctrl.rxmatch2(),
-        rxmatch1: info.rx_ctrl.rxmatch1(),
-        rxmatch0: info.rx_ctrl.rxmatch0(),
+        mac: mac_arr,
+        rssi: rssi as i32,
+        timestamp: timestamp_us,
+        rate: info.rate() as u32,
+        noise_floor: info.noise_floor() as i32,
+        sig_len: info.signal_length() as u32,
+        rx_state: info.rx_state() as u32,
+        dump_len: info.dump_length(),
+        #[cfg(feature = "esp32c6")]
+        he_sigb_len: info.he_sigb_length() as u32,
+        #[cfg(feature = "esp32c6")]
+        cur_single_mpdu: info.cur_single_mpdu() as u32,
+        cur_bb_format: info.cur_bb_format() as u32,
+        rx_channel_estimate_info_vld: info.rx_channel_estimate_info_valid() as u32,
+        rx_channel_estimate_len: info.rx_channel_estimate_length(),
+        second: info.secondary_channel() as u32,
+        channel: info.channel() as u32,
+        is_group: info.is_group() as u32,
+        rxend_state: info.rx_end_state() as u32,
+        rxmatch3: info.rx_match3() as u32,
+        rxmatch2: info.rx_match2() as u32,
+        rxmatch1: info.rx_match1() as u32,
+        #[cfg(feature = "esp32c6")]
+        rxmatch0: info.rx_match0() as u32,
         date_time: None,
-        sequence_number: info.rx_seq,
+        sequence_number: info.rx_sequence(),
         data_format: RxCSIFmt::Undefined,
-        csi_data_len: info.len as u16,
-        csi_data: csi_data,
+        csi_data_len: csi_buf_len,
+        csi_data,
     };
 
     #[cfg(feature = "statistics")]
@@ -1790,12 +1884,13 @@ fn reconstruct_wifi_rate(rate: &WifiPhyRate) -> WifiPhyRate {
 
 fn reconstruct_protocol(protocol: &Protocol) -> Protocol {
     match protocol {
-        Protocol::P802D11B => Protocol::P802D11B,
-        Protocol::P802D11BG => Protocol::P802D11BG,
-        Protocol::P802D11BGN => Protocol::P802D11BGN,
-        Protocol::P802D11BGNLR => Protocol::P802D11BGNLR,
-        Protocol::P802D11LR => Protocol::P802D11LR,
-        Protocol::P802D11BGNAX => Protocol::P802D11BGNAX,
-        _ => Protocol::P802D11BGNLR,
+        Protocol::B => Protocol::B,
+        Protocol::G => Protocol::G,
+        Protocol::N => Protocol::N,
+        Protocol::LR => Protocol::LR,
+        Protocol::A => Protocol::A,
+        Protocol::AC => Protocol::AC,
+        Protocol::AX => Protocol::AX,
+        _ => Protocol::N,
     }
 }

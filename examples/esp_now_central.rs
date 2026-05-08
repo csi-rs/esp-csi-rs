@@ -17,8 +17,7 @@ use esp_csi_rs::{
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_radio::wifi::PowerSaveMode;
-use esp_radio::{wifi::WifiController, Controller};
+use esp_radio::wifi::WifiController;
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
@@ -107,26 +106,16 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    #[cfg(any(feature = "esp32c6", feature = "esp32c3"))]
-    {
-        let sw_interrupt =
-            esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-        esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
-    }
-    #[cfg(not(any(feature = "esp32c6", feature = "esp32c3")))]
-    esp_rtos::start(timg0.timer0);
+    let sw_interrupt =
+        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     log_ln!("Embassy initialized!");
     log_ln!("Starting EspNow Central Node");
 
-    let radio_init = mk_static!(
-        Controller<'static>,
-        esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
-    );
-
-    let config_radio = esp_radio::wifi::Config::default().with_power_save_mode(PowerSaveMode::None);
+    let config_radio = esp_radio::wifi::ControllerConfig::default();
     let (wifi_controller, mut interfaces) =
-        esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
+        esp_radio::wifi::new(peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
@@ -134,14 +123,14 @@ async fn main(spawner: Spawner) -> ! {
     let mut node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(EspNowConfig::default())),
+        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(EspNowConfig::default().with_channel(7))),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
-        Some(10000),
+        Some(1000),
         csi_hardware,
     );
-    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGN);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs7Sgi);
+    node.set_protocol(esp_radio::wifi::Protocol::N);
+    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
 
     set_csi_callback(on_csi);
     let _ = &mut node_handle;

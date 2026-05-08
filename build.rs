@@ -6,6 +6,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MONITOR_BAUD");
     let baud = std::env::var("MONITOR_BAUD").unwrap_or_else(|_| "115200".to_string());
     println!("cargo:rustc-env=UART_LOG_BAUDRATE={}", baud);
+
+    // Pull in the defmt linker script only when the `defmt` feature is on.
+    // Keeps println-only builds free of the defmt symbol table & sections.
+    if std::env::var("CARGO_FEATURE_DEFMT").is_ok() {
+        println!("cargo:rustc-link-arg=-Tdefmt.x");
+    }
 }
 
 #[allow(dead_code)]

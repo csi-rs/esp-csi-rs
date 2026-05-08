@@ -4,6 +4,6 @@ channel = "esp"
 # channel = "stable"
 # components = ["rust-src"]
 # targets = [
-#     "riscv32imc-unknown-none-elf",  # ESP32-C2, ESP32-C3
+#     "riscv32imc-unknown-none-elf",  # ESP32-C3
 #     "riscv32imac-unknown-none-elf", # ESP32-C6, ESP32-H2
 # ]
