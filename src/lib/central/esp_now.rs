@@ -6,6 +6,7 @@
 //! and pushes results into the runtime statistics channel when the
 //! `statistics` feature is enabled.
 
+#[cfg(feature = "statistics")]
 use core::sync::atomic::Ordering;
 
 use embassy_futures::select::{select, Either};
@@ -86,7 +87,7 @@ fn handle_peripheral_packet(
     esp_now: &mut EspNow<'static>,
     r: PoolFrame,
     channel: u8,
-    latency_offset: &mut i64,
+    #[cfg_attr(not(feature = "statistics"), allow(unused_variables))] latency_offset: &mut i64,
     known_peers: &mut LinearMap<[u8; 6], (), RX_TRACKED_PEERS_CAPACITY>,
 ) {
     #[cfg(feature = "statistics")]
@@ -103,7 +104,7 @@ fn handle_peripheral_packet(
     if known_peers.get(&r.info.src_address).is_none() {
         if !esp_now.peer_exists(&r.info.src_address) {
             let _ = esp_now.add_peer(PeerInfo {
-                interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
+                interface: esp_radio::esp_now::EspNowWifiInterface::Station,
                 peer_address: r.info.src_address,
                 lmk: None,
                 channel: Some(channel),

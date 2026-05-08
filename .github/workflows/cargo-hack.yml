@@ -66,10 +66,10 @@ jobs:
               esp32s3)
                 target="xtensa-esp32s3-none-elf"
                 ;;
-              esp32c6)
+              esp32c5|esp32c6)
                 target="riscv32imac-unknown-none-elf"
                 ;;
-              esp32c2|esp32c3)
+              esp32c3)
                 target="riscv32imc-unknown-none-elf"
                 ;;
               *)
@@ -121,7 +121,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo +stable install espup --locked
-          espup install --targets esp32,esp32c2,esp32c3,esp32c6,esp32s3
+          espup install --targets esp32,esp32c3,esp32c5,esp32c6,esp32s3
 
       - name: Install cargo-hack
         uses: taiki-e/install-action@cargo-hack
@@ -167,3 +167,48 @@ jobs:
               --depth 2 \
               --no-dev-deps
           fi
+
+  cargo-build-defmt:
+    name: build (defmt, ${{ matrix.chip }})
+    runs-on: ubuntu-latest
+    needs: discover-chip-features
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'pull_request' && needs.discover-chip-features.outputs.pr_matrix || needs.discover-chip-features.outputs.all_matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: cargo-build-defmt-${{ matrix.chip }}
+
+      - name: Install ESP Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +stable install espup --locked
+          espup install --targets esp32,esp32c3,esp32c5,esp32c6,esp32s3
+
+      - name: Build with defmt feature stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$HOME/export-esp.sh"
+
+          chip="${{ matrix.chip }}"
+          target="${{ matrix.target }}"
+
+          # Mirror the `cargo <chip>-build-defmt` alias from .cargo/config.toml.
+          cargo build \
+            --release \
+            --no-default-features \
+            --features "${chip},no-std,auto,defmt,statistics" \
+            --target "${target}"

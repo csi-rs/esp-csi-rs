@@ -11,8 +11,9 @@
 //!
 //! Transport selection (`println!`, JTAG-serial, UART, no-op, or
 //! `defmt`) is driven by the crate's feature flags. When `defmt` is
-//! enabled without `async-print`, `defmt-rtt` is pulled in as the global
-//! logger.
+//! enabled, `esp-println`'s `defmt-espflash` backend is the global
+//! logger — defmt frames stream over the same UART/USB-Serial-JTAG
+//! channel as `println!` and are decoded by `espflash --log-format defmt`.
 
 #[cfg(feature = "async-print")]
 use embedded_io_async::Write;
@@ -22,7 +23,7 @@ use portable_atomic::{AtomicBool, AtomicU8, Ordering};
 use postcard::experimental::max_size::MaxSize;
 
 #[cfg(all(feature = "defmt", not(feature = "async-print")))]
-use defmt_rtt as _;
+use esp_println as _;
 
 #[allow(dead_code)]
 const CSI_LOG_CHANNEL_CAPACITY: usize = 32;
@@ -264,7 +265,7 @@ impl From<u8> for LogMode {
 mod logging_impl {
     use embedded_io_async::{ErrorType, Write};
     use esp_hal::peripherals::Peripherals;
-    #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(any(feature = "esp32", feature = "esp32c2"))))]
+    #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(feature = "esp32")))]
     use esp_hal::usb_serial_jtag::UsbSerialJtag;
     use esp_hal::{
         uart::{Config, Uart},
@@ -277,7 +278,7 @@ mod logging_impl {
     pub enum Backend {
         #[cfg(any(feature = "uart", feature = "auto"))]
         Uart(Uart<'static, Async>),
-        #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(any(feature = "esp32", feature = "esp32c2"))))]
+        #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(feature = "esp32")))]
         Jtag(UsbSerialJtag<'static, Async>),
     }
 
@@ -296,7 +297,7 @@ mod logging_impl {
                     .map(|_| buf.len())
                     .map_err(|_| embedded_io_async::ErrorKind::Other),
 
-                #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(any(feature = "esp32", feature = "esp32c2"))))]
+                #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(feature = "esp32")))]
                 Self::Jtag(driver) => driver
                     .write_all(buf)
                     .await
@@ -316,7 +317,7 @@ mod logging_impl {
                     .await
                     .map_err(|_| embedded_io_async::ErrorKind::Other),
 
-                #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(any(feature = "esp32", feature = "esp32c2"))))]
+                #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(feature = "esp32")))]
                 Self::Jtag(driver) => driver
                     .flush()
                     .await
@@ -344,7 +345,7 @@ mod logging_impl {
             }
         }
 
-        #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(any(feature = "esp32", feature = "esp32c2"))))]
+        #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(feature = "esp32")))]
         pub fn new_jtag(periphs: Peripherals) -> Self {
             let raw_driver = UsbSerialJtag::new(periphs.USB_DEVICE).into_async();
             Self {
@@ -531,11 +532,13 @@ pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
         }
         #[cfg(feature = "auto")]
         {
-            #[cfg(not(any(feature = "esp32", feature = "esp32c2")))]
+            #[cfg(not(feature = "esp32"))]
             {
                 let periphs = unsafe { Peripherals::steal() };
                 #[cfg(feature = "esp32c3")]
                 const USB_DEVICE_INT_RAW: *const u32 = 0x60043008 as *const u32;
+                #[cfg(feature = "esp32c5")]
+                const USB_DEVICE_INT_RAW: *const u32 = 0x600D_F008 as *const u32;
                 #[cfg(feature = "esp32c6")]
                 const USB_DEVICE_INT_RAW: *const u32 = 0x6000f008 as *const u32;
                 #[cfg(feature = "esp32s3")]
@@ -558,7 +561,7 @@ pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
                 spawner.spawn(logger_backend(driver)).unwrap();
             }
         }
-        #[cfg(all(feature = "jtag-serial", not(any(feature = "esp32", feature = "esp32c2"))))]
+        #[cfg(all(feature = "jtag-serial", not(feature = "esp32")))]
         {
             let periphs = unsafe { Peripherals::steal() };
             let driver = LogOutput::new_jtag(periphs);
@@ -630,11 +633,9 @@ fn write_serialized_packet(packet: CSIDataPacket) {
     const PACKET_BUF_SIZE: usize = PACKET_MAX_SIZE + (PACKET_MAX_SIZE / 254) + 1;
 
     let mut buf = [0u8; PACKET_BUF_SIZE];
-    match postcard::to_slice_cobs(&packet, &mut buf) {
-        Ok(cobs_slice) => {
-            log_raw!(cobs_slice);
-        }
-        Err(_) => {}
+    if let Ok(cobs_slice) = postcard::to_slice_cobs(&packet, &mut buf) {
+        let _ = cobs_slice;
+        log_raw!(cobs_slice);
     }
 }
 
@@ -677,7 +678,7 @@ async fn write_text_array_packet(packet: CSIDataPacket, driver: &mut LogOutput) 
     write_field!(packet.timestamp);
     write_field!(packet.sig_len);
     write_field!(packet.rx_state);
-    #[cfg(not(feature = "esp32c6"))]
+    #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
     {
         write_field!(packet.secondary_channel);
         write_field!(packet.sgi);
@@ -692,10 +693,12 @@ async fn write_text_array_packet(packet: CSIDataPacket, driver: &mut LogOutput) 
         write_field!(packet.stbc);
         write_field!(packet.fec_coding);
     }
-    #[cfg(feature = "esp32c6")]
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
     {
         write_field!(packet.dump_len);
+        #[cfg(feature = "esp32c6")]
         write_field!(packet.he_sigb_len);
+        #[cfg(feature = "esp32c6")]
         write_field!(packet.cur_single_mpdu);
         write_field!(packet.cur_bb_format);
         write_field!(packet.rx_channel_estimate_info_vld);
@@ -707,6 +710,7 @@ async fn write_text_array_packet(packet: CSIDataPacket, driver: &mut LogOutput) 
         write_field!(packet.rxmatch3);
         write_field!(packet.rxmatch2);
         write_field!(packet.rxmatch1);
+        #[cfg(feature = "esp32c6")]
         write_field!(packet.rxmatch0);
     }
     write_field!(packet.sig_len);
@@ -767,7 +771,7 @@ fn write_text_array_packet(packet: CSIDataPacket) {
     write_field!(packet.timestamp);
     write_field!(packet.sig_len);
     write_field!(packet.rx_state);
-    #[cfg(not(feature = "esp32c6"))]
+    #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
     {
         write_field!(packet.secondary_channel);
         write_field!(packet.sgi);
@@ -782,10 +786,12 @@ fn write_text_array_packet(packet: CSIDataPacket) {
         write_field!(packet.stbc);
         write_field!(packet.fec_coding);
     }
-    #[cfg(feature = "esp32c6")]
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
     {
         write_field!(packet.dump_len);
+        #[cfg(feature = "esp32c6")]
         write_field!(packet.he_sigb_len);
+        #[cfg(feature = "esp32c6")]
         write_field!(packet.cur_single_mpdu);
         write_field!(packet.cur_bb_format);
         write_field!(packet.rx_channel_estimate_info_vld);
@@ -797,6 +803,7 @@ fn write_text_array_packet(packet: CSIDataPacket) {
         write_field!(packet.rxmatch3);
         write_field!(packet.rxmatch2);
         write_field!(packet.rxmatch1);
+        #[cfg(feature = "esp32c6")]
         write_field!(packet.rxmatch0);
     }
     write_field!(packet.sig_len);
@@ -818,6 +825,7 @@ fn write_text_array_packet(packet: CSIDataPacket) {
 }
 
 /// Header line emitted once at the top of an ESP32-CSI-Tool capture.
+#[allow(dead_code)]
 const ESP_CSI_TOOL_HEADER: &str = "type,role,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_state,real_time_set,real_timestamp,len,CSI_DATA\n";
 
 /// Write `val` followed by a single space into `buf[*offset..]`, advancing
@@ -970,7 +978,7 @@ fn format_csi_tool_into(packet: &CSIDataPacket, buf: &mut [u8]) -> usize {
     buf[p] = b',';
     p += 1;
 
-    #[cfg(not(feature = "esp32c6"))]
+    #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
     {
         write_u32(buf, &mut p, packet.sig_mode);
         buf[p] = b',';
@@ -1024,7 +1032,7 @@ fn format_csi_tool_into(packet: &CSIDataPacket, buf: &mut [u8]) -> usize {
         buf[p] = b',';
         p += 1;
     }
-    #[cfg(feature = "esp32c6")]
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
     {
         write_slice(buf, &mut p, b"0,0,0,0,0,0,0,0,0,");
         write_i32(buf, &mut p, packet.noise_floor);
@@ -1193,13 +1201,13 @@ fn write_csi_tool_packet(packet: CSIDataPacket) {
     }
 
     let t0 = embassy_time::Instant::now();
-    let n = format_csi_tool_into(&packet, scratch);
+    let _n = format_csi_tool_into(&packet, scratch);
     let t1 = embassy_time::Instant::now();
 
     #[cfg(all(feature = "esp32", any(feature = "uart", feature = "auto")))]
-    uart0_write_bytes_fast(&scratch[..n]);
+    uart0_write_bytes_fast(&scratch[.._n]);
     #[cfg(not(all(feature = "esp32", any(feature = "uart", feature = "auto"))))]
-    log_raw!(&scratch[..n]);
+    log_raw!(&scratch[.._n]);
 
     let t2 = embassy_time::Instant::now();
     SYNC_FORMAT_US.fetch_add(t1.duration_since(t0).as_micros() as u64, Ordering::Relaxed);
@@ -1254,7 +1262,7 @@ async fn write_text_packet(packet: CSIDataPacket, driver: &mut LogOutput) -> Res
         send_line!("timestamp: {}\r\n", packet.timestamp);
         send_line!("sig len: {}\r\n", packet.sig_len);
         send_line!("rx state: {}\r\n", packet.rx_state);
-        #[cfg(not(feature = "esp32c6"))]
+        #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
         {
             send_line!("secondary channel: {}\r\n", packet.secondary_channel);
             send_line!("sgi: {}\r\n", packet.sgi);
@@ -1269,10 +1277,12 @@ async fn write_text_packet(packet: CSIDataPacket, driver: &mut LogOutput) -> Res
             send_line!("stbc: {}\r\n", packet.stbc);
             send_line!("fec coding: {}\r\n", packet.fec_coding);
         }
-        #[cfg(feature = "esp32c6")]
+        #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
         {
             send_line!("dump len: {}\r\n", packet.dump_len);
+            #[cfg(feature = "esp32c6")]
             send_line!("he sigb len: {}\r\n", packet.he_sigb_len);
+            #[cfg(feature = "esp32c6")]
             send_line!("cur single mpdu: {}\r\n", packet.cur_single_mpdu);
             send_line!("cur bb format: {}\r\n", packet.cur_bb_format);
             send_line!(
@@ -1290,6 +1300,7 @@ async fn write_text_packet(packet: CSIDataPacket, driver: &mut LogOutput) -> Res
             send_line!("rxmatch3: {}\r\n", packet.rxmatch3);
             send_line!("rxmatch2: {}\r\n", packet.rxmatch2);
             send_line!("rxmatch1: {}\r\n", packet.rxmatch1);
+            #[cfg(feature = "esp32c6")]
             send_line!("rxmatch0: {}\r\n", packet.rxmatch0);
         }
 
@@ -1378,7 +1389,7 @@ fn write_text_packet(packet: CSIDataPacket) {
     log_ln!("timestamp: {}", packet.timestamp);
     log_ln!("sig len: {}", packet.sig_len);
     log_ln!("rx state: {}", packet.rx_state);
-    #[cfg(not(feature = "esp32c6"))]
+    #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
     {
         log_ln!("secondary channel: {}", packet.secondary_channel);
         log_ln!("sgi: {}", packet.sgi);
@@ -1393,10 +1404,12 @@ fn write_text_packet(packet: CSIDataPacket) {
         log_ln!("stbc: {}", packet.stbc);
         log_ln!("fec coding: {}", packet.fec_coding);
     }
-    #[cfg(feature = "esp32c6")]
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
     {
         log_ln!("dump len: {}", packet.dump_len);
+        #[cfg(feature = "esp32c6")]
         log_ln!("he sigb len: {}", packet.he_sigb_len);
+        #[cfg(feature = "esp32c6")]
         log_ln!("cur single mpdu: {}", packet.cur_single_mpdu);
         log_ln!("cur bb format: {}", packet.cur_bb_format);
         log_ln!(
@@ -1414,13 +1427,17 @@ fn write_text_packet(packet: CSIDataPacket) {
         log_ln!("rxmatch3: {}", packet.rxmatch3);
         log_ln!("rxmatch2: {}", packet.rxmatch2);
         log_ln!("rxmatch1: {}", packet.rxmatch1);
+        #[cfg(feature = "esp32c6")]
         log_ln!("rxmatch0: {}", packet.rxmatch0);
     }
 
     log_ln!("sig_len: {}", packet.sig_len);
     log_ln!("data length: {}", packet.csi_data_len);
 
+    #[cfg(not(feature = "defmt"))]
     log_ln!("csi raw data: [{:X?}]", packet.csi_data);
+    #[cfg(feature = "defmt")]
+    log_ln!("csi raw data: [{=[?]}]", packet.csi_data.as_slice());
 }
 
 #[cfg(all(

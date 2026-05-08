@@ -16,10 +16,8 @@ use esp_csi_rs::{
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_radio::{
-    wifi::{ClientConfig, WifiController},
-    Controller,
-};
+use esp_radio::wifi::sta::StationConfig;
+use esp_radio::wifi::WifiController;
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
@@ -88,37 +86,24 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    #[cfg(any(feature = "esp32c6", feature = "esp32c3"))]
-    {
-        let sw_interrupt =
-            esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-        esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
-    }
-    #[cfg(not(any(feature = "esp32c6", feature = "esp32c3")))]
-    esp_rtos::start(timg0.timer0);
+    let sw_interrupt =
+        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     log_ln!("Embassy initialized!");
     log_ln!("Starting Wifi Station Node");
 
-    let radio_init = mk_static!(
-        Controller<'static>,
-        esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
-    );
-
-    let mut config_radio = esp_radio::wifi::Config::default().with_power_save_mode(esp_radio::wifi::PowerSaveMode::None);
-    // Raise Wi-Fi buffer budget for sustained ESP-NOW + CSI traffic.
-    config_radio = config_radio
-        .with_power_save_mode(esp_radio::wifi::PowerSaveMode::None);
+    let config_radio = esp_radio::wifi::ControllerConfig::default();
     let (wifi_controller, mut interfaces) =
-        esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
+        esp_radio::wifi::new(peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    let client_config = ClientConfig::default()
-        .with_ssid("SSID".to_string())
-        .with_password("PASS".to_string())
-        .with_auth_method(esp_radio::wifi::AuthMethod::Wpa2Personal);
+    let client_config = StationConfig::default()
+        .with_ssid("SSID")
+        .with_password("PASS@".to_string())
+        .with_auth_method(esp_radio::wifi::AuthenticationMethod::Wpa2Personal);
 
     let station_config = WifiStationConfig {
         client_config, // Pass the config we created above
@@ -136,9 +121,9 @@ async fn main(spawner: Spawner) -> ! {
         csi_hardware,
     );
     #[cfg(feature = "esp32c6")]
-    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNAX);
+    node.set_protocol(esp_radio::wifi::Protocol::AX);
     #[cfg(not(feature = "esp32c6"))]
-    node.set_protocol(esp_radio::wifi::Protocol::P802D11BGN);
+    node.set_protocol(esp_radio::wifi::Protocol::N);
 
     // Register the on-device CSI processing hook. Runs inline in the WiFi
     // callback for every CSI packet — also implicitly enables the publish

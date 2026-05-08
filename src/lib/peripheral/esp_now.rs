@@ -27,7 +27,9 @@ use esp_radio::esp_now::{Error as EspNowInnerError, EspNow, EspNowError, PeerInf
 
 use crate::esp_now_pool::PoolFrame;
 
-use portable_atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8};
+use portable_atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8};
+#[cfg(feature = "statistics")]
+use portable_atomic::AtomicU32;
 
 use crate::{EspNowConfig, IOTaskConfig};
 
@@ -152,7 +154,9 @@ struct Shared {
     is_collector: AtomicBool,
     central_mac: AtomicU64,
     peer_healthcheck_counter: AtomicU16,
+    #[cfg(feature = "statistics")]
     last_control_sequence: AtomicU32,
+    #[cfg(feature = "statistics")]
     sequence_initialized: AtomicBool,
     pending_recv_time: AtomicU64,
     pending_csu: AtomicU64,
@@ -217,7 +221,7 @@ fn ingest_control_packet(
         if !is_connected {
             // Lock onto the first valid central and add it as a unicast peer.
             let add_res = esp_now.add_peer(PeerInfo {
-                interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
+                interface: esp_radio::esp_now::EspNowWifiInterface::Station,
                 peer_address: r.info.src_address,
                 lmk: None,
                 channel: Some(channel),
@@ -246,7 +250,7 @@ fn ingest_control_packet(
             {
                 if esp_now
                     .add_peer(PeerInfo {
-                        interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
+                        interface: esp_radio::esp_now::EspNowWifiInterface::Station,
                         peer_address: expected,
                         lmk: None,
                         channel: Some(channel),
@@ -352,7 +356,9 @@ async fn responder(
         is_collector: AtomicBool::new(IS_COLLECTOR.load(Ordering::Relaxed)),
         central_mac: AtomicU64::new(0),
         peer_healthcheck_counter: AtomicU16::new(0),
+        #[cfg(feature = "statistics")]
         last_control_sequence: AtomicU32::new(0),
+        #[cfg(feature = "statistics")]
         sequence_initialized: AtomicBool::new(false),
         pending_recv_time: AtomicU64::new(0),
         pending_csu: AtomicU64::new(0),

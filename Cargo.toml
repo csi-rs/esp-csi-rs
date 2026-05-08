@@ -1,7 +1,7 @@
 [package]
 name = "esp-csi-rs"
-version = "0.5.12"
-edition = "2021"
+version = "0.5.2"
+edition = "2024"
 authors = ["Omar Hiari", "Ammar Saleh", "Abdullah Alawad", "Maryam Odat"]
 description = "ESP CSI Driver for Rust"
 keywords = ["embedded", "esp32", "wifi", "csi"]
@@ -28,7 +28,7 @@ auto = ["esp-println/auto"]
 ## Enable logging via defmt.
 defmt = [
     "dep:defmt",
-    "dep:defmt-rtt",
+    "esp-println/defmt-espflash",
     "esp-hal/defmt",
     "esp-radio/defmt",
     "esp-backtrace/defmt",
@@ -57,21 +57,6 @@ esp32 = [
     "esp-radio/csi",
     "esp-radio/sniffer",
     "esp-rtos/esp32",
-]
-
-## Support for the ESP32-C2
-esp32c2 = [
-    "esp-backtrace/esp32c2",
-    "esp-bootloader-esp-idf/esp32c2",
-    "esp-backtrace/println",
-    "esp-hal/esp32c2",
-    "esp-hal/rt",
-    "esp-println/esp32c2",
-    "esp-println/critical-section",
-    "esp-radio/esp32c2",
-    "esp-radio/csi",
-    "esp-radio/sniffer",
-    "esp-rtos/esp32c2",
 ]
 
 ## Support for the ESP32-C3
@@ -115,19 +100,32 @@ esp32s3 = [
     "esp-rtos/esp32s3",
 ]
 
+esp32c5 = [
+    "esp-hal/esp32c5",
+    "esp-hal/rt",
+    "esp-backtrace/esp32c5",
+    "esp-radio/esp32c5",
+    "esp-bootloader-esp-idf/esp32c5",
+    "esp-radio/csi",
+    "esp-radio/sniffer",
+    "esp-println/esp32c5",
+    "esp-println/critical-section",
+    "esp-rtos/esp32c5",
+]
+
 
 [dependencies]
 # Core dependencies required for ESP HAL/RTOS, radio, and networking.
 # Core dependencies
-esp-hal = { version = "~1.0", default-features = false, optional = false, features = [
+esp-hal = { version = "~1.1", default-features = false, optional = false, features = [
     "unstable",
 ] }
-esp-rtos = { version = "0.2.0", optional = false, features = [
+esp-rtos = { version = "0.3.0", optional = false, features = [
     "embassy",
     "esp-alloc",
     "esp-radio",
 ] }
-esp-bootloader-esp-idf = { version = "0.4.0", optional = false, features = [] }
+esp-bootloader-esp-idf = { version = "0.5.0", optional = false, features = [] }
 embassy-net = { version = "0.7.1", features = [
     "dhcpv4",
     "medium-ethernet",
@@ -136,22 +134,20 @@ embassy-net = { version = "0.7.1", features = [
     "raw",
 ] }
 embedded-io-async = { version = "0.7.0", optional = false }
-esp-alloc = { version = "0.9.0", optional = false }
-esp-backtrace = { version = "0.18.1", optional = false, features = [
+esp-alloc = { version = "0.10.0", optional = false }
+esp-backtrace = { version = "0.19.0", optional = false, features = [
     "panic-handler",
 ] }
-esp-println = { version = "0.16.1", optional = false, default-features = false, features = [
+esp-println = { version = "0.17.0", optional = false, default-features = false, features = [
 ] }
-embassy-executor = { version = "0.9.1", optional = false }
+embassy-executor = { version = "0.10.0", optional = false }
 embassy-time = { version = "0.5.0", optional = false }
-esp-radio = { version = "0.17.0", default-features = false, optional = false, features = [
+esp-radio = { version = "0.18.0", default-features = false, optional = false, features = [
     "wifi",
     "sniffer",
     "esp-alloc",
-    "smoltcp",
     "unstable",
     "esp-now",
-    "csi",
 ] }
 smoltcp = { version = "0.12.0", default-features = false, features = [
     "medium-ethernet",
@@ -168,7 +164,7 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
 heapless = { version = "0.7", default-features = false, optional = false, features = [
     "serde",
 ] }
-embassy-sync = { version = "0.7.0", optional = false }
+embassy-sync = { version = "0.8.0", optional = false }
 enumset = { version = "1.1.5", optional = false }
 embassy-futures = "0.1.2"
 static_cell = "2.1.1"
@@ -176,7 +172,6 @@ static_cell = "2.1.1"
 document-features = "0.2.11"
 
 defmt = { version = "1.0.1", optional = true }
-defmt-rtt = { version = "1.1.0", optional = true }
 
 log = { version = "0.4.29", optional = true }
 
