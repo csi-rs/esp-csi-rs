@@ -115,6 +115,12 @@ jobs:
 
       - name: Install ESP Rust toolchain
         shell: bash
+        env:
+          # espup queries the GitHub API for the latest Xtensa Rust release;
+          # unauthenticated requests are rate-limited to 60/hour. The
+          # workflow-scoped GITHUB_TOKEN bumps this to ~5000/hour and
+          # eliminates 403 Forbidden under matrix parallelism.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           cargo +stable install espup --locked
@@ -189,6 +195,12 @@ jobs:
 
       - name: Install ESP Rust toolchain
         shell: bash
+        env:
+          # espup queries the GitHub API for the latest Xtensa Rust release;
+          # unauthenticated requests are rate-limited to 60/hour. The
+          # workflow-scoped GITHUB_TOKEN bumps this to ~5000/hour and
+          # eliminates 403 Forbidden under matrix parallelism.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           cargo +stable install espup --locked
