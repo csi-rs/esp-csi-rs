@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "esp-csi-rs"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "defmt 1.0.1",
  "document-features",

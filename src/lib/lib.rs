@@ -913,6 +913,17 @@ impl PeripheralPacket {
 }
 
 fn reset_globals() {
+    // Close all CSI delivery gates so any late-firing WiFi callback runs
+    // are no-ops. The CSI callback stays registered with esp-radio after
+    // stop (the radio itself is still up), but with the gates closed the
+    // callback short-circuits before it touches the log channel or the
+    // user's callback. Without this, sniffer/ESP-NOW/STA nodes keep
+    // emitting CSI lines on the serial port well after `send_stop()`.
+    CSI_INLINE_LOG_ENABLED.store(false, Ordering::Release);
+    CSI_PUBLISH_ENABLED.store(false, Ordering::Release);
+    CSI_DELIVERY_MODE.store(CsiDeliveryMode::Off as u8, Ordering::Release);
+    CSI_CALLBACK.store(core::ptr::null_mut(), core::sync::atomic::Ordering::Release);
+
     #[cfg(feature = "statistics")]
     {
         STATS.tx_count.store(0, Ordering::Relaxed);

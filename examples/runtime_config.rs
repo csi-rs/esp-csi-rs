@@ -43,13 +43,7 @@ macro_rules! mk_static {
 async fn node_task_listener(client: &mut CSINodeClient) {
     log_ln!("Starting Listener Task");
 
-    with_timeout(Duration::from_secs(10), async {
-        loop {
-            Timer::after(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_err();
+    Timer::after(Duration::from_millis(10)).await;
     client.send_stop().await;
 }
 

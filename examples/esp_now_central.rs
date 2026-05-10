@@ -123,7 +123,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(EspNowConfig::default().with_channel(7))),
+        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(EspNowConfig::default())),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
         Some(1000),
