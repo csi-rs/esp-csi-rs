@@ -414,8 +414,17 @@ pub async fn sta_network_ops(sta_stack: Stack<'_>, frequency_hz: Option<u16>) {
                 let ipv4_packet_buffer = ipv4_packet.into_inner();
                 // --- PACKET CONSTRUCTION END ---
 
-                // Send raw packet
-                raw_socket.send(ipv4_packet_buffer).await;
+                // Send raw packet. Guard against `STOP_SIGNAL` because if the
+                // link drops or the egress queue stalls during shutdown, this
+                // future would otherwise pend forever and hang the join in
+                // `run_sta_connect` — which in turn hangs `node.run()`.
+                match select(STOP_SIGNAL.wait(), raw_socket.send(ipv4_packet_buffer)).await {
+                    Either::First(_) => {
+                        STOP_SIGNAL.signal(());
+                        break;
+                    }
+                    Either::Second(_) => {}
+                }
             }
             Either3::Third(new_ip_info) => {
                 ip_info = new_ip_info;
