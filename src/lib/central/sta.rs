@@ -5,7 +5,9 @@
 //! flowing while the device is associated. The Wi-Fi driver delivers CSI
 //! samples for received frames out-of-band via the global CSI channel.
 
-use core::{net::Ipv4Addr};
+use core::cell::UnsafeCell;
+use core::mem::MaybeUninit;
+use core::net::Ipv4Addr;
 use embassy_futures::join::{join3, join4};
 use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_net::raw::{IpProtocol, IpVersion, PacketMetadata, RawSocket};
@@ -13,6 +15,7 @@ use embassy_net::{Ipv4Address, Ipv4Cidr, Runner, Stack, StackResources};
 use embassy_time::{with_timeout, Duration, Timer};
 use esp_radio::wifi::csi::CsiConfig;
 use esp_radio::wifi::{Config, Interface, WifiController};
+use portable_atomic::{AtomicBool, Ordering};
 use smoltcp::phy::ChecksumCapabilities;
 
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
@@ -24,14 +27,47 @@ use crate::{set_csi, IOTaskConfig, WifiStationConfig, STOP_SIGNAL};
 
 static DHCP_CLIENT_INFO: Signal<CriticalSectionRawMutex, IpInfo> = Signal::new();
 
-macro_rules! mk_static {
-    ($t:ty,$val:expr) => {{
-        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-        #[deny(unused_attributes)]
-        let x = STATIC_CELL.uninit().write(($val));
-        x
-    }};
+/// One-shot-then-reusable storage for the STA stack's `StackResources`.
+///
+/// `StaticCell` panics on the second `uninit()`, which broke
+/// stop-then-restart cycles for `CSINode::run`. The previous `&mut` borrow
+/// is always gone by the time we land here again (`node.run` joins every
+/// STA task before returning, dropping the `Stack`/`Runner`), so we can
+/// safely hand the same buffer back out.
+struct StackResourcesSlot {
+    cell: UnsafeCell<MaybeUninit<StackResources<6>>>,
+    inited: AtomicBool,
 }
+
+// SAFETY: Access is serialised — `sta_init` is only called from
+// `CSINode::run`/`run_duration`, which run on a single executor with
+// exclusive `&mut self`, and any prior `&mut` to the inner storage has
+// been dropped before we get here.
+unsafe impl Sync for StackResourcesSlot {}
+
+impl StackResourcesSlot {
+    const fn new() -> Self {
+        Self {
+            cell: UnsafeCell::new(MaybeUninit::uninit()),
+            inited: AtomicBool::new(false),
+        }
+    }
+
+    fn get_or_init(&'static self) -> &'static mut StackResources<6> {
+        // SAFETY: see the `Sync` impl. First call writes the value; later
+        // calls reuse the same buffer. `StackResources` has no destructor
+        // state that depends on initialising "fresh" — embassy-net reuses
+        // it just like any user-owned buffer.
+        unsafe {
+            if !self.inited.swap(true, Ordering::AcqRel) {
+                (*self.cell.get()).write(StackResources::<6>::new());
+            }
+            (*self.cell.get()).assume_init_mut()
+        }
+    }
+}
+
+static STACK_RESOURCES: StackResourcesSlot = StackResourcesSlot::new();
 
 /// DHCP-acquired IP configuration for the STA interface.
 #[derive(Debug, Clone)]
@@ -49,11 +85,13 @@ pub fn sta_init<'a>(
     let sta_ip_config = embassy_net::Config::dhcpv4(Default::default());
     let seed = 123456_u64;
 
-    // Create STA Network Stack and Runner
+    // Create STA Network Stack and Runner. `StackResources` is held in a
+    // reusable static so stop-then-restart cycles don't trip the old
+    // `StaticCell::uninit()` panic.
     let (sta_stack, sta_runner) = embassy_net::new(
         interfaces,
         sta_ip_config,
-        mk_static!(StackResources<6>, StackResources::<6>::new()),
+        STACK_RESOURCES.get_or_init(),
         seed,
     );
 
