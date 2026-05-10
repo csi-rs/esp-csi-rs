@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-rs"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 authors = ["theembeddedrustacean", "stacks-of-data", "Abdullah-Alawad", "modatt"]
 description = "ESP CSI Driver for Rust"
