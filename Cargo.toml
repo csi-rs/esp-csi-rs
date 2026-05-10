@@ -2,7 +2,7 @@
 name = "esp-csi-rs"
 version = "0.6.1"
 edition = "2024"
-authors = ["Omar Hiari", "Ammar Saleh", "Abdullah Alawad", "Maryam Odat"]
+authors = ["theembeddedrustacean", "stacks-of-data", "Abdullah-Alawad", "modatt"]
 description = "ESP CSI Driver for Rust"
 keywords = ["embedded", "esp32", "wifi", "csi"]
 categories = ["embedded"]
