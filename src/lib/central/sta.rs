@@ -188,12 +188,23 @@ async fn run_net_task(mut sta_runner: Runner<'_, &mut Interface<'_>>) {
 }
 
 /// Run a DHCP client and publish the acquired IP configuration.
+///
+/// Every await in this task is guarded by `STOP_SIGNAL` — without that, a
+/// stop request issued mid-DHCP (or while idly waiting for the link to
+/// flap) would leave this future pending forever and prevent the join in
+/// `run_sta_connect` from completing, which in turn would hang `node.run()`.
 async fn run_dhcp_client(sta_stack: Stack<'_>) {
     log_ln!("Running DHCP Client");
 
     loop {
         // Check if link is up
-        sta_stack.wait_link_up().await;
+        match select(STOP_SIGNAL.wait(), sta_stack.wait_link_up()).await {
+            Either::First(_) => {
+                STOP_SIGNAL.signal(());
+                return;
+            }
+            Either::Second(_) => {}
+        }
         log_ln!("Link is up!");
 
         // Create instance to store acquired IP information
@@ -203,7 +214,13 @@ async fn run_dhcp_client(sta_stack: Stack<'_>) {
         };
 
         log_ln!("Acquiring config...");
-        sta_stack.wait_config_up().await;
+        match select(STOP_SIGNAL.wait(), sta_stack.wait_config_up()).await {
+            Either::First(_) => {
+                STOP_SIGNAL.signal(());
+                return;
+            }
+            Either::Second(_) => {}
+        }
         log_ln!("Config Acquired");
 
         // Print out acquired IP configuration
@@ -226,7 +243,13 @@ async fn run_dhcp_client(sta_stack: Stack<'_>) {
 
                 break;
             }
-            Timer::after(Duration::from_millis(500)).await;
+            match select(STOP_SIGNAL.wait(), Timer::after(Duration::from_millis(500))).await {
+                Either::First(_) => {
+                    STOP_SIGNAL.signal(());
+                    return;
+                }
+                Either::Second(_) => {}
+            }
         }
 
         // Publish DHCP info. On reconnect this updates consumers.
@@ -234,7 +257,13 @@ async fn run_dhcp_client(sta_stack: Stack<'_>) {
 
         // Wait until link drops before looping for next lease/config.
         while sta_stack.is_link_up() {
-            Timer::after(Duration::from_millis(250)).await;
+            match select(STOP_SIGNAL.wait(), Timer::after(Duration::from_millis(250))).await {
+                Either::First(_) => {
+                    STOP_SIGNAL.signal(());
+                    return;
+                }
+                Either::Second(_) => {}
+            }
         }
         log_ln!("Link down, waiting to reacquire DHCP config...");
     }

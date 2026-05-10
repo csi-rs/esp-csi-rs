@@ -54,7 +54,7 @@ fn on_csi(packet: &CSIDataPacket) {
 }
 
 async fn stats_task() {
-    with_timeout(Duration::from_secs(1000), async {
+    with_timeout(Duration::from_secs(5), async {
         loop {
             Timer::after_secs(1).await;
             log_ln!(
@@ -102,7 +102,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let client_config = StationConfig::default()
         .with_ssid("SSID")
-        .with_password("PASS@".to_string())
+        .with_password("PASS".to_string())
         .with_auth_method(esp_radio::wifi::AuthenticationMethod::Wpa2Personal);
 
     let station_config = WifiStationConfig {
@@ -130,8 +130,14 @@ async fn main(spawner: Spawner) -> ! {
     // gate so the callback fires.
     set_csi_callback(on_csi);
 
-    let _ = &mut node_handle;
-    join(node.run(), stats_task()).await;
+    // Drive stats for the configured timeout, then ask the node to stop so
+    // `node.run()` can drain its STA tasks and the join completes. Without
+    // sending stop the join blocks forever and we never reach the loop below.
+    let driver = async {
+        stats_task().await;
+        node_handle.send_stop().await;
+    };
+    join(node.run(), driver).await;
 
     loop {
         log_ln!("Hello world!");
