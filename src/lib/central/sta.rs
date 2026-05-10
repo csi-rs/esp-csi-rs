@@ -316,8 +316,16 @@ pub async fn sta_connection(controller: &mut WifiController<'_>) {
 
 /// Manage station network operations and emit periodic ICMP traffic.
 pub async fn sta_network_ops(sta_stack: Stack<'_>, frequency_hz: Option<u16>) {
-    // Retrieve acquired IP information from DHCP
-    let mut ip_info = DHCP_CLIENT_INFO.wait().await;
+    // Retrieve acquired IP information from DHCP. Guard against `STOP_SIGNAL`
+    // — if stop fires before DHCP completes (e.g. AP never associated), this
+    // unguarded wait would hang the join in `run_sta_connect`.
+    let mut ip_info = match select(STOP_SIGNAL.wait(), DHCP_CLIENT_INFO.wait()).await {
+        Either::First(_) => {
+            STOP_SIGNAL.signal(());
+            return;
+        }
+        Either::Second(info) => info,
+    };
 
     // let mut start_collection_watch = match START_COLLECTION.receiver() {
     //     Some(r) => r,
