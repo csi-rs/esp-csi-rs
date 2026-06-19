@@ -40,6 +40,7 @@ use core::task::Poll;
 
 use embassy_sync::waitqueue::AtomicWaker;
 use heapless::mpmc::Q16;
+use portable_atomic::{AtomicBool, AtomicPtr, Ordering};
 
 /// ESP-NOW maximum data payload (matches `esp_radio::esp_now::ESP_NOW_MAX_DATA_LEN`).
 const ESP_NOW_MAX_DATA_LEN: usize = 250;
@@ -98,6 +99,34 @@ static QUEUE: Q16<PoolFrame> = Q16::new();
 /// the codebase (the responder/handler task), so a single-slot waker is fine.
 static WAKER: AtomicWaker = AtomicWaker::new();
 
+/// Raw-drop mode (CPU-benchmark use). When enabled, `pool_rcv_cb` discards the
+/// frame immediately — no payload copy, no enqueue, no waker wake — so no
+/// separate responder task is woken per frame. This makes the per-frame
+/// ESP-NOW receive path "callback fires → returns", matching the ESP-IDF
+/// reference's empty inline `recv_cb` (no app-task hop, no extra context
+/// switch). CSI still fires via the independent `capture_csi_info` path.
+/// Driven by [`crate::set_raw_listen`] (which also enables raw CSI delivery).
+static RAW_DROP: AtomicBool = AtomicBool::new(false);
+
+/// Enable/disable raw-drop mode — see [`RAW_DROP`]. Set before the node starts.
+pub fn set_raw_drop(enabled: bool) {
+    RAW_DROP.store(enabled, Ordering::Relaxed);
+}
+
+/// Optional raw-recv callback (min/drop-test use). When set **and** raw-drop is
+/// on, `pool_rcv_cb` hands each frame's payload slice to this callback inline,
+/// before discarding the frame — so a minimal receiver can read e.g. a sequence
+/// number with no responder-task hop or `ControlPacket` ingest, matching the
+/// ESP-IDF reference's inline `recv_cb`. Stored as an erased `fn(&[u8])`.
+static RAW_RECV_CALLBACK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Register a raw-recv callback — see [`RAW_RECV_CALLBACK`]. Pair with
+/// [`crate::set_raw_listen`]`(true)`. The callback runs in the WiFi task's
+/// C-FFI context, so it must return quickly and do only lock-free bookkeeping.
+pub fn set_raw_recv_callback(cb: fn(&[u8])) {
+    RAW_RECV_CALLBACK.store(cb as *mut (), Ordering::Release);
+}
+
 /// Custom receive callback installed via `esp_now_register_recv_cb`. Runs on
 /// the WiFi task in C-FFI context; must do no heap operations and finish
 /// quickly so the WiFi RX path keeps moving.
@@ -106,6 +135,22 @@ unsafe extern "C" fn pool_rcv_cb(
     data: *const u8,
     data_len: i32,
 ) {
+    // Raw-drop fast path (CPU-benchmark / min-drop): discard before any
+    // copy/enqueue/wake, so no responder task is woken — the fair match to the
+    // IDF empty recv_cb. If a raw-recv callback is registered (min drop test),
+    // hand it the payload slice inline first so it can read the sequence number.
+    if RAW_DROP.load(Ordering::Relaxed) {
+        let cb_ptr = RAW_RECV_CALLBACK.load(Ordering::Acquire);
+        if !cb_ptr.is_null() && !data.is_null() && data_len > 0 {
+            let len = (data_len as usize).min(ESP_NOW_MAX_DATA_LEN);
+            // SAFETY: cb_ptr was stored from a `fn(&[u8])` in set_raw_recv_callback;
+            // `data`/`len` describe a valid frame buffer for the call's duration.
+            let cb: fn(&[u8]) = unsafe { core::mem::transmute(cb_ptr) };
+            let slice = unsafe { core::slice::from_raw_parts(data, len) };
+            cb(slice);
+        }
+        return;
+    }
     if info.is_null() || data.is_null() || data_len <= 0 {
         return;
     }

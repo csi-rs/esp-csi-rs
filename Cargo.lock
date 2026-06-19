@@ -96,7 +96,7 @@ checksum = "211713d2e9fb4793ce4360a712c0764264aff6be48932ccf02ca2a331c0436a9"
 dependencies = [
  "btuuid",
  "defmt 1.0.1",
- "embassy-sync 0.7.2",
+ "embassy-sync 0.8.0",
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
  "futures-intrusive",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "esp-csi-rs"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "defmt 1.0.1",
  "document-features",
@@ -830,6 +830,7 @@ dependencies = [
  "log",
  "portable-atomic",
  "postcard",
+ "rtos-trace",
  "serde",
  "smoltcp",
  "static_cell",
@@ -1070,6 +1071,7 @@ dependencies = [
  "esp-sync",
  "portable-atomic",
  "riscv",
+ "rtos-trace",
  "xtensa-lx",
 ]
 
@@ -1879,6 +1881,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtos-trace"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b98eedd0788a3a3cda71901f199a87f68531bd6800ef69c946210d2dd6ba5456"
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2398,18 +2406,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.40"
+version = "0.8.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a789c6e490b576db9f7e6b6d661bcc9799f7c0ac8352f56ea20193b2681532e5"
+checksum = "ce1022995ff5ff5d841ad7d994facc23098cd40152f2c1d11cd607c6f530653f"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.40"
+version = "0.8.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f65c489a7071a749c849713807783f70672b28094011623e200cb86dcb835953"
+checksum = "1ae7f38b72ec2a254e2b87ef277cf2cd4fb97cbebf944faa6f33354da0867930"
 dependencies = [
  "proc-macro2",
  "quote",

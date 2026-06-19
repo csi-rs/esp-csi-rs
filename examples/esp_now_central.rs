@@ -11,9 +11,8 @@ use esp_csi_rs::{
     config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
 };
 use esp_csi_rs::{
-    get_dropped_packets_rx, get_one_way_latency, get_pps_rx, get_pps_tx, get_total_rx_packets,
-    get_total_tx_packets, get_two_way_latency, log_ln, set_csi_callback, CSINodeClient,
-    CSINodeHardware,
+    get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_total_rx_packets, get_total_tx_packets,
+    log_ln, set_csi_callback, CSINodeClient, CSINodeHardware,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -81,7 +80,7 @@ async fn stats_task() {
         last_tx_total = tx_total;
 
         log_ln!(
-                "RX PPS(avg): {}, TX PPS(avg): {}, RX Hz(inst): {}, TX Hz(inst): {}, RX Total: {}, TX Total: {}, RX Dropped Packets: {}, One Way Latency: {}, Two Way Latency: {}, CSI Packets: {}, Latest RSSI: {}",
+                "RX PPS(avg): {}, TX PPS(avg): {}, RX Hz(inst): {}, TX Hz(inst): {}, RX Total: {}, TX Total: {}, RX Dropped Packets: {}, CSI Packets: {}, Latest RSSI: {}",
                 get_pps_rx(),
                 get_pps_tx(),
                 rx_rate_hz,
@@ -89,8 +88,6 @@ async fn stats_task() {
                 rx_total,
                 tx_total,
                 get_dropped_packets_rx(),
-                get_one_way_latency(),
-                get_two_way_latency(),
                 CSI_PKT_COUNT.load(Ordering::Relaxed),
                 LATEST_RSSI.load(Ordering::Relaxed),
             )

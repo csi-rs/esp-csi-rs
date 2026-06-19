@@ -58,7 +58,7 @@ rustflags = [
 # Default log level for ESP-IDF logging output.
 ESP_LOG = "INFO"
 # Match monitor baud with UART logger baud (see src/lib/logging/logging.rs).
-MONITOR_BAUD = "115200"
+MONITOR_BAUD = "460800"
 # defmt log filter (only consulted when the `defmt` feature is on).
 DEFMT_LOG = "info"
 

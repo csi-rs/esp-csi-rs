@@ -3,14 +3,12 @@
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
     config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
 };
-use esp_csi_rs::{
-    CSINodeClient, CSINodeHardware, get_pps_rx, get_pps_tx, get_dropped_packets_rx, log_ln,
-};
+use esp_csi_rs::{CSINodeClient, CSINodeHardware, log_ln, set_csi_logging_enabled};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -39,30 +37,34 @@ macro_rules! mk_static {
     }};
 }
 
-async fn node_task_listener(client: &mut CSINodeClient) {
-    log_ln!("Starting Listener Task");
+async fn node_task(_client: &mut CSINodeClient) {
+    // Settle delay so post-init async allocations have landed before the
+    // baseline marker is captured.
+    Timer::after_secs(2).await;
 
-    Timer::after(Duration::from_millis(10)).await;
-    client.send_stop().await;
-}
+    let baseline_free = esp_alloc::HEAP.free();
+    let mut min_ever = baseline_free;
+    log_ln!("HEAP_BASELINE,{}", baseline_free);
 
-async fn node_task_collector(client: &mut CSINodeClient) {
-    log_ln!("Starting Collector Task");
-
-    with_timeout(Duration::from_secs(10), async {
-        loop {
-            Timer::after_secs(1).await;
-            log_ln!(
-                "RX PPS: {}, TX PPS: {}, RX Dropped Packets: {}",
-                get_pps_rx(),
-                get_pps_tx(),
-                get_dropped_packets_rx()
-            )
+    loop {
+        Timer::after_secs(1).await;
+        let t_ms = Instant::now().as_millis();
+        let free = esp_alloc::HEAP.free();
+        if free < min_ever {
+            min_ever = free;
         }
-    })
-    .await
-    .unwrap_err();
-    client.send_stop().await;
+        let used_delta: i64 = baseline_free as i64 - free as i64;
+        // esp-alloc 0.10 exposes no largest-contiguous-free API; emit 0 per spec.
+        let largest_free: usize = 0;
+        log_ln!(
+            "HEAP,{},{},{},{},{}",
+            t_ms,
+            free,
+            used_delta,
+            min_ever,
+            largest_free
+        );
+    }
 }
 
 #[esp_rtos::main]
@@ -72,8 +74,9 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     init_logger(spawner, LogMode::Text);
+    set_csi_logging_enabled(false);
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -81,9 +84,14 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting Runtime Config Node");
+    log_ln!("Starting EspNow Peripheral Node (Exper Heap)");
 
-    let config_radio = esp_radio::wifi::ControllerConfig::default();
+    // Raise Wi-Fi buffer budget for sustained ESP-NOW + CSI traffic.
+    let config_radio = esp_radio::wifi::ControllerConfig::default()
+        .with_static_rx_buf_num(25)
+        .with_dynamic_rx_buf_num(128)
+        .with_ampdu_rx_enable(false)
+        .with_rx_queue_size(32);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
@@ -93,20 +101,20 @@ async fn main(spawner: Spawner) -> ! {
     let mut node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(
-            EspNowConfig::default(),
+        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
+            // ESP-NOW-class channel = 11 (matched with the central heap test and
+            // the esp-csi ESP-NOW heap apps).
+            EspNowConfig::default().with_channel(11),
         )),
-        CollectionMode::Collector,
+        CollectionMode::Listener,
         Some(CsiConfig::default()),
-        Some(1000),
+        Some(10000),
         csi_hardware,
     );
-    node.set_protocol(esp_radio::wifi::Protocol::LR);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
-    
-    join(node.run(), node_task_collector(&mut node_handle)).await;
-    node.set_collection_mode(CollectionMode::Listener);
-    join(node.run(), node_task_listener(&mut node_handle)).await;
+    node.set_protocol(esp_radio::wifi::Protocol::N);
+    node.set_tx_enabled(false);
+
+    join(node.run(), node_task(&mut node_handle)).await;
 
     loop {
         log_ln!("Hello world!");

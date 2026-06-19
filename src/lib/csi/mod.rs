@@ -9,6 +9,9 @@ use postcard::experimental::max_size::MaxSize;
 use serde::{Deserialize, Serialize};
 use crate::time::DateTime;
 
+/// CSI delivery state machine (callbacks, async queue, inline logging).
+pub mod delivery;
+
 /// A mapping of the different possible recieved CSI data formats supported by the Espressif WiFi driver.
 /// `RxCSIFmt`` encodes the different formats (each column in the table) in one byte to save space when transmitting back CSI data.
 /// The driver can be found here:

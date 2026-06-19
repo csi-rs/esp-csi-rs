@@ -19,3 +19,7 @@ rustc-ice-*
 # Visual Studio Code settings folder
 .vscode/
 specs/
+
+# LLM Artifacts
+.claude
+.cachebro

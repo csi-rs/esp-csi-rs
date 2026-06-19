@@ -77,7 +77,7 @@ pub fn unix_to_date_time(
 
 /// Return `true` when `year` is a leap year in the Gregorian calendar.
 pub fn is_leap_year(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 /// Return the number of days in `year`.

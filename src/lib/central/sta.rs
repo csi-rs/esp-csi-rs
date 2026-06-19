@@ -53,6 +53,10 @@ impl StackResourcesSlot {
         }
     }
 
+    // Single-call init guarded by `inited`; access is serialised (see the
+    // `Sync` impl and the SAFETY note below), so the `&mut`-from-`&` is sound
+    // by construction — clippy's `mut_from_ref` is a false positive here.
+    #[allow(clippy::mut_from_ref)]
     fn get_or_init(&'static self) -> &'static mut StackResources<6> {
         // SAFETY: see the `Sync` impl. First call writes the value; later
         // calls reuse the same buffer. `StackResources` has no destructor
