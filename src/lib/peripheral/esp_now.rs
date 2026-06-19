@@ -1,19 +1,22 @@
 //! Peripheral-side ESP-NOW driver task.
 //!
 //! Receives [`crate::ControlPacket`] frames from the central, mirrors the
-//! collector mode advertised by the central, stamps the receive/send
-//! uptimes, and replies with a [`crate::PeripheralPacket`] for the
-//! central's latency-tracking pipeline. Operates against the lock-free
+//! collector mode advertised by the central, and replies with a
+//! [`crate::PeripheralPacket`] presence beacon. Operates against the lock-free
 //! [`crate::esp_now_pool`] receive queue to avoid heap churn in the
 //! ESP-NOW interrupt path.
 
 use core::sync::atomic::Ordering;
 
 use crate::log_ln;
+use crate::parse_with_magic;
+use crate::serialize_with_magic;
 use crate::set_runtime_collection_mode;
 use crate::ControlPacket;
 use crate::PeripheralPacket;
 use crate::CENTRAL_MAGIC_NUMBER;
+use crate::PERIPHERAL_BEACON_SENTINEL;
+use crate::PERIPHERAL_MAGIC_NUMBER;
 use crate::IS_COLLECTOR;
 #[cfg(feature = "statistics")]
 use crate::STATS;
@@ -41,7 +44,7 @@ const ADAPT_DOWN_PERCENT: u64 = 25;
 const ADAPT_UP_PERCENT: u64 = 10;
 const MIN_REPLY_HZ_FLOOR: u64 = 100;
 const MAX_REPLY_HZ_CEILING: u64 = 8_000;
-const PERIPHERAL_PACKET_BUF_LEN: usize = 32;
+const PERIPHERAL_PACKET_BUF_LEN: usize = 8;
 const TX_CATCH_UP_BURST: u8 = 3;
 const TX_CATCH_UP_BURST_NO_WAIT: u8 = 16;
 const RX_BURST_MAX_WITH_TX: u16 = 16;
@@ -67,7 +70,30 @@ static RX_PEER_ADD_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "statistics")]
 static RX_SEQUENCE_MISS_COUNT: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "statistics")]
+static RX_CONTROL_PACKET_COUNT: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "statistics")]
 static RX_TX_GUARD_BREAK_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Raw-listen mode (CPU-benchmark use). When enabled, the responder still
+/// drains received ESP-NOW frames from the pool but `ingest_control_packet`
+/// returns immediately — skipping the postcard deserialize, magic/source
+/// checks, sequence/timestamp bookkeeping and mode hysteresis. This is the
+/// fair match to the ESP-IDF reference's empty receive callback. See
+/// [`set_raw_listen`].
+static RAW_LISTEN: AtomicBool = AtomicBool::new(false);
+
+/// Enable/disable raw-listen mode — see [`RAW_LISTEN`]. Set this before the
+/// node starts so no control packets are ingested during the run.
+///
+/// Also enables pool raw-drop ([`crate::esp_now_pool::set_raw_drop`]) so the
+/// receive callback discards frames inline without waking the responder task —
+/// removing the per-frame context switch so the RX path matches the ESP-IDF
+/// reference's empty inline `recv_cb`. The `ingest_control_packet` early-return
+/// below is then a harmless backstop (the responder never receives a frame).
+pub fn set_raw_listen(enabled: bool) {
+    RAW_LISTEN.store(enabled, Ordering::Relaxed);
+    crate::esp_now_pool::set_raw_drop(enabled);
+}
 
 #[cfg(feature = "statistics")]
 fn reset_rx_diagnostics() {
@@ -76,6 +102,7 @@ fn reset_rx_diagnostics() {
     RX_SOURCE_FILTER_DROP_COUNT.store(0, Ordering::Relaxed);
     RX_PEER_ADD_FAIL_COUNT.store(0, Ordering::Relaxed);
     RX_SEQUENCE_MISS_COUNT.store(0, Ordering::Relaxed);
+    RX_CONTROL_PACKET_COUNT.store(0, Ordering::Relaxed);
     RX_TX_GUARD_BREAK_COUNT.store(0, Ordering::Relaxed);
 }
 
@@ -112,6 +139,15 @@ pub fn get_rx_peer_add_fail_packets() -> u64 {
 #[cfg(feature = "statistics")]
 pub fn get_rx_sequence_miss_packets() -> u64 {
     RX_SEQUENCE_MISS_COUNT.load(Ordering::Relaxed)
+}
+
+/// Returns the number of valid control packets received from the central
+/// (passed source/parse/magic checks). Together with
+/// [`get_rx_sequence_miss_packets`] this gives the sequence-gap drop rate:
+/// `missed / (received + missed)`.
+#[cfg(feature = "statistics")]
+pub fn get_rx_control_packets() -> u64 {
+    RX_CONTROL_PACKET_COUNT.load(Ordering::Relaxed)
 }
 
 /// Returns the number of times an RX completed inside the TX guard
@@ -158,8 +194,8 @@ struct Shared {
     last_control_sequence: AtomicU32,
     #[cfg(feature = "statistics")]
     sequence_initialized: AtomicBool,
-    pending_recv_time: AtomicU64,
-    pending_csu: AtomicU64,
+    /// Raised when a valid control packet has been ingested and a presence
+    /// beacon reply is owed to the central.
     pending_flag: AtomicBool,
     /// Last `!packet.is_collector` value seen; used to detect direction changes.
     last_central_is_listener: AtomicBool,
@@ -176,7 +212,15 @@ fn ingest_control_packet(
     r: PoolFrame,
     shared: &Shared,
     tx_enabled: bool,
+    peer_mac: Option<[u8; 6]>,
 ) {
+    // Raw-listen (CPU-benchmark): the frame `r` has already been drained from
+    // the pool by the caller; returning here discards it without any parse /
+    // validation / bookkeeping — the fair match to the IDF empty recv callback.
+    if RAW_LISTEN.load(Ordering::Relaxed) {
+        return;
+    }
+
     let is_connected = shared.is_connected.load(Ordering::Acquire);
     if is_connected {
         let expected = u64_to_mac(shared.central_mac.load(Ordering::Relaxed));
@@ -187,24 +231,36 @@ fn ingest_control_packet(
         }
     }
 
-    let Ok(packet) = postcard::from_bytes::<ControlPacket>(r.data()) else {
+    // Magic is only on the wire in auto-pairing mode; in manual mode the
+    // source-MAC filter above is the discriminator.
+    let expect_magic = peer_mac.is_none();
+    let Some(packet) =
+        parse_with_magic::<ControlPacket>(r.data(), CENTRAL_MAGIC_NUMBER, expect_magic)
+    else {
         #[cfg(feature = "statistics")]
-        RX_PARSE_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+        if expect_magic {
+            // A mismatched magic prefix and a postcard error are indistinguishable
+            // here; count it as a magic drop in auto mode, parse failure otherwise.
+            RX_MAGIC_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+        } else {
+            RX_PARSE_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
         return;
     };
-    if packet.magic_number != CENTRAL_MAGIC_NUMBER {
-        #[cfg(feature = "statistics")]
-        RX_MAGIC_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
 
     #[cfg(feature = "statistics")]
     {
+        RX_CONTROL_PACKET_COUNT.fetch_add(1, Ordering::Relaxed);
         if shared.sequence_initialized.load(Ordering::Acquire) {
             let last_seq = shared.last_control_sequence.load(Ordering::Relaxed);
-            let diff = packet.sequence_number.wrapping_sub(last_seq);
-            if diff > 1 {
-                RX_SEQUENCE_MISS_COUNT.fetch_add((diff - 1) as u64, Ordering::Relaxed);
+            // 64-bit signed gap so a central reboot (sequence restarting at
+            // 0) or a reordered frame shows up as `gap <= 0` and resyncs
+            // silently instead of registering ~2^32 misses. The trade-off is
+            // that a genuine u32 sequence wrap also resyncs, but that takes
+            // 2^32 packets while reboots are routine.
+            let gap = packet.sequence_number as i64 - last_seq as i64;
+            if gap > 1 {
+                RX_SEQUENCE_MISS_COUNT.fetch_add((gap - 1) as u64, Ordering::Relaxed);
             }
         } else {
             shared.sequence_initialized.store(true, Ordering::Release);
@@ -216,8 +272,6 @@ fn ingest_control_packet(
 
     if tx_enabled {
         // Peer table management is only needed so we can send unicast replies.
-        let recv_time = Instant::now().as_micros();
-
         if !is_connected {
             // Lock onto the first valid central and add it as a unicast peer.
             let add_res = esp_now.add_peer(PeerInfo {
@@ -247,8 +301,7 @@ fn ingest_control_packet(
                 .wrapping_add(1);
             if (check_counter & (PEER_HEALTHCHECK_PERIOD - 1)) == 0
                 && !esp_now.peer_exists(&expected)
-            {
-                if esp_now
+                && esp_now
                     .add_peer(PeerInfo {
                         interface: esp_radio::esp_now::EspNowWifiInterface::Station,
                         peer_address: expected,
@@ -257,27 +310,13 @@ fn ingest_control_packet(
                         encrypt: false,
                     })
                     .is_err()
-                {
-                    #[cfg(feature = "statistics")]
-                    RX_PEER_ADD_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
-                }
+            {
+                #[cfg(feature = "statistics")]
+                RX_PEER_ADD_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
             }
         }
 
-        #[cfg(feature = "statistics")]
-        if packet.latency_offset != -1 {
-            let one_way_latency =
-                recv_time as i64 - (packet.central_send_uptime as i64 + packet.latency_offset);
-            STATS
-                .one_way_latency
-                .store(one_way_latency, Ordering::Relaxed);
-        }
-
-        // Publish timestamps then raise pending flag for the TX step.
-        shared.pending_recv_time.store(recv_time, Ordering::Relaxed);
-        shared
-            .pending_csu
-            .store(packet.central_send_uptime, Ordering::Relaxed);
+        // Raise the pending flag so the TX step emits a presence beacon reply.
         shared.pending_flag.store(true, Ordering::Release);
     }
 
@@ -324,7 +363,12 @@ pub async fn run_esp_now_peripheral(
     freq_hz: Option<u16>,
     io_tasks: IOTaskConfig,
 ) {
-    esp_now.set_channel(config.channel).unwrap();
+    // In HT40 mode the channel (+secondary) was already set on the controller
+    // before this task ran; calling esp_now.set_channel here would reset the
+    // secondary to HT20, so skip it.
+    if config.secondary_channel().is_none() {
+        esp_now.set_channel(config.channel).unwrap();
+    }
     log_ln!("esp-now version {}", esp_now.version().unwrap());
 
     // The static-pool `rcv_cb` is installed in `lib::run` before `set_csi`,
@@ -339,7 +383,7 @@ pub async fn run_esp_now_peripheral(
     #[cfg(feature = "statistics")]
     reset_rx_diagnostics();
 
-    responder(esp_now, config.channel, freq, io_tasks).await;
+    responder(esp_now, config.channel, freq, io_tasks, config.peer_mac()).await;
 }
 
 /// Run a single sequential responder loop: receive/process first, then send.
@@ -350,22 +394,43 @@ async fn responder(
     channel: u8,
     frequency_hz: u64,
     io_tasks: IOTaskConfig,
+    peer_mac: Option<[u8; 6]>,
 ) {
+    let send_magic = peer_mac.is_none();
     let shared = Shared {
-        is_connected: AtomicBool::new(false),
+        // Manual pairing skips the "lock onto first valid central" handshake:
+        // pre-seed the configured peer so source-MAC filtering applies from the
+        // very first frame.
+        is_connected: AtomicBool::new(peer_mac.is_some()),
         is_collector: AtomicBool::new(IS_COLLECTOR.load(Ordering::Relaxed)),
-        central_mac: AtomicU64::new(0),
+        central_mac: AtomicU64::new(peer_mac.map(|m| mac_to_u64(&m)).unwrap_or(0)),
         peer_healthcheck_counter: AtomicU16::new(0),
         #[cfg(feature = "statistics")]
         last_control_sequence: AtomicU32::new(0),
         #[cfg(feature = "statistics")]
         sequence_initialized: AtomicBool::new(false),
-        pending_recv_time: AtomicU64::new(0),
-        pending_csu: AtomicU64::new(0),
         pending_flag: AtomicBool::new(false),
         last_central_is_listener: AtomicBool::new(false),
         mode_streak: AtomicU8::new(0),
     };
+
+    // In manual mode, register the central as a unicast peer up front so the
+    // first reply can be sent without waiting to discover it.
+    if let Some(mac) = peer_mac
+        && io_tasks.tx_enabled
+        && esp_now
+            .add_peer(PeerInfo {
+                interface: esp_radio::esp_now::EspNowWifiInterface::Station,
+                peer_address: mac,
+                lmk: None,
+                channel: Some(channel),
+                encrypt: false,
+            })
+            .is_err()
+    {
+        #[cfg(feature = "statistics")]
+        RX_PEER_ADD_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
 
     // Adaptive reply pacing: start from configured target and automatically
     // back off under TX pressure, then slowly climb back up on stable sends.
@@ -398,17 +463,26 @@ async fn responder(
             {
                 burst_budget = burst_budget.saturating_sub(1);
 
-                let recv_time = shared.pending_recv_time.load(Ordering::Relaxed);
-                let csu = shared.pending_csu.load(Ordering::Relaxed);
                 let central_mac = u64_to_mac(shared.central_mac.load(Ordering::Relaxed));
 
-                let peripheral_packet = PeripheralPacket::new(recv_time, csu);
-                let message = match postcard::to_slice(&peripheral_packet, &mut tx_buf) {
-                    Ok(slice) => slice,
-                    Err(_) => {
-                        log_ln!("Failed to serialize ESP-NOW peripheral packet");
-                        break;
+                // Auto mode: send the 4-byte magic prefix (empty beacon body).
+                // Manual mode: a single sentinel byte so the frame isn't empty.
+                let message: &[u8] = if send_magic {
+                    match serialize_with_magic(
+                        &PeripheralPacket::new(),
+                        PERIPHERAL_MAGIC_NUMBER,
+                        true,
+                        &mut tx_buf,
+                    ) {
+                        Ok(slice) => slice,
+                        Err(_) => {
+                            log_ln!("Failed to serialize ESP-NOW peripheral packet");
+                            break;
+                        }
                     }
+                } else {
+                    tx_buf[0] = PERIPHERAL_BEACON_SENTINEL;
+                    &tx_buf[..1]
                 };
 
                 let mut send_succeeded = false;
@@ -516,7 +590,7 @@ async fn responder(
                     break;
                 };
 
-                ingest_control_packet(esp_now, channel, r, &shared, io_tasks.tx_enabled);
+                ingest_control_packet(esp_now, channel, r, &shared, io_tasks.tx_enabled, peer_mac);
                 rx_packets = rx_packets.saturating_add(1);
             }
 
@@ -525,11 +599,11 @@ async fn responder(
             // first so that co-scheduled tasks (e.g. node_task) get at least
             // one executor turn between drain cycles; without this the inner
             // join never returns Poll::Pending and the outer join starves them.
-            if rx_packets > 0 {
-                if !tx_reply_pending || Instant::now().as_micros() < next_tx_us {
-                    yield_now().await;
-                    continue;
-                }
+            if rx_packets > 0
+                && (!tx_reply_pending || Instant::now().as_micros() < next_tx_us)
+            {
+                yield_now().await;
+                continue;
             }
         }
 
@@ -543,14 +617,14 @@ async fn responder(
                     break;
                 }
                 Either::Second(r) => {
-                    ingest_control_packet(esp_now, channel, r, &shared, false);
+                    ingest_control_packet(esp_now, channel, r, &shared, false, peer_mac);
                     // Drain any frames that stacked up while we were processing.
                     // Bound the synchronous drain so a sustained inflow can't
                     // hold the executor here past the next loop iteration.
                     let mut drained: u16 = 0;
                     while drained < RX_BURST_MAX_RX_ONLY {
                         let Some(r) = crate::esp_now_pool::receive() else { break; };
-                        ingest_control_packet(esp_now, channel, r, &shared, false);
+                        ingest_control_packet(esp_now, channel, r, &shared, false, peer_mac);
                         drained = drained.saturating_add(1);
                     }
                 }
@@ -565,8 +639,6 @@ async fn responder(
                 let slice_div = if io_tasks.rx_enabled { 8 } else { 4 };
                 let slice_us = (tx_interval_us / slice_div).clamp(1, TX_WAIT_SLICE_US);
                 until_tx_us.min(slice_us).max(1)
-            } else if io_tasks.rx_enabled {
-                1
             } else {
                 1
             };

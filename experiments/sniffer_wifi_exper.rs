@@ -2,14 +2,11 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
+use esp_csi_rs::{config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode};
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
-};
-use esp_csi_rs::{
-    CSINodeClient, CSINodeHardware, get_pps_rx, get_pps_tx, get_dropped_packets_rx, log_ln,
+    CSINodeClient, CSINodeHardware, WifiSnifferConfig, log_ln, set_csi_logging_enabled,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -30,41 +27,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 
-macro_rules! mk_static {
-    ($t:ty,$val:expr) => {{
-        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-        #[deny(unused_attributes)]
-        let x = STATIC_CELL.uninit().write(($val));
-        x
-    }};
-}
-
-async fn node_task_listener(client: &mut CSINodeClient) {
-    log_ln!("Starting Listener Task");
-
-    Timer::after(Duration::from_millis(10)).await;
-    client.send_stop().await;
-}
-
-async fn node_task_collector(client: &mut CSINodeClient) {
-    log_ln!("Starting Collector Task");
-
-    with_timeout(Duration::from_secs(10), async {
-        loop {
-            Timer::after_secs(1).await;
-            log_ln!(
-                "RX PPS: {}, TX PPS: {}, RX Dropped Packets: {}",
-                get_pps_rx(),
-                get_pps_tx(),
-                get_dropped_packets_rx()
-            )
-        }
-    })
-    .await
-    .unwrap_err();
-    client.send_stop().await;
-}
-
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     // generator version: 1.1.0
@@ -72,8 +34,9 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     init_logger(spawner, LogMode::Text);
+    set_csi_logging_enabled(true);
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -81,9 +44,12 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting Runtime Config Node");
+    log_ln!("Starting Wi-Fi Sniffer Peripheral Node (Exper)");
 
-    let config_radio = esp_radio::wifi::ControllerConfig::default();
+    let config_radio = esp_radio::wifi::ControllerConfig::default()
+        .with_static_rx_buf_num(25)
+        .with_dynamic_rx_buf_num(128)
+        .with_rx_queue_size(32);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
@@ -92,21 +58,30 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+
+    // Match C++ passive sniffer's CSI scope (SHOULD_COLLECT_ONLY_LLTF=y):
+    // only legacy LTF, channel filter on, no HT/STBC LTF, no ACK dump.
+    #[allow(unused_mut)]
+    let mut csi_config = CsiConfig::default();
+    #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
+    {
+        csi_config.htltf_en = false;
+        csi_config.stbc_htltf2_en = false;
+        csi_config.ltf_merge_en = false;
+        csi_config.channel_filter_en = true;
+    }
+
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(
-            EspNowConfig::default(),
+        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(
+            WifiSnifferConfig::default().with_channel(1),
         )),
         CollectionMode::Collector,
-        Some(CsiConfig::default()),
-        Some(1000),
+        Some(csi_config),
+        Some(10000),
         csi_hardware,
     );
-    node.set_protocol(esp_radio::wifi::Protocol::LR);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
-    
-    join(node.run(), node_task_collector(&mut node_handle)).await;
-    node.set_collection_mode(CollectionMode::Listener);
-    join(node.run(), node_task_listener(&mut node_handle)).await;
+    node.set_protocol(esp_radio::wifi::Protocol::N);
+    node.run().await;
 
     loop {
         log_ln!("Hello world!");

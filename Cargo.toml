@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-rs"
-version = "0.6.2"
+version = "0.7.0"
 edition = "2024"
 authors = ["theembeddedrustacean", "stacks-of-data", "Abdullah-Alawad", "modatt"]
 description = "ESP CSI Driver for Rust"
@@ -34,16 +34,31 @@ defmt = [
     "esp-backtrace/defmt",
     "embassy-executor/defmt",
 ]
-## Force the JTAG backend for logging.
-jtag-serial = ["esp-println/jtag-serial"]
+## Force the JTAG backend for logging. Requires `async-print` (non-blocking logging),
+## which is enabled automatically by this feature — the JTAG backend can block under
+## load, so async logging is mandatory here.
+jtag-serial = ["esp-println/jtag-serial", "async-print"]
 ## Force the UART backend for logging (not recommended, much slower than JTAG backend).
+## Do NOT combine with `async-print`: UART is already blocking and slow, and the async
+## logging path provides no benefit while adding overhead and risk of unexpected behavior.
 uart = ["esp-println/uart"]
 ## Disable all logging.
 no-print = ["esp-println/no-op"]
 ## Enable collection of runtime statistics (e.g., latency, dropped packets).
 statistics = []
 ## Non-blocking async logging. This is an unstable feature and may cause unexpected behavior. Use with caution.
+## Required by (and enabled automatically with) `jtag-serial`. Should NOT be combined with `uart`,
+## where it adds overhead without benefit.
 async-print = []
+## Enable esp-rtos scheduler tracing so the CPU-utilization DUT
+## (`esp_now_peripheral_exper_cpu`) can measure absolute idle *time* from
+## `system_idle`/`task_exec_begin` switch hooks (spec v2 §2.2). Only the CPU
+## experiment needs this; it adds a hook call to every context switch.
+cpu-trace = ["dep:rtos-trace", "esp-rtos/rtos-trace"]
+## Expose runtime TX controls (rate / payload / pause) that let the CPU-test
+## TX example (`esp_now_central_exper_cpu_tx`) steer the real `run_esp_now_central`
+## loop from the experiment schedule. Only that example needs it.
+cpu-test-tx = []
 
 ## Support for the ESP32
 esp32 = [
@@ -179,7 +194,12 @@ serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 postcard = { version = "1.1.3", features = ["experimental-derive", "heapless"] }
 
 portable-atomic = { version = "1.13.0", default-features = false }
-zerocopy = { version = "0.8.37", default-features = false, features = [
+
+# Optional: enabled by the `cpu-trace` feature for the CPU-utilization DUT
+# example. Provides the `RtosTrace` trait + `global_trace!` sink that
+# esp-rtos's `rtos-trace` integration calls on each context switch.
+rtos-trace = { version = "0.2.0", optional = true }
+zerocopy = { version = "0.8.52", default-features = false, features = [
     "derive",
 ] }
 
@@ -212,3 +232,118 @@ opt-level = 3
 # a representative feature set. Adjust if you want different chips in docs.
 targets = ["riscv32imc-unknown-none-elf"]
 features = ["esp32c3", "println"]
+
+# ---------------------------------------------------------------------------
+# Measurement & experimental examples.
+#
+# These benchmarking / characterization harnesses live in `experiments/`
+# (not `examples/`) to keep the canonical examples uncluttered. Cargo only
+# auto-discovers examples under `examples/`, so each is registered here with
+# an explicit `path`. Build/run them exactly as before via the cargo aliases,
+# e.g. `cargo esp32c3-build --example esp_now_central_exper --features statistics`.
+# The shared `experiments/cpu_test_schedule.rs` module is included by the
+# CPU-test examples via `#[path]` and is intentionally not a target itself.
+# ---------------------------------------------------------------------------
+[[example]]
+name = "esp_now_central_bw_tx"
+path = "experiments/esp_now_central_bw_tx.rs"
+
+[[example]]
+name = "esp_now_central_drop"
+path = "experiments/esp_now_central_drop.rs"
+
+[[example]]
+name = "esp_now_central_exper"
+path = "experiments/esp_now_central_exper.rs"
+
+[[example]]
+name = "esp_now_central_exper_cpu_tx"
+path = "experiments/esp_now_central_exper_cpu_tx.rs"
+
+[[example]]
+name = "esp_now_central_exper_heap"
+path = "experiments/esp_now_central_exper_heap.rs"
+
+[[example]]
+name = "esp_now_central_min"
+path = "experiments/esp_now_central_min.rs"
+
+[[example]]
+name = "esp_now_central_min_cpu_tx"
+path = "experiments/esp_now_central_min_cpu_tx.rs"
+
+[[example]]
+name = "esp_now_central_min_drop"
+path = "experiments/esp_now_central_min_drop.rs"
+
+[[example]]
+name = "esp_now_central_min_power"
+path = "experiments/esp_now_central_min_power.rs"
+
+[[example]]
+name = "esp_now_central_power"
+path = "experiments/esp_now_central_power.rs"
+
+[[example]]
+name = "esp_now_peripheral_bw_check"
+path = "experiments/esp_now_peripheral_bw_check.rs"
+
+[[example]]
+name = "esp_now_peripheral_drop"
+path = "experiments/esp_now_peripheral_drop.rs"
+
+[[example]]
+name = "esp_now_peripheral_exper"
+path = "experiments/esp_now_peripheral_exper.rs"
+
+[[example]]
+name = "esp_now_peripheral_exper_cpu"
+path = "experiments/esp_now_peripheral_exper_cpu.rs"
+
+[[example]]
+name = "esp_now_peripheral_exper_heap"
+path = "experiments/esp_now_peripheral_exper_heap.rs"
+
+[[example]]
+name = "esp_now_peripheral_min"
+path = "experiments/esp_now_peripheral_min.rs"
+
+[[example]]
+name = "esp_now_peripheral_min_cpu"
+path = "experiments/esp_now_peripheral_min_cpu.rs"
+
+[[example]]
+name = "esp_now_peripheral_min_drop"
+path = "experiments/esp_now_peripheral_min_drop.rs"
+
+[[example]]
+name = "sniffer_wifi_exper"
+path = "experiments/sniffer_wifi_exper.rs"
+
+[[example]]
+name = "sniffer_wifi_exper_esp_csi_tool"
+path = "experiments/sniffer_wifi_exper_esp_csi_tool.rs"
+
+[[example]]
+name = "sniffer_wifi_exper_heap"
+path = "experiments/sniffer_wifi_exper_heap.rs"
+
+[[example]]
+name = "sniffer_wifi_exper_logmode_cycle"
+path = "experiments/sniffer_wifi_exper_logmode_cycle.rs"
+
+[[example]]
+name = "sniffer_wifi_min"
+path = "experiments/sniffer_wifi_min.rs"
+
+[[example]]
+name = "wifi_station_heap"
+path = "experiments/wifi_station_heap.rs"
+
+[[example]]
+name = "wifi_station_min"
+path = "experiments/wifi_station_min.rs"
+
+[[example]]
+name = "wifi_station_power"
+path = "experiments/wifi_station_power.rs"

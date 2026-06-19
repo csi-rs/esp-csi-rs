@@ -7,7 +7,7 @@ use embassy_time::{Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode};
 use esp_csi_rs::{
-    CSINodeClient, CSINodeHardware, get_total_rx_packets, log_ln, WifiSnifferConfig,
+    log_ln, set_csi_logging_enabled, CSINodeClient, CSINodeHardware, WifiSnifferConfig,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -38,24 +38,32 @@ macro_rules! mk_static {
 }
 
 async fn node_task(_client: &mut CSINodeClient) {
-    let mut last_sample = Instant::now();
-    let mut last_rx_total = get_total_rx_packets();
+    // Settle delay so post-init async allocations have landed before the
+    // baseline marker is captured.
+    Timer::after_secs(2).await;
+
+    let baseline_free = esp_alloc::HEAP.free();
+    let mut min_ever = baseline_free;
+    log_ln!("HEAP_BASELINE,{}", baseline_free);
 
     loop {
         Timer::after_secs(1).await;
-
-        let elapsed_us = last_sample.elapsed().as_micros() as u64;
-        let rx_total = get_total_rx_packets();
-        let rx_rate_hz = if elapsed_us == 0 {
-            0
-        } else {
-            (rx_total.saturating_sub(last_rx_total) * 1_000_000 / elapsed_us) as u32
-        };
-
-        last_sample = Instant::now();
-        last_rx_total = rx_total;
-
-        log_ln!("RX: {}", rx_rate_hz)
+        let t_ms = Instant::now().as_millis();
+        let free = esp_alloc::HEAP.free();
+        if free < min_ever {
+            min_ever = free;
+        }
+        let used_delta: i64 = baseline_free as i64 - free as i64;
+        // esp-alloc 0.10 exposes no largest-contiguous-free API; emit 0 per spec.
+        let largest_free: usize = 0;
+        log_ln!(
+            "HEAP,{},{},{},{},{}",
+            t_ms,
+            free,
+            used_delta,
+            min_ever,
+            largest_free
+        );
     }
 }
 
@@ -65,7 +73,12 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-    init_logger(spawner, LogMode::ArrayList);
+    init_logger(spawner, LogMode::Text);
+    // Heap-test fairness: the CSI path must be SILENT (no per-frame
+    // CSIDataPacket build, no logging) so the heap reflects the stack, not
+    // logging churn — matching the C references' count-only CSI callback.
+    // Closing the publish gate makes `capture_csi_info` return before any build.
+    set_csi_logging_enabled(false);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98440);
 
@@ -75,7 +88,7 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting Wi-Fi Sniffer Peripheral Node (Exper)");
+    log_ln!("Starting Wi-Fi Sniffer Peripheral Node (Exper Heap)");
 
     let config_radio = esp_radio::wifi::ControllerConfig::default()
         .with_static_rx_buf_num(32)
@@ -91,7 +104,9 @@ async fn main(spawner: Spawner) -> ! {
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
         esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(
-            WifiSnifferConfig::default(),
+            // Sniffer-class channel = 11 (matched with esp-csi heap_test and the
+            // ESP32-CSI-Tool passive heap test).
+            WifiSnifferConfig::default().with_channel(11),
         )),
         CollectionMode::Collector,
         Some(CsiConfig::default()),

@@ -70,7 +70,7 @@ async fn main(spawner: Spawner) -> ! {
     // first atomic load.
     set_csi_logging_enabled(false);
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98440);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 60000);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -80,11 +80,11 @@ async fn main(spawner: Spawner) -> ! {
     log_ln!("Embassy initialized!");
     log_ln!("Starting EspNow Central Node (Exper)");
 
-    let config_radio = esp_radio::wifi::ControllerConfig::default()
-        .with_static_tx_buf_num(25)
-        .with_dynamic_tx_buf_num(128)
-        .with_ampdu_tx_enable(false).
-        with_tx_queue_size(32);
+    let config_radio = esp_radio::wifi::ControllerConfig::default();
+        // .with_static_tx_buf_num(25)
+        // .with_dynamic_tx_buf_num(128)
+        // .with_ampdu_tx_enable(false).
+        // with_tx_queue_size(32);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");

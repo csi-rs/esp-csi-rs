@@ -18,6 +18,7 @@
 #[cfg(feature = "async-print")]
 use embedded_io_async::Write;
 use esp_hal::peripherals::Peripherals;
+#[cfg(feature = "async-print")]
 use heapless::String;
 use portable_atomic::{AtomicBool, AtomicU8, Ordering};
 use postcard::experimental::max_size::MaxSize;
@@ -635,193 +636,181 @@ fn write_serialized_packet(packet: CSIDataPacket) {
     let mut buf = [0u8; PACKET_BUF_SIZE];
     if let Ok(cobs_slice) = postcard::to_slice_cobs(&packet, &mut buf) {
         let _ = cobs_slice;
+        // Under `defmt` the wire is a framed logger, so raw COBS bytes cannot
+        // be streamed (that is why `log_raw!` is a no-op here). Emit the COBS
+        // record as a defmt byte-slice instead: each packet becomes one defmt
+        // frame whose payload is the COBS-encoded postcard record. The host
+        // recovers the bytes from the decoded frame, then COBS-decodes as
+        // usual. Without `defmt`, stream the bytes directly as before.
+        #[cfg(not(feature = "defmt"))]
         log_raw!(cobs_slice);
+        #[cfg(feature = "defmt")]
+        defmt::println!("{=[u8]}", cobs_slice);
     }
 }
+
+/// Shared single-line scratch for the async formatters. Only the
+/// single-threaded `logger_backend` task calls `write_text_array_packet`,
+/// `write_csi_tool_packet`, and `write_text_packet`, and it processes one
+/// packet at a time (the `select` `match` in `logger_backend`), so these
+/// formatters are never live concurrently and the `&mut` borrows never
+/// overlap. A static keeps the multi-KB buffer off the task stack.
+#[cfg(feature = "async-print")]
+static mut ASYNC_LOG_SCRATCH: [u8; 3328] = [0u8; 3328];
 
 #[cfg(feature = "async-print")]
 async fn write_text_array_packet(packet: CSIDataPacket, driver: &mut LogOutput) -> Result<(), ()> {
-    use core::fmt::Write as FmtWrite;
-
-    let mut buf = String::<64>::new();
-    macro_rules! write_field {
-        ($arg:expr) => {
-            buf.clear();
-            if write!(&mut buf, "{},", $arg).is_ok() {
-                driver.write(buf.as_bytes()).await.map_err(|_| ())?;
-            }
-        };
-    }
-    macro_rules! write_first_field {
-        ($arg:expr) => {
-            buf.clear();
-            if write!(&mut buf, "[{},", $arg).is_ok() {
-                driver.write(buf.as_bytes()).await.map_err(|_| ())?;
-            }
-        };
-    }
-    #[allow(unused_macros)]
-    macro_rules! write_last_field {
-        ($arg:expr) => {
-            buf.clear();
-            if write!(&mut buf, "{}]\r\n", $arg).is_ok() {
-                driver.write(buf.as_bytes()).await.map_err(|_| ())?;
-            }
-        };
-    }
-
-    write_first_field!(packet.sequence_number);
-    write_field!(packet.rssi);
-    write_field!(packet.rate);
-    write_field!(packet.noise_floor);
-    write_field!(packet.channel);
-    write_field!(packet.timestamp);
-    write_field!(packet.sig_len);
-    write_field!(packet.rx_state);
-    #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
-    {
-        write_field!(packet.secondary_channel);
-        write_field!(packet.sgi);
-        write_field!(packet.antenna);
-        write_field!(packet.ampdu_cnt);
-        write_field!(packet.sig_mode);
-        write_field!(packet.mcs);
-        write_field!(packet.bandwidth);
-        write_field!(packet.smoothing);
-        write_field!(packet.not_sounding);
-        write_field!(packet.aggregation);
-        write_field!(packet.stbc);
-        write_field!(packet.fec_coding);
-    }
-    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
-    {
-        write_field!(packet.dump_len);
-        #[cfg(feature = "esp32c6")]
-        write_field!(packet.he_sigb_len);
-        #[cfg(feature = "esp32c6")]
-        write_field!(packet.cur_single_mpdu);
-        write_field!(packet.cur_bb_format);
-        write_field!(packet.rx_channel_estimate_info_vld);
-        write_field!(packet.rx_channel_estimate_len);
-        write_field!(packet.second);
-        write_field!(packet.channel);
-        write_field!(packet.is_group);
-        write_field!(packet.rxend_state);
-        write_field!(packet.rxmatch3);
-        write_field!(packet.rxmatch2);
-        write_field!(packet.rxmatch1);
-        #[cfg(feature = "esp32c6")]
-        write_field!(packet.rxmatch0);
-    }
-    write_field!(packet.sig_len);
-    write_field!(packet.csi_data_len);
-
-    driver.write(b"[").await.map_err(|_| ())?;
-    let data_len = packet.csi_data.len();
-    for (i, val) in packet.csi_data.iter().enumerate() {
-        buf.clear();
-        if i + 1 < data_len {
-            let _ = write!(&mut buf, "{},", val);
-        } else {
-            let _ = write!(&mut buf, "{}", val);
-        }
-        driver.write(buf.as_bytes()).await.map_err(|_| ())?;
-    }
-    driver.write(b"]]
-").await.map_err(|_| ())?;
-
+    // Format the whole line into the shared scratch, then emit it in a single
+    // `driver.write`. The previous per-field/per-value writes turned every
+    // packet into ~630 tiny transfers, and on USB-Serial-JTAG each `write` is a
+    // full USB transaction — that capped PPS far below the transport ceiling.
+    // `format_array_list_into` is shared with the sync path, so the bytes are
+    // identical across transports and modes.
+    let scratch = unsafe { &mut *core::ptr::addr_of_mut!(ASYNC_LOG_SCRATCH) };
+    let n = format_array_list_into(&packet, scratch);
+    driver.write(&scratch[..n]).await.map_err(|_| ())?;
     Ok(())
 }
-#[cfg(not(feature = "async-print"))]
-fn write_text_array_packet(packet: CSIDataPacket) {
-    use core::fmt::Write as FmtWrite;
+/// Minimal `core::fmt::Write` sink over a fixed byte slice. Used by the sync
+/// formatters that build a whole line into one buffer before handing it to a
+/// single emit call (`log_raw!` or `defmt::println!`). Writes past the end of
+/// the buffer fail with `fmt::Error` and are dropped, leaving `pos` clamped.
+struct SliceWriter<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+}
 
-    let mut buf = String::<64>::new();
-    macro_rules! write_field {
-        ($arg:expr) => {
-            buf.clear();
-            if write!(&mut buf, "{},", $arg).is_ok() {
-                log_raw!(buf.as_str());
-            }
-        };
+impl core::fmt::Write for SliceWriter<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        if self.pos + bytes.len() > self.buf.len() {
+            return Err(core::fmt::Error);
+        }
+        self.buf[self.pos..self.pos + bytes.len()].copy_from_slice(bytes);
+        self.pos += bytes.len();
+        Ok(())
     }
-    macro_rules! write_first_field {
-        ($arg:expr) => {
-            buf.clear();
-            if write!(&mut buf, "[{},", $arg).is_ok() {
-                log_raw!(buf.as_str());
-            }
-        };
+}
+
+/// Emit one already-formatted text line through `defmt` as a single frame.
+///
+/// `defmt` owns the wire when the feature is on (the host runs
+/// `espflash --log-format defmt`), so raw byte streaming via `log_raw!` is a
+/// no-op. Modes that produce a complete ASCII line per packet route it here:
+/// the bytes are wrapped in one `defmt::println!("{=str}", …)` frame. A single
+/// trailing `\n` (and an optional preceding `\r`) is trimmed because
+/// `defmt::println!` appends its own line terminator — otherwise every decoded
+/// line would be followed by a blank one.
+#[cfg(all(not(feature = "async-print"), feature = "defmt"))]
+fn defmt_emit_line(bytes: &[u8]) {
+    let mut end = bytes.len();
+    if end > 0 && bytes[end - 1] == b'\n' {
+        end -= 1;
     }
-    #[allow(unused_macros)]
-    macro_rules! write_last_field {
+    if end > 0 && bytes[end - 1] == b'\r' {
+        end -= 1;
+    }
+    if let Ok(s) = core::str::from_utf8(&bytes[..end]) {
+        defmt::println!("{=str}", s);
+    }
+}
+
+/// Format an `ArrayList` line into `buf` (one packet) and return the number of
+/// bytes written. Mirrors the field order documented in
+/// `docs/logging_formats_spec.md` §3. Shared by every emit path — sync
+/// (`println` / `defmt`) and the async drainer alike — so the on-wire content
+/// is byte-identical across transports and write modes.
+fn format_array_list_into(packet: &CSIDataPacket, buf: &mut [u8]) -> usize {
+    use core::fmt::Write as _;
+    let mut w = SliceWriter { buf, pos: 0 };
+    macro_rules! field {
         ($arg:expr) => {
-            buf.clear();
-            if write!(&mut buf, "{}]\r\n", $arg).is_ok() {
-                log_raw!(buf.as_str());
-            }
+            let _ = write!(&mut w, "{},", $arg);
         };
     }
 
-    write_first_field!(packet.sequence_number);
-    write_field!(packet.rssi);
-    write_field!(packet.rate);
-    write_field!(packet.noise_floor);
-    write_field!(packet.channel);
-    write_field!(packet.timestamp);
-    write_field!(packet.sig_len);
-    write_field!(packet.rx_state);
+    let _ = write!(&mut w, "[{},", packet.sequence_number);
+    field!(packet.rssi);
+    field!(packet.rate);
+    field!(packet.noise_floor);
+    field!(packet.channel);
+    field!(packet.timestamp);
+    field!(packet.sig_len);
+    field!(packet.rx_state);
     #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
     {
-        write_field!(packet.secondary_channel);
-        write_field!(packet.sgi);
-        write_field!(packet.antenna);
-        write_field!(packet.ampdu_cnt);
-        write_field!(packet.sig_mode);
-        write_field!(packet.mcs);
-        write_field!(packet.bandwidth);
-        write_field!(packet.smoothing);
-        write_field!(packet.not_sounding);
-        write_field!(packet.aggregation);
-        write_field!(packet.stbc);
-        write_field!(packet.fec_coding);
+        field!(packet.secondary_channel);
+        field!(packet.sgi);
+        field!(packet.antenna);
+        field!(packet.ampdu_cnt);
+        field!(packet.sig_mode);
+        field!(packet.mcs);
+        field!(packet.bandwidth);
+        field!(packet.smoothing);
+        field!(packet.not_sounding);
+        field!(packet.aggregation);
+        field!(packet.stbc);
+        field!(packet.fec_coding);
     }
     #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
     {
-        write_field!(packet.dump_len);
+        field!(packet.dump_len);
         #[cfg(feature = "esp32c6")]
-        write_field!(packet.he_sigb_len);
+        field!(packet.he_sigb_len);
         #[cfg(feature = "esp32c6")]
-        write_field!(packet.cur_single_mpdu);
-        write_field!(packet.cur_bb_format);
-        write_field!(packet.rx_channel_estimate_info_vld);
-        write_field!(packet.rx_channel_estimate_len);
-        write_field!(packet.second);
-        write_field!(packet.channel);
-        write_field!(packet.is_group);
-        write_field!(packet.rxend_state);
-        write_field!(packet.rxmatch3);
-        write_field!(packet.rxmatch2);
-        write_field!(packet.rxmatch1);
+        field!(packet.cur_single_mpdu);
+        field!(packet.cur_bb_format);
+        field!(packet.rx_channel_estimate_info_vld);
+        field!(packet.rx_channel_estimate_len);
+        field!(packet.second);
+        field!(packet.channel);
+        field!(packet.is_group);
+        field!(packet.rxend_state);
+        field!(packet.rxmatch3);
+        field!(packet.rxmatch2);
+        field!(packet.rxmatch1);
         #[cfg(feature = "esp32c6")]
-        write_field!(packet.rxmatch0);
+        field!(packet.rxmatch0);
     }
-    write_field!(packet.sig_len);
-    write_field!(packet.csi_data_len);
+    field!(packet.sig_len);
+    field!(packet.csi_data_len);
 
-    log_raw!("[");
+    let _ = w.write_str("[");
     let data_len = packet.csi_data.len();
     for (i, val) in packet.csi_data.iter().enumerate() {
-        buf.clear();
         if i + 1 < data_len {
-            let _ = write!(&mut buf, "{},", val);
+            let _ = write!(&mut w, "{},", val);
         } else {
-            let _ = write!(&mut buf, "{}", val);
+            let _ = write!(&mut w, "{}", val);
         }
-        log_raw!(buf.as_str());
     }
-    log_raw!("]]
-");
+    let _ = w.write_str("]]\r\n");
+    w.pos
+}
+
+#[cfg(not(feature = "async-print"))]
+fn write_text_array_packet(packet: CSIDataPacket) {
+    // Single-consumer scratch: the sync write path runs only from the WiFi
+    // callback (`node_task`), one packet at a time. A static avoids putting a
+    // multi-KB buffer on the callback stack.
+    static mut SCRATCH: [u8; 3328] = [0u8; 3328];
+    let scratch = unsafe { &mut *core::ptr::addr_of_mut!(SCRATCH) };
+    let n = format_array_list_into(&packet, scratch);
+
+    // Emit the formatted line in one bulk write, mirroring the sync
+    // `write_csi_tool_packet` path. On ESP32/UART the direct FIFO writer
+    // bypasses esp_println's per-byte ROM dispatch; elsewhere the non-esp32
+    // `uart0_write_bytes_fast` batches via `Printer::write_bytes`. `defmt`
+    // frames the wire, so the line goes out as one defmt frame instead.
+    #[cfg(feature = "defmt")]
+    defmt_emit_line(&scratch[..n]);
+    #[cfg(all(not(feature = "defmt"), feature = "esp32", any(feature = "uart", feature = "auto")))]
+    uart0_write_bytes_fast(&scratch[..n]);
+    #[cfg(all(
+        not(feature = "defmt"),
+        not(all(feature = "esp32", any(feature = "uart", feature = "auto")))
+    ))]
+    log_raw!(&scratch[..n]);
 }
 
 /// Header line emitted once at the top of an ESP32-CSI-Tool capture.
@@ -1097,10 +1086,10 @@ async fn write_csi_tool_packet(packet: CSIDataPacket, driver: &mut LogOutput) ->
             .map_err(|_| ())?;
     }
 
-    // Single-task formatter scratch: only `logger_backend` calls this fn,
-    // and embassy executors are single-threaded so no concurrent access.
-    static mut SCRATCH: [u8; 3328] = [0u8; 3328];
-    let scratch = unsafe { &mut *core::ptr::addr_of_mut!(SCRATCH) };
+    // Shared single-task formatter scratch (see `ASYNC_LOG_SCRATCH`): only
+    // `logger_backend` calls this fn, one packet at a time, so no concurrent
+    // access with the other async formatters.
+    let scratch = unsafe { &mut *core::ptr::addr_of_mut!(ASYNC_LOG_SCRATCH) };
     let n = format_csi_tool_into(&packet, scratch);
     driver.write(&scratch[..n]).await.map_err(|_| ())?;
     Ok(())
@@ -1121,6 +1110,9 @@ async fn write_csi_tool_packet(packet: CSIDataPacket, driver: &mut LogOutput) ->
     feature = "esp32",
     any(feature = "uart", feature = "auto")
 ))]
+// Unused under `defmt`: that build routes EspCsiTool lines through a defmt
+// frame instead of the raw UART0 FIFO writer.
+#[allow(dead_code)]
 #[inline]
 fn uart0_write_bytes_fast(bytes: &[u8]) {
     // ESP32 UART0 base = 0x3FF40000. The TX FIFO is at offset 0x00. The
@@ -1194,9 +1186,17 @@ fn write_csi_tool_packet(packet: CSIDataPacket) {
     let scratch = unsafe { &mut *core::ptr::addr_of_mut!(SCRATCH) };
 
     if !ESP_CSI_TOOL_HEADER_PRINTED.swap(true, Ordering::Relaxed) {
-        #[cfg(all(feature = "esp32", any(feature = "uart", feature = "auto")))]
+        // Under `defmt` the wire carries framed log records, so the direct
+        // UART0 FIFO writer and `log_raw!` (both raw-byte paths) are bypassed
+        // in favor of a single defmt frame per line.
+        #[cfg(feature = "defmt")]
+        defmt_emit_line(ESP_CSI_TOOL_HEADER.as_bytes());
+        #[cfg(all(not(feature = "defmt"), feature = "esp32", any(feature = "uart", feature = "auto")))]
         uart0_write_bytes_fast(ESP_CSI_TOOL_HEADER.as_bytes());
-        #[cfg(not(all(feature = "esp32", any(feature = "uart", feature = "auto"))))]
+        #[cfg(all(
+            not(feature = "defmt"),
+            not(all(feature = "esp32", any(feature = "uart", feature = "auto")))
+        ))]
         log_raw!(ESP_CSI_TOOL_HEADER);
     }
 
@@ -1204,14 +1204,19 @@ fn write_csi_tool_packet(packet: CSIDataPacket) {
     let _n = format_csi_tool_into(&packet, scratch);
     let t1 = embassy_time::Instant::now();
 
-    #[cfg(all(feature = "esp32", any(feature = "uart", feature = "auto")))]
+    #[cfg(feature = "defmt")]
+    defmt_emit_line(&scratch[.._n]);
+    #[cfg(all(not(feature = "defmt"), feature = "esp32", any(feature = "uart", feature = "auto")))]
     uart0_write_bytes_fast(&scratch[.._n]);
-    #[cfg(not(all(feature = "esp32", any(feature = "uart", feature = "auto"))))]
+    #[cfg(all(
+        not(feature = "defmt"),
+        not(all(feature = "esp32", any(feature = "uart", feature = "auto")))
+    ))]
     log_raw!(&scratch[.._n]);
 
     let t2 = embassy_time::Instant::now();
-    SYNC_FORMAT_US.fetch_add(t1.duration_since(t0).as_micros() as u64, Ordering::Relaxed);
-    SYNC_WRITE_US.fetch_add(t2.duration_since(t1).as_micros() as u64, Ordering::Relaxed);
+    SYNC_FORMAT_US.fetch_add(t1.duration_since(t0).as_micros(), Ordering::Relaxed);
+    SYNC_WRITE_US.fetch_add(t2.duration_since(t1).as_micros(), Ordering::Relaxed);
     SYNC_PKT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -1219,139 +1224,130 @@ fn write_csi_tool_packet(packet: CSIDataPacket) {
 async fn write_text_packet(packet: CSIDataPacket, driver: &mut LogOutput) -> Result<(), ()> {
     use core::fmt::Write as FmtWrite;
 
-    let mut buf = String::<128>::new();
-
-    macro_rules! send_line {
+    // Build the whole metadata block into the shared scratch and emit it in a
+    // single write, instead of one tiny `driver.write` per field. The CSI body
+    // is then streamed through the same scratch as a fill-and-flush buffer, so
+    // a packet is a handful of writes rather than the ~50 tiny transfers it was
+    // before — each of which is a full USB transaction on USB-Serial-JTAG.
+    let scratch = unsafe { &mut *core::ptr::addr_of_mut!(ASYNC_LOG_SCRATCH) };
+    let mut w = SliceWriter {
+        buf: scratch,
+        pos: 0,
+    };
+    macro_rules! line {
         ($($arg:tt)*) => {
-            buf.clear();
-            if write!(&mut buf, $($arg)*).is_ok() {
-                driver.write(buf.as_bytes()).await.map_err(|_| ())?;
-            }
+            // Overflow drops the line (pos clamped) — mirrors the old
+            // `write!(..).is_ok()` guard; scratch is far larger than the
+            // metadata block, so this never triggers in practice.
+            let _ = write!(&mut w, $($arg)*);
         };
     }
 
-    let res = async {
-        if let Some(dt) = &packet.date_time {
-            send_line!(
-                "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}\r\n",
-                dt.year,
-                dt.month,
-                dt.day,
-                dt.hour,
-                dt.minute,
-                dt.second,
-                dt.millisecond
-            );
-        }
-
-        send_line!(
-            "mac: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}\r\n",
-            packet.mac[0],
-            packet.mac[1],
-            packet.mac[2],
-            packet.mac[3],
-            packet.mac[4],
-            packet.mac[5]
+    if let Some(dt) = &packet.date_time {
+        line!(
+            "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}\r\n",
+            dt.year,
+            dt.month,
+            dt.day,
+            dt.hour,
+            dt.minute,
+            dt.second,
+            dt.millisecond
         );
-
-        send_line!("sequence number: {}\r\n", packet.sequence_number);
-        send_line!("rssi: {}\r\n", packet.rssi);
-        send_line!("rate: {}\r\n", packet.rate);
-        send_line!("noise floor: {}\r\n", packet.noise_floor);
-        send_line!("channel: {}\r\n", packet.channel);
-        send_line!("timestamp: {}\r\n", packet.timestamp);
-        send_line!("sig len: {}\r\n", packet.sig_len);
-        send_line!("rx state: {}\r\n", packet.rx_state);
-        #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
-        {
-            send_line!("secondary channel: {}\r\n", packet.secondary_channel);
-            send_line!("sgi: {}\r\n", packet.sgi);
-            send_line!("ant: {}\r\n", packet.antenna);
-            send_line!("ampdu cnt: {}\r\n", packet.ampdu_cnt);
-            send_line!("sig_mode: {}\r\n", packet.sig_mode);
-            send_line!("mcs: {}\r\n", packet.mcs);
-            send_line!("cwb: {}\r\n", packet.bandwidth);
-            send_line!("smoothing: {}\r\n", packet.smoothing);
-            send_line!("not sounding: {}\r\n", packet.not_sounding);
-            send_line!("aggregation: {}\r\n", packet.aggregation);
-            send_line!("stbc: {}\r\n", packet.stbc);
-            send_line!("fec coding: {}\r\n", packet.fec_coding);
-        }
-        #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
-        {
-            send_line!("dump len: {}\r\n", packet.dump_len);
-            #[cfg(feature = "esp32c6")]
-            send_line!("he sigb len: {}\r\n", packet.he_sigb_len);
-            #[cfg(feature = "esp32c6")]
-            send_line!("cur single mpdu: {}\r\n", packet.cur_single_mpdu);
-            send_line!("cur bb format: {}\r\n", packet.cur_bb_format);
-            send_line!(
-                "rx channel estimate info vld: {}\r\n",
-                packet.rx_channel_estimate_info_vld
-            );
-            send_line!(
-                "rx channel estimate len: {}\r\n",
-                packet.rx_channel_estimate_len
-            );
-            send_line!("time seconds: {}\r\n", packet.second);
-            send_line!("channel: {}\r\n", packet.channel);
-            send_line!("is group: {}\r\n", packet.is_group);
-            send_line!("rxend state: {}\r\n", packet.rxend_state);
-            send_line!("rxmatch3: {}\r\n", packet.rxmatch3);
-            send_line!("rxmatch2: {}\r\n", packet.rxmatch2);
-            send_line!("rxmatch1: {}\r\n", packet.rxmatch1);
-            #[cfg(feature = "esp32c6")]
-            send_line!("rxmatch0: {}\r\n", packet.rxmatch0);
-        }
-
-        send_line!("sig_len: {}\r\n", packet.sig_len);
-        send_line!("data length: {}\r\n", packet.csi_data_len);
-        Ok::<(), ()>(())
-    }
-    .await;
-
-    if res.is_err() {
-        return Err(());
     }
 
-    if driver.write(b"csi raw data: [").await.is_err() {
-        return Err(());
+    line!(
+        "mac: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}\r\n",
+        packet.mac[0],
+        packet.mac[1],
+        packet.mac[2],
+        packet.mac[3],
+        packet.mac[4],
+        packet.mac[5]
+    );
+
+    line!("sequence number: {}\r\n", packet.sequence_number);
+    line!("rssi: {}\r\n", packet.rssi);
+    line!("rate: {}\r\n", packet.rate);
+    line!("noise floor: {}\r\n", packet.noise_floor);
+    line!("channel: {}\r\n", packet.channel);
+    line!("timestamp: {}\r\n", packet.timestamp);
+    line!("sig len: {}\r\n", packet.sig_len);
+    line!("rx state: {}\r\n", packet.rx_state);
+    #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
+    {
+        line!("secondary channel: {}\r\n", packet.secondary_channel);
+        line!("sgi: {}\r\n", packet.sgi);
+        line!("ant: {}\r\n", packet.antenna);
+        line!("ampdu cnt: {}\r\n", packet.ampdu_cnt);
+        line!("sig_mode: {}\r\n", packet.sig_mode);
+        line!("mcs: {}\r\n", packet.mcs);
+        line!("cwb: {}\r\n", packet.bandwidth);
+        line!("smoothing: {}\r\n", packet.smoothing);
+        line!("not sounding: {}\r\n", packet.not_sounding);
+        line!("aggregation: {}\r\n", packet.aggregation);
+        line!("stbc: {}\r\n", packet.stbc);
+        line!("fec coding: {}\r\n", packet.fec_coding);
+    }
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+    {
+        line!("dump len: {}\r\n", packet.dump_len);
+        #[cfg(feature = "esp32c6")]
+        line!("he sigb len: {}\r\n", packet.he_sigb_len);
+        #[cfg(feature = "esp32c6")]
+        line!("cur single mpdu: {}\r\n", packet.cur_single_mpdu);
+        line!("cur bb format: {}\r\n", packet.cur_bb_format);
+        line!(
+            "rx channel estimate info vld: {}\r\n",
+            packet.rx_channel_estimate_info_vld
+        );
+        line!(
+            "rx channel estimate len: {}\r\n",
+            packet.rx_channel_estimate_len
+        );
+        line!("time seconds: {}\r\n", packet.second);
+        line!("channel: {}\r\n", packet.channel);
+        line!("is group: {}\r\n", packet.is_group);
+        line!("rxend state: {}\r\n", packet.rxend_state);
+        line!("rxmatch3: {}\r\n", packet.rxmatch3);
+        line!("rxmatch2: {}\r\n", packet.rxmatch2);
+        line!("rxmatch1: {}\r\n", packet.rxmatch1);
+        #[cfg(feature = "esp32c6")]
+        line!("rxmatch0: {}\r\n", packet.rxmatch0);
     }
 
-    let mut chunk_buf = [0u8; 128];
-    let mut offset = 0;
+    line!("sig_len: {}\r\n", packet.sig_len);
+    line!("data length: {}\r\n", packet.csi_data_len);
+    let _ = w.write_str("csi raw data: [");
 
+    // Recover the buffer + length and emit the metadata block in one write.
+    let SliceWriter { buf: scratch, pos } = w;
+    driver.write(&scratch[..pos]).await.map_err(|_| ())?;
+
+    // CSI body: decimal `i8` values separated by ", ", streamed through the
+    // scratch with flush-on-overflow. Bounds the body to ~2 writes regardless
+    // of CSI length, and reuses the shared scratch so no extra DRAM is needed.
+    let mut offset = 0usize;
+    let data_len = packet.csi_data.len();
     for (i, val) in packet.csi_data.iter().enumerate() {
-        let mut wrapper = String::<16>::new();
-
-        if i == packet.csi_data.len() - 1 {
-            write!(wrapper, "{}", val).ok();
+        let mut elem = String::<16>::new();
+        if i + 1 == data_len {
+            let _ = write!(&mut elem, "{}", val);
         } else {
-            write!(wrapper, "{}, ", val).ok();
+            let _ = write!(&mut elem, "{}, ", val);
         }
-
-        let bytes = wrapper.as_bytes();
-
-        if offset + bytes.len() > chunk_buf.len() {
-            if driver.write(&chunk_buf[..offset]).await.is_err() {
-                return Err(());
-            }
+        let bytes = elem.as_bytes();
+        if offset + bytes.len() > scratch.len() {
+            driver.write(&scratch[..offset]).await.map_err(|_| ())?;
             offset = 0;
         }
-
-        chunk_buf[offset..offset + bytes.len()].copy_from_slice(bytes);
+        scratch[offset..offset + bytes.len()].copy_from_slice(bytes);
         offset += bytes.len();
     }
-
     if offset > 0 {
-        if driver.write(&chunk_buf[..offset]).await.is_err() {
-            return Err(());
-        }
+        driver.write(&scratch[..offset]).await.map_err(|_| ())?;
     }
-
-    if driver.write(b"]\r\n").await.is_err() {
-        return Err(());
-    }
+    driver.write(b"]\r\n").await.map_err(|_| ())?;
 
     Ok(())
 }

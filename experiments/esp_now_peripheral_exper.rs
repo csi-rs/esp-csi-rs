@@ -1,19 +1,14 @@
 #![no_std]
 #![no_main]
 
-use portable_atomic::{AtomicI32, AtomicU32, Ordering};
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_time::{with_timeout, Duration, Instant, Timer};
-use esp_csi_rs::csi::CSIDataPacket;
+use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
     config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
 };
-use esp_csi_rs::{
-    get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_total_rx_packets, get_total_tx_packets,
-    log_ln, set_csi_callback, CSINodeClient, CSINodeHardware,
-};
+use esp_csi_rs::{CSINodeClient, CSINodeHardware, get_total_rx_packets, log_ln, set_csi_logging_enabled};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -42,61 +37,18 @@ macro_rules! mk_static {
     }};
 }
 
-// Shared state written by the inline CSI callback and read by `stats_task`.
-static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
-static CSI_PKT_COUNT: AtomicU32 = AtomicU32::new(0);
-
-// On-device CSI processing hook. Runs inline in the WiFi callback — keep
-// it fast: no heap allocation, no locking, no blocking I/O.
-fn on_csi(packet: &CSIDataPacket) {
-    LATEST_RSSI.store(packet.rssi as i32, Ordering::Relaxed);
-    CSI_PKT_COUNT.fetch_add(1, Ordering::Relaxed);
-}
-
-async fn stats_task(client: &mut CSINodeClient) {
-    let mut last_sample = Instant::now();
+async fn node_task(_client: &mut CSINodeClient) {
+    // `get_total_rx_packets` increments unconditionally inside
+    // `capture_csi_info` before the publish gate, so it counts raw radio
+    // events even with `set_csi_logging_enabled(false)`.
     let mut last_rx_total = get_total_rx_packets();
-    let mut last_tx_total = get_total_tx_packets();
-
-    with_timeout(Duration::from_secs(1000), async {
-        loop {
-            Timer::after_secs(1).await;
-
-            let elapsed_us = last_sample.elapsed().as_micros() as u64;
-            let rx_total = get_total_rx_packets();
-            let tx_total = get_total_tx_packets();
-            let rx_rate_hz = if elapsed_us == 0 {
-                0
-            } else {
-                (rx_total.saturating_sub(last_rx_total) * 1_000_000 / elapsed_us) as u32
-            };
-            let tx_rate_hz = if elapsed_us == 0 {
-                0
-            } else {
-                (tx_total.saturating_sub(last_tx_total) * 1_000_000 / elapsed_us) as u32
-            };
-
-            last_sample = Instant::now();
-            last_rx_total = rx_total;
-            last_tx_total = tx_total;
-
-            log_ln!(
-                "RX PPS(avg): {}, TX PPS(avg): {}, RX Hz(inst): {}, TX Hz(inst): {}, RX Total: {}, TX Total: {}, RX Dropped Packets: {}, CSI Packets: {}, Latest RSSI: {}",
-                get_pps_rx(),
-                get_pps_tx(),
-                rx_rate_hz,
-                tx_rate_hz,
-                rx_total,
-                tx_total,
-                get_dropped_packets_rx(),
-                CSI_PKT_COUNT.load(Ordering::Relaxed),
-                LATEST_RSSI.load(Ordering::Relaxed),
-            )
-        }
-    })
-    .await
-    .unwrap_err();
-    client.send_stop().await;
+    loop {
+        Timer::after_secs(1).await;
+        let rx_total = get_total_rx_packets();
+        let rx_delta = rx_total.saturating_sub(last_rx_total);
+        last_rx_total = rx_total;
+        log_ln!("RX: {}", rx_delta);
+    }
 }
 
 #[esp_rtos::main]
@@ -106,8 +58,9 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     init_logger(spawner, LogMode::Text);
+    set_csi_logging_enabled(false);
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98440);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64000);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -115,9 +68,14 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting EspNow Peripheral Node");
+    log_ln!("Starting EspNow Peripheral Node (Exper)");
 
+    // Raise Wi-Fi buffer budget for sustained ESP-NOW + CSI traffic.
     let config_radio = esp_radio::wifi::ControllerConfig::default();
+        // .with_static_rx_buf_num(25)
+        // .with_dynamic_rx_buf_num(128)
+        // .with_ampdu_rx_enable(false)
+        // .with_rx_queue_size(32);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
@@ -128,18 +86,17 @@ async fn main(spawner: Spawner) -> ! {
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
         esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
-            EspNowConfig::default(),
+            EspNowConfig::default().with_channel(1),
         )),
         CollectionMode::Listener,
         Some(CsiConfig::default()),
-        Some(1000),
+        Some(10000),
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::N);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
+    node.set_tx_enabled(false);
 
-    set_csi_callback(on_csi);
-    join(node.run(), stats_task(&mut node_handle)).await;
+    join(node.run(), node_task(&mut node_handle)).await;
 
     loop {
         log_ln!("Hello world!");

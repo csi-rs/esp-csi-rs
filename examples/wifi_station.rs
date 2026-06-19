@@ -10,9 +10,8 @@ use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode};
 use esp_csi_rs::{
-    get_dropped_packets_rx, get_one_way_latency, get_pps_rx, get_pps_tx, get_rx_rate_hz,
-    get_tx_rate_hz, get_two_way_latency,
-    log_ln, set_csi_callback, CSINodeClient, CSINodeHardware, WifiStationConfig,
+    get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_rx_rate_hz, get_tx_rate_hz, log_ln,
+    set_csi_callback, CSINodeClient, CSINodeHardware, WifiStationConfig,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -58,14 +57,12 @@ async fn stats_task() {
         loop {
             Timer::after_secs(1).await;
             log_ln!(
-                "RX PPS(avg): {}, TX PPS(avg): {}, RX Rate(Hz): {}, TX Rate(Hz): {}, RX Dropped Packets: {}, One Way Latency: {}, Two Way Latency: {}, CSI Packets: {}, Latest RSSI: {}",
+                "RX PPS(avg): {}, TX PPS(avg): {}, RX Rate(Hz): {}, TX Rate(Hz): {}, RX Dropped Packets: {}, CSI Packets: {}, Latest RSSI: {}",
                 get_pps_rx(),
                 get_pps_tx(),
                 get_rx_rate_hz(),
                 get_tx_rate_hz(),
                 get_dropped_packets_rx(),
-                get_one_way_latency(),
-                get_two_way_latency(),
                 CSI_PKT_COUNT.load(Ordering::Relaxed),
                 LATEST_RSSI.load(Ordering::Relaxed),
             )
@@ -101,8 +98,8 @@ async fn main(spawner: Spawner) -> ! {
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let client_config = StationConfig::default()
-        .with_ssid("SSID")
-        .with_password("PASS".to_string())
+        .with_ssid("Connected Motion ")
+        .with_password("automotion@123".to_string())
         .with_auth_method(esp_radio::wifi::AuthenticationMethod::Wpa2Personal);
 
     let station_config = WifiStationConfig {

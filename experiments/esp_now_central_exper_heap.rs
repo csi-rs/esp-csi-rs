@@ -3,12 +3,14 @@
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
     config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
 };
-use esp_csi_rs::{CSINodeClient, CSINodeHardware, get_total_rx_packets, log_ln, set_csi_logging_enabled};
+use esp_csi_rs::{
+    log_ln, set_csi_logging_enabled, CSINodeClient, CSINodeHardware,
+};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -38,23 +40,37 @@ macro_rules! mk_static {
 }
 
 async fn node_task(_client: &mut CSINodeClient) {
-    // `get_total_rx_packets` increments unconditionally inside
-    // `capture_csi_info` before the publish gate, so it counts raw radio
-    // events even with `set_csi_logging_enabled(false)`.
-    let mut last_rx_total = get_total_rx_packets();
+    // Settle delay so post-init async allocations have landed before the
+    // baseline marker is captured.
+    Timer::after_secs(2).await;
+
+    let baseline_free = esp_alloc::HEAP.free();
+    let mut min_ever = baseline_free;
+    log_ln!("HEAP_BASELINE,{}", baseline_free);
+
     loop {
         Timer::after_secs(1).await;
-        let rx_total = get_total_rx_packets();
-        let rx_delta = rx_total.saturating_sub(last_rx_total);
-        last_rx_total = rx_total;
-        log_ln!("RX: {}", rx_delta);
+        let t_ms = Instant::now().as_millis();
+        let free = esp_alloc::HEAP.free();
+        if free < min_ever {
+            min_ever = free;
+        }
+        let used_delta: i64 = baseline_free as i64 - free as i64;
+        // esp-alloc 0.10 exposes no largest-contiguous-free API; emit 0 per spec.
+        let largest_free: usize = 0;
+        log_ln!(
+            "HEAP,{},{},{},{},{}",
+            t_ms,
+            free,
+            used_delta,
+            min_ever,
+            largest_free
+        );
     }
 }
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    // generator version: 1.1.0
-
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     init_logger(spawner, LogMode::Text);
@@ -68,14 +84,13 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting EspNow Peripheral Node (Exper)");
+    log_ln!("Starting EspNow Central Node (Exper Heap)");
 
-    // Raise Wi-Fi buffer budget for sustained ESP-NOW + CSI traffic.
     let config_radio = esp_radio::wifi::ControllerConfig::default()
-        .with_static_rx_buf_num(25)
-        .with_dynamic_rx_buf_num(128)
-        .with_ampdu_rx_enable(false)
-        .with_rx_queue_size(32);
+        .with_static_tx_buf_num(25)
+        .with_dynamic_tx_buf_num(128)
+        .with_ampdu_tx_enable(false).
+        with_tx_queue_size(32);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
@@ -85,16 +100,15 @@ async fn main(spawner: Spawner) -> ! {
     let mut node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
-            EspNowConfig::default().with_channel(1),
-        )),
+        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(EspNowConfig::default().with_channel(11))),
         CollectionMode::Listener,
         Some(CsiConfig::default()),
         Some(10000),
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::N);
-    node.set_tx_enabled(false);
+    node.set_rx_enabled(false);
+    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
 
     join(node.run(), node_task(&mut node_handle)).await;
 
@@ -102,6 +116,4 @@ async fn main(spawner: Spawner) -> ! {
         log_ln!("Hello world!");
         Timer::after(Duration::from_secs(1)).await;
     }
-
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v~1.0/examples
 }
