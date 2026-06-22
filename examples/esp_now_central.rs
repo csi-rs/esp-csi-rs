@@ -127,7 +127,7 @@ async fn main(spawner: Spawner) -> ! {
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::N);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
+    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs7Sgi);
 
     set_csi_callback(on_csi);
     let _ = &mut node_handle;

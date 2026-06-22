@@ -450,11 +450,7 @@ macro_rules! log_raw {
             feature = "println"
         ))]
         {
-            use core::fmt::Write as _FmtWrite;
-            let mut _printer = esp_println::Printer;
-            for &_b in AsRef::<[u8]>::as_ref(&$data) {
-                let _ = _printer.write_char(_b as char);
-            }
+            esp_println::Printer::write_bytes(AsRef::<[u8]>::as_ref(&$data));
         }
     }};
 }
