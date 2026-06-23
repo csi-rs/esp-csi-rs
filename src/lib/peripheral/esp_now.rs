@@ -26,7 +26,7 @@ use embassy_futures::select::{select, Either};
 use embassy_futures::yield_now;
 use embassy_time::Instant;
 use embassy_time::Timer;
-use esp_radio::esp_now::{Error as EspNowInnerError, EspNow, EspNowError, PeerInfo};
+use esp_radio::esp_now::{Error as EspNowInnerError, EspNow, EspNowError, PeerInfo, BROADCAST_ADDRESS};
 
 use crate::esp_now_pool::PoolFrame;
 
@@ -369,6 +369,19 @@ pub async fn run_esp_now_peripheral(
     if config.secondary_channel().is_none() {
         esp_now.set_channel(config.channel).unwrap();
     }
+    // Forced PHY: set the broadcast peer's ESP-NOW TX rate/bandwidth, mirroring
+    // the central. The peripheral replies via broadcast (see `responder`), so
+    // this forces those replies to the configured HT rate. Without it the
+    // replies go out at the driver default (legacy) rate, and a receiving
+    // ESP32-C6 generates no CSI for non-HT frames — leaving the central's CSI
+    // count stuck at 0 even though the frames are received.
+    if config.force_phy() {
+        crate::set_peer_espnow_phy(
+            &BROADCAST_ADDRESS,
+            *config.phy_rate(),
+            config.secondary_channel(),
+        );
+    }
     log_ln!("esp-now version {}", esp_now.version().unwrap());
 
     // The static-pool `rcv_cb` is installed in `lib::run` before `set_csi`,
@@ -463,7 +476,15 @@ async fn responder(
             {
                 burst_budget = burst_budget.saturating_sub(1);
 
-                let central_mac = u64_to_mac(shared.central_mac.load(Ordering::Relaxed));
+                // Reply via broadcast rather than unicast to the learned central
+                // MAC. On ESP32-C6 an unassociated started-STA does not surface
+                // unicast ESP-NOW frames as CSI to the central, so a unicast
+                // reply leaves the central's CSI count stuck at 0. Broadcast RX
+                // is reliable on every chip, the frame still carries
+                // `PERIPHERAL_MAGIC_NUMBER` (auto) / the central's source-MAC
+                // filter still matches (manual), and the forced HT rate is
+                // applied to the broadcast peer (see `run_esp_now_peripheral`).
+                // Trade-off: broadcast frames are not MAC-acked — no retries.
 
                 // Auto mode: send the 4-byte magic prefix (empty beacon body).
                 // Manual mode: a single sentinel byte so the frame isn't empty.
@@ -487,7 +508,7 @@ async fn responder(
 
                 let mut send_succeeded = false;
                 if tx_fast_no_wait {
-                    match esp_now.send(&central_mac, message) {
+                    match esp_now.send(&BROADCAST_ADDRESS, message) {
                         Ok(waiter) => {
                             // Max-throughput mode: queue packets as fast as the
                             // driver accepts them and avoid per-packet callback waits.
@@ -507,7 +528,7 @@ async fn responder(
                         }
                     }
                 } else {
-                    let send_result = match esp_now.send(&central_mac, message) {
+                    let send_result = match esp_now.send(&BROADCAST_ADDRESS, message) {
                         Ok(waiter) => waiter.wait(),
                         Err(e) => Err(e),
                     };

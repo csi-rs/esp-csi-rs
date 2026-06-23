@@ -107,7 +107,7 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
     init_logger(spawner, LogMode::Text);
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98440);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 60000);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -136,7 +136,7 @@ async fn main(spawner: Spawner) -> ! {
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::N);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
+    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs7Lgi);
 
     set_csi_callback(on_csi);
     join(node.run(), stats_task(&mut node_handle)).await;
