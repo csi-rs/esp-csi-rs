@@ -17,7 +17,7 @@
 //! ### Creating a project
 //! To use this crate you would need to create and setup a project for your ESP device then import the crate. This crate is compatible with the `no-std` ESP development framework. You should also select the corresponding device by activating it in the crate features.
 //!
-//! To create a projects it is highly recommended to refer the to instructions in [The Rust on ESP Book](https://docs.esp-rs.org/book/) before proceeding. The book explains the full esp-rs ecosystem, how to get started, and how to generate projects for both `std` and `no-std`.
+//! To create a projects it is highly recommended to refer the to instructions in [The Rust on ESP Book](https://docs.espressif.com/projects/rust/book/) before proceeding. The book explains the full esp-rs ecosystem, how to get started, and how to generate projects for both `std` and `no-std`.
 //!
 //! Espressif has developed a project generation tool, `esp-generate`, to ease this process and is recommended for new projects. As an example, you can create a `no-std` project for the ESP32-C3 device as follows:
 //!
@@ -38,8 +38,8 @@
 //! Per-chip cargo aliases ship in `.cargo/config.toml` for both flavors:
 //!
 //! ```bash
-//! cargo esp32c3 --example sniffer_wifi          # println
-//! cargo esp32c3-defmt --example sniffer_wifi    # defmt
+//! cargo esp32c3 --example sniffer_wifi # println
+//! cargo esp32c3-defmt --example sniffer_wifi # defmt
 //! ```
 //!
 //! Replace `esp32c3` with any of: `esp32`, `esp32c3`, `esp32c5`, `esp32c6`, `esp32s3`. `-build` and `-build-defmt` variants compile without flashing.
@@ -67,10 +67,10 @@
 //! ## Collection Network Architechtures
 //! As ahown earlier, `esp-csi-rs` allows you to configure a device to one several operational modes including ESP-NOW, WiFi station, or WiFi sniffer. As such, `esp-csi-rs` supports several network setups allowing for flexibility in collecting CSI data. Some possible setups including the following:
 //!
-//! 1. ***Single Node:***  This is the simplest setup where only one ESP device (CSI Node) is needed. The node is configured to "sniff" packets in surrounding networks and collect CSI data. The WiFi Sniffer Peripheral Collector is the only configuration that supports this topology.
+//! 1. ***Single Node:*** This is the simplest setup where only one ESP device (CSI Node) is needed. The node is configured to "sniff" packets in surrounding networks and collect CSI data. The WiFi Sniffer Peripheral Collector is the only configuration that supports this topology.
 //! 2. ***Point-to-Point:*** This set up uses two CSI Nodes, a central and a peripheral. One of them can be a collector and the other a listener. Alternatively, both can be collectors as well. Some configuration examples include
-//!     - **WiFi Station Central Collector <-> Access Point/Commercial Router**: In this configuration the CSI node can connect to any WiFi Access Point like an ESP AP or a commercial router. The node in turn sends traffic to the Access Point to acquire CSI data.
-//!     - **ESP-NOW Central Listener/Collector <-> ESP-NOW Peripheral Listener/Collector**: In this configuration a CSI central node connects to one other ESP-NOW peripheral node. Both ESP-NOW peripheral and central nodes can operate either as listeners or collectors.
+//! - **WiFi Station Central Collector <-> Access Point/Commercial Router**: In this configuration the CSI node can connect to any WiFi Access Point like an ESP AP or a commercial router. The node in turn sends traffic to the Access Point to acquire CSI data.
+//! - **ESP-NOW Central Listener/Collector <-> ESP-NOW Peripheral Listener/Collector**: In this configuration a CSI central node connects to one other ESP-NOW peripheral node. Both ESP-NOW peripheral and central nodes can operate either as listeners or collectors.
 //! 3. ***Star:*** In this architechture a central node connects to several peripheral nodes. The central node triggers traffic and aggregates CSI sent back from peripheral nodes. Alternatively, CSI can be collected by the individual peripherals. Only the ESP-NOW operation mode supports this architechture. The ESP-NOW peripheral and central nodes can also operate either as listeners or collectors.
 //!
 //! ## Output Formats & Logging Modes
@@ -158,7 +158,7 @@
 //! use esp_csi_rs::{set_csi_callback, csi::CSIDataPacket};
 //!
 //! fn on_csi(packet: &CSIDataPacket) {
-//!     // your processing — keep it fast
+//! // your processing — keep it fast
 //! }
 //!
 //! set_csi_callback(on_csi);
@@ -181,12 +181,12 @@
 //! use esp_radio::wifi::AuthenticationMethod;
 //!
 //! let client_config = StationConfig::default()
-//!     .with_ssid("SSID")
-//!     .with_password("PASS".to_string())
-//!     .with_auth_method(AuthenticationMethod::Wpa2Personal);
+//! .with_ssid("SSID")
+//! .with_password("PASS".to_string())
+//! .with_auth_method(AuthenticationMethod::Wpa2Personal);
 //!
 //! let station_config = WifiStationConfig {
-//!    client_config,  // Pass the config we created above
+//! client_config, // Pass the config we created above
 //! };
 //! ```
 //!
@@ -194,17 +194,17 @@
 //! #### Step 4: Create a CSI Collection Node Instance with the Desired Configuration
 //! ```rust
 //! let mut node = CSINode::new(
-//!     esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::WifiStation(station_config)),
-//!     CollectionMode::Collector,
-//!     Some(CsiConfig::default()),
-//!     Some(100),
-//!     csi_hardware,
+//! esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::WifiStation(station_config)),
+//! CollectionMode::Collector,
+//! Some(CsiConfig::default()),
+//! Some(100),
+//! csi_hardware,
 //! );
 //! ```
 //! #### Step 5: (Optional) Register an On-Device CSI Callback
 //! ```rust
 //! set_csi_callback(|packet| {
-//!     // process `packet` inline — keep it fast
+//! // process `packet` inline — keep it fast
 //! });
 //! ```
 //! #### Step 6: Create a CSI Node Client to Control the Node
@@ -216,7 +216,6 @@
 //! node.run_duration(1000, &mut node_handle).await;
 //! ```
 //!
-
 
 #![no_std]
 
@@ -247,9 +246,9 @@ pub mod cpu_test;
 // continue to resolve unchanged after the split.
 // ---------------------------------------------------------------------------
 pub use crate::csi::delivery::{
-    clear_csi_callback, csi_delivery_mode, csi_logging_enabled, run_process_csi_packet,
-    set_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled, set_csi_raw_callback,
-    CSINodeClient, CsiDeliveryMode,
+    CSINodeClient, CsiDeliveryMode, clear_csi_callback, csi_delivery_mode, csi_logging_enabled,
+    run_process_csi_packet, set_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled,
+    set_csi_raw_callback,
 };
 pub use crate::espnow_phy::{apply_peer_espnow_phy, install_static_espnow_recv, set_peer_espnow_phy};
 pub use crate::node::{
@@ -275,11 +274,11 @@ pub use crate::cpu_test::{set_test_tx_paused, set_test_tx_payload_b, set_test_tx
 // path from the `central` / `peripheral` / `sta` / `csi::delivery` modules. Keeping
 // the flat crate-root paths means those modules need no edits after the split.
 // ---------------------------------------------------------------------------
-pub(crate) use crate::csi::delivery::{set_csi, set_runtime_collection_mode, IS_COLLECTOR};
-pub(crate) use crate::node::{reset_globals, STOP_SIGNAL};
+pub(crate) use crate::csi::delivery::{IS_COLLECTOR, set_csi, set_runtime_collection_mode};
+pub(crate) use crate::node::{STOP_SIGNAL, reset_globals};
 pub(crate) use crate::protocol::{
-    parse_with_magic, serialize_with_magic, CENTRAL_MAGIC_NUMBER, PERIPHERAL_BEACON_SENTINEL,
-    PERIPHERAL_MAGIC_NUMBER,
+    CENTRAL_MAGIC_NUMBER, PERIPHERAL_BEACON_SENTINEL, PERIPHERAL_MAGIC_NUMBER, parse_with_magic,
+    serialize_with_magic,
 };
 
 #[cfg(feature = "statistics")]
