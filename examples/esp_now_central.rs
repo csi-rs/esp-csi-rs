@@ -123,7 +123,7 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     init_logger(spawner, LogMode::Text);
-    log_ln!("Log backend: {}", auto_log_backend_label());
+    log_ln!("Log backend: {=str}", auto_log_backend_label());
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 

@@ -37,7 +37,6 @@ auto = ["esp-println/auto"]
 ## Enable logging via defmt.
 defmt = [
     "dep:defmt",
-    "esp-println/defmt-espflash",
     "esp-hal/defmt",
     "esp-radio/defmt",
     "esp-backtrace/defmt",
@@ -197,7 +196,7 @@ static_cell = "2.1.1"
 
 document-features = "0.2.11"
 
-defmt = { version = "1.0.1", optional = true }
+defmt = { version = "1.0.1", optional = true, features = ["encoding-rzcobs"] }
 
 log = { version = "0.4.29", optional = true }
 

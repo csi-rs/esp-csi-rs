@@ -408,7 +408,7 @@ pub(crate) async fn run_icmp_flood(
     mut src: Ipv4Address,
     mut dst: Ipv4Address,
     frequency_hz: Option<u16>,
-    label: &str,
+    label: &'static str,
     watch_dhcp: bool,
 ) {
     let mut rx_meta = [PacketMetadata::EMPTY; ICMP_FLOOD_RX_SLOTS];
@@ -432,9 +432,16 @@ pub(crate) async fn run_icmp_flood(
     let mut seq_counter: u16 = 0;
     let mut tx_ipv4_buffer = [0u8; 64];
 
+    let dst_oct = dst.octets();
     log_ln!(
-        "{label}: ICMP flood {target_hz} Hz → {} (deep TX queue, burst={ICMP_FLOOD_CATCH_UP_BURST})",
-        dst
+        "{=str}: ICMP flood {} Hz → {}.{}.{}.{} (deep TX queue, burst={})",
+        label,
+        target_hz,
+        dst_oct[0],
+        dst_oct[1],
+        dst_oct[2],
+        dst_oct[3],
+        ICMP_FLOOD_CATCH_UP_BURST,
     );
 
     loop {
@@ -483,7 +490,15 @@ pub(crate) async fn run_icmp_flood(
                 Either3::Third(new_ip) => {
                     src = new_ip.local_address.address();
                     dst = new_ip.gateway_address;
-                    log_ln!("{label}: updated ICMP target gateway {dst}");
+                    let dst_oct = dst.octets();
+                    log_ln!(
+                        "{=str}: updated ICMP target gateway {}.{}.{}.{}",
+                        label,
+                        dst_oct[0],
+                        dst_oct[1],
+                        dst_oct[2],
+                        dst_oct[3],
+                    );
                 }
             }
         } else {

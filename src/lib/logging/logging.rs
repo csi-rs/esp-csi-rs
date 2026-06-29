@@ -26,7 +26,7 @@ use postcard::experimental::max_size::MaxSize;
 
 #[cfg(all(
     feature = "defmt",
-    not(feature = "async-print"),
+    not(any(feature = "async-print", feature = "auto")),
     not(feature = "external-defmt-logger")
 ))]
 use esp_println as _;
@@ -90,6 +90,15 @@ static ASYNC_LOG_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Returns whether logging currently uses the async backend task.
 pub fn is_async_logging_active() -> bool {
     ASYNC_LOG_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Human-readable label for the logging backend selected by [`init_logger`].
+pub fn auto_log_backend_label() -> &'static str {
+    if is_async_logging_active() {
+        "async"
+    } else {
+        "inline sync"
+    }
 }
 /// When non-zero, the EspCsiTool formatter emits at most this many `i8`
 /// samples in column 26 and reports `len` accordingly. Mirrors
@@ -260,6 +269,7 @@ mod log_impl {
 mod defmt_impl {
     use crate::logging::logging::DEFMT_LOG_CHANNEL_CAPACITY;
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
+    use portable_atomic::Ordering;
 
     pub static DEFMT_CHANNEL: Channel<
         CriticalSectionRawMutex,
@@ -267,19 +277,48 @@ mod defmt_impl {
         DEFMT_LOG_CHANNEL_CAPACITY,
     > = Channel::new();
 
+    static mut ENCODER: defmt::Encoder = defmt::Encoder::new();
+
+    fn with_encoder(f: impl FnOnce(&mut defmt::Encoder)) {
+        // Edition 2024 denies direct `&mut` to `static mut`; use raw pointers.
+        unsafe {
+            f(&mut *core::ptr::addr_of_mut!(ENCODER));
+        }
+    }
+
+    fn do_write(bytes: &[u8]) {
+        if super::ASYNC_LOG_ACTIVE.load(Ordering::Relaxed) {
+            #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
+            {
+                if let Ok(fixed) = bytes.try_into() {
+                    let _ = DEFMT_CHANNEL.try_send(fixed);
+                }
+            }
+        } else {
+            esp_println::Printer::write_bytes(bytes);
+        }
+    }
+
     #[defmt::global_logger]
     struct AsyncDefmtBackend;
 
     unsafe impl defmt::Logger for AsyncDefmtBackend {
-        fn acquire() {}
-        unsafe fn release() {}
-        unsafe fn flush() {}
+        fn acquire() {
+            do_write(&[0xFF, 0x00]);
+            with_encoder(|enc| enc.start_frame(do_write));
+        }
+
+        unsafe fn release() {
+            with_encoder(|enc| enc.end_frame(do_write));
+            Self::flush();
+        }
+
+        unsafe fn flush() {
+            // esp-println drains the active transport FIFO.
+        }
 
         unsafe fn write(bytes: &[u8]) {
-            #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
-            {
-                let _ = DEFMT_CHANNEL.try_send(bytes.try_into().unwrap());
-            }
+            with_encoder(|enc| enc.write(bytes, do_write));
         }
     }
 }
