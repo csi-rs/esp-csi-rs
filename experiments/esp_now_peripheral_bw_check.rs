@@ -25,22 +25,22 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
 #[cfg(feature = "statistics")]
 use embassy_time::Instant;
+use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
+#[cfg(feature = "statistics")]
+use esp_csi_rs::peripheral::esp_now::{
+    get_rx_control_packets, get_rx_magic_drop_packets, get_rx_parse_fail_packets,
+};
 use esp_csi_rs::{
+    CSINode, CSINodeClient, CSINodeHardware, CollectionMode, EspNowConfig, IOTaskConfig,
     config::CsiConfig, install_static_espnow_recv, log_ln, logging::logging::init_logger,
-    set_csi_logging_enabled, CSINode, CSINodeClient, CSINodeHardware, CollectionMode,
-    EspNowConfig, IOTaskConfig,
+    set_csi_logging_enabled,
 };
 #[cfg(feature = "statistics")]
 use esp_csi_rs::{
     get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_total_rx_packets, get_total_tx_packets,
-};
-#[cfg(feature = "statistics")]
-use esp_csi_rs::peripheral::esp_now::{
-    get_rx_control_packets, get_rx_magic_drop_packets, get_rx_parse_fail_packets,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;

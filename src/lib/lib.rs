@@ -250,10 +250,12 @@ pub use crate::csi::delivery::{
     run_process_csi_packet, set_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled,
     set_csi_raw_callback,
 };
-pub use crate::espnow_phy::{apply_peer_espnow_phy, install_static_espnow_recv, set_peer_espnow_phy};
+pub use crate::espnow_phy::{
+    apply_peer_espnow_phy, install_static_espnow_recv, set_peer_espnow_phy,
+};
 pub use crate::node::{
     CSINode, CSINodeHardware, CentralOpMode, CollectionMode, EspNowConfig, IOTaskConfig, Node,
-    PeripheralOpMode, WifiSnifferConfig, WifiStationConfig,
+    PeripheralOpMode, WifiApConfig, WifiSnifferConfig, WifiStationConfig,
 };
 pub use crate::protocol::{ControlPacket, PeripheralPacket};
 
@@ -275,7 +277,7 @@ pub use crate::cpu_test::{set_test_tx_paused, set_test_tx_payload_b, set_test_tx
 // the flat crate-root paths means those modules need no edits after the split.
 // ---------------------------------------------------------------------------
 pub(crate) use crate::csi::delivery::{IS_COLLECTOR, set_csi, set_runtime_collection_mode};
-pub(crate) use crate::node::{STOP_SIGNAL, reset_globals};
+pub(crate) use crate::node::STOP_SIGNAL;
 pub(crate) use crate::protocol::{
     CENTRAL_MAGIC_NUMBER, PERIPHERAL_BEACON_SENTINEL, PERIPHERAL_MAGIC_NUMBER, parse_with_magic,
     serialize_with_magic,

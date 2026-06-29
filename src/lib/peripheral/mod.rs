@@ -9,3 +9,6 @@
 /// Peripheral-side ESP-NOW driver: receives control packets from the
 /// central and sends timestamped replies for latency telemetry.
 pub mod esp_now;
+/// Fast one-to-one ESP-NOW source (asymmetric simplex): discovers the collector,
+/// then unicasts a continuous forced-PHY flood for CSI capture.
+pub mod esp_now_fast;

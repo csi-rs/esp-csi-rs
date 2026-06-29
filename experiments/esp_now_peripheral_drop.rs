@@ -31,15 +31,20 @@
 #![no_std]
 #![no_main]
 
+#[cfg(not(feature = "statistics"))]
+compile_error!("This experiment requires the `statistics` feature.");
+
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::peripheral::esp_now::{get_rx_control_packets, get_rx_sequence_miss_packets};
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
+    CSINode, CollectionMode, EspNowConfig, config::CsiConfig, logging::logging::init_logger,
 };
-use esp_csi_rs::{get_total_rx_packets, log_ln, set_csi_logging_enabled, CSINodeHardware};
+use esp_csi_rs::{CSINodeHardware, log_ln, set_csi_logging_enabled};
+#[cfg(feature = "statistics")]
+use esp_csi_rs::get_total_rx_packets;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;

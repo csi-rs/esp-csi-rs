@@ -16,7 +16,7 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::log_ln;
-use esp_csi_rs::logging::logging::{init_logger, LogMode};
+use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::{SecondaryChannel, WifiController};

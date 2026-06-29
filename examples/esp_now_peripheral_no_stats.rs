@@ -5,9 +5,9 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
+    CSINode, CollectionMode, EspNowConfig, config::CsiConfig, logging::logging::init_logger,
 };
-use esp_csi_rs::{log_ln, CSINodeClient, CSINodeHardware};
+use esp_csi_rs::{CSINodeClient, CSINodeHardware, log_ln};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -65,18 +65,15 @@ async fn main(spawner: Spawner) -> ! {
         .with_ampdu_rx_enable(true)
         .with_ampdu_tx_enable(true)
         .with_rx_ba_win(16);
-    let (wifi_controller, mut interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, config_radio)
-            .expect("Failed to initialize Wi-Fi controller");
+    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+        .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let _node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
-            EspNowConfig::default(),
-        )),
+        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(EspNowConfig::default())),
         CollectionMode::Listener,
         Some(CsiConfig::default()),
         Some(1500),

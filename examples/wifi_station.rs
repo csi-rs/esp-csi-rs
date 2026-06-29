@@ -1,63 +1,64 @@
+//! Wi-Fi station — DHCP client that pings its gateway for steady traffic.
+//!
+//! Companion to `wifi_ap`. Associates to SSID `esp-csi-ap` (open auth), runs
+//! DHCP, then pings the gateway at 4 kHz so the AP side (`wifi_ap`) captures
+//! uplink CSI. Can also join any other AP by changing `SSID` / auth below.
+//!
+//! Build / run (optional throughput counters need `--features statistics`):
+//!   cargo esp32c6 --example wifi_station
+//!   cargo esp32s3 --example wifi_station
+
 #![no_std]
 #![no_main]
 
-use crate::alloc::string::ToString;
-use portable_atomic::{AtomicI32, AtomicU32, Ordering};
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CSIDataPacket;
-use esp_csi_rs::logging::logging::LogMode;
-use esp_csi_rs::{config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode};
+use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_rx_rate_hz, get_tx_rate_hz, log_ln,
-    set_csi_callback, CSINodeClient, CSINodeHardware, WifiStationConfig,
+    CSINode, CSINodeHardware, CentralOpMode, CollectionMode, Node, WifiStationConfig,
+    config::CsiConfig, log_ln, set_csi_callback,
+};
+#[cfg(feature = "statistics")]
+use esp_csi_rs::{
+    get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_rx_rate_hz, get_tx_rate_hz,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
+use esp_radio::wifi::{PowerSaveMode, WifiController};
 use esp_radio::wifi::sta::StationConfig;
-use esp_radio::wifi::WifiController;
+use portable_atomic::{AtomicI32, AtomicU32, Ordering};
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
+
+/// Must match `wifi_ap` (or your own AP).
+const SSID: &str = "esp-csi-ap";
+/// Gateway ping rate (Hz) — drives uplink traffic for the AP CSI collector.
+const PING_RATE_HZ: u16 = 4000;
 
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
     static_cell::StaticCell::new();
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-#[allow(
-    clippy::large_stack_frames,
-    reason = "it's not unusual to allocate larger buffers etc. in main"
-)]
-
-macro_rules! mk_static {
-    ($t:ty,$val:expr) => {{
-        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-        #[deny(unused_attributes)]
-        let x = STATIC_CELL.uninit().write(($val));
-        x
-    }};
-}
-
-// Shared state written by the inline CSI callback and read by `stats_task`.
 static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
 static CSI_PKT_COUNT: AtomicU32 = AtomicU32::new(0);
 
-// On-device CSI processing hook. Runs inline in the WiFi callback — keep it
-// fast: no heap allocation, no locking, no blocking I/O. For heavier work,
-// copy what you need out of `packet` and post it to your own task.
 fn on_csi(packet: &CSIDataPacket) {
     LATEST_RSSI.store(packet.rssi as i32, Ordering::Relaxed);
     CSI_PKT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
+#[embassy_executor::task]
 async fn stats_task() {
-    with_timeout(Duration::from_secs(5), async {
-        loop {
-            Timer::after_secs(1).await;
+    loop {
+        Timer::after_secs(1).await;
+
+        #[cfg(feature = "statistics")]
+        {
             log_ln!(
-                "RX PPS(avg): {}, TX PPS(avg): {}, RX Rate(Hz): {}, TX Rate(Hz): {}, RX Dropped Packets: {}, CSI Packets: {}, Latest RSSI: {}",
+                "RX PPS(avg): {}, TX PPS(avg): {}, RX Rate(Hz): {}, TX Rate(Hz): {}, RX Dropped: {}, CSI Packets: {}, Latest RSSI: {}",
                 get_pps_rx(),
                 get_pps_tx(),
                 get_rx_rate_hz(),
@@ -65,21 +66,26 @@ async fn stats_task() {
                 get_dropped_packets_rx(),
                 CSI_PKT_COUNT.load(Ordering::Relaxed),
                 LATEST_RSSI.load(Ordering::Relaxed),
-            )
+            );
         }
-    })
-    .await
-    .unwrap_err();
+
+        #[cfg(not(feature = "statistics"))]
+        {
+            log_ln!(
+                "CSI Packets: {}, Latest RSSI: {}",
+                CSI_PKT_COUNT.load(Ordering::Relaxed),
+                LATEST_RSSI.load(Ordering::Relaxed),
+            );
+        }
+    }
 }
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-    init_logger(spawner, LogMode::ArrayList);
+    init_logger(spawner, LogMode::Text);
 
-    // Keep reclaimed heap moderate so internal RAM remains available for
-    // Wi-Fi/RTOS task stacks during STA scan/connect.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -88,58 +94,41 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting Wifi Station Node");
+    log_ln!(
+        "Starting Wi-Fi station — SSID {}, {} Hz gateway ping",
+        SSID,
+        PING_RATE_HZ
+    );
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, mut interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, config_radio)
-            .expect("Failed to initialize Wi-Fi controller");
+    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+        .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
+    let _ = controller.set_power_saving(PowerSaveMode::None);
 
     let client_config = StationConfig::default()
-        .with_ssid("Connected Motion ")
-        .with_password("automotion@123".to_string())
-        .with_auth_method(esp_radio::wifi::AuthenticationMethod::Wpa2Personal);
+        .with_ssid(SSID)
+        .with_auth_method(esp_radio::wifi::AuthenticationMethod::None);
 
-    let station_config = WifiStationConfig {
-        client_config, // Pass the config we created above
-    };
-
-    // Create a CSI Client Instance to handle CSI data and control messages
-    let mut node_handle = CSINodeClient::new();
-    // Create a CSINodeHardware instance which will be used by the CSINode to interact with the Wi-Fi hardware
+    let station_config = WifiStationConfig { client_config };
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::WifiStation(station_config)),
+        Node::Central(CentralOpMode::WifiStation(station_config)),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
-        Some(1000),
+        Some(PING_RATE_HZ),
         csi_hardware,
     );
-    #[cfg(feature = "esp32c6")]
-    node.set_protocol(esp_radio::wifi::Protocol::AX);
-    #[cfg(not(feature = "esp32c6"))]
     node.set_protocol(esp_radio::wifi::Protocol::N);
 
-    // Register the on-device CSI processing hook. Runs inline in the WiFi
-    // callback for every CSI packet — also implicitly enables the publish
-    // gate so the callback fires.
     set_csi_callback(on_csi);
-
-    // Drive stats for the configured timeout, then ask the node to stop so
-    // `node.run()` can drain its STA tasks and the join completes. Without
-    // sending stop the join blocks forever and we never reach the loop below.
-    let driver = async {
-        stats_task().await;
-        node_handle.send_stop().await;
-    };
-    join(node.run(), driver).await;
+    spawner.spawn(stats_task().unwrap());
+    node.run().await;
 
     loop {
         log_ln!("Hello world!");
         Timer::after(Duration::from_secs(1)).await;
     }
-
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v~1.0/examples
 }

@@ -14,28 +14,28 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
 #[cfg(feature = "statistics")]
 use embassy_time::Instant;
-use esp_csi_rs::config::CsiConfig;
-use esp_csi_rs::csi::CSIDataPacket;
-use esp_csi_rs::logging::logging::LogMode;
-use esp_csi_rs::{set_csi_callback, set_csi_logging_enabled};
-use portable_atomic::{AtomicU32, Ordering};
-use esp_csi_rs::{
-    install_static_espnow_recv, log_ln, logging::logging::init_logger, CSINode, CSINodeClient,
-    CSINodeHardware, CentralOpMode, CollectionMode, EspNowConfig, IOTaskConfig, Node,
-};
-#[cfg(feature = "statistics")]
-use esp_csi_rs::{get_pps_tx, get_total_tx_packets};
+use embassy_time::{Duration, Timer};
 #[cfg(feature = "statistics")]
 use esp_csi_rs::central::esp_now::{
     get_tx_confirmed_packets, get_tx_failed_packets, get_tx_queued_packets,
 };
+use esp_csi_rs::config::CsiConfig;
+use esp_csi_rs::csi::CSIDataPacket;
+use esp_csi_rs::logging::logging::LogMode;
+use esp_csi_rs::{
+    CSINode, CSINodeClient, CSINodeHardware, CentralOpMode, CollectionMode, EspNowConfig,
+    IOTaskConfig, Node, install_static_espnow_recv, log_ln, logging::logging::init_logger,
+};
+#[cfg(feature = "statistics")]
+use esp_csi_rs::{get_pps_tx, get_total_tx_packets};
+use esp_csi_rs::{set_csi_callback, set_csi_logging_enabled};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::WifiController;
+use portable_atomic::{AtomicU32, Ordering};
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;

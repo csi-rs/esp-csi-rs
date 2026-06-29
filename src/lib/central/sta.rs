@@ -6,13 +6,15 @@
 //! samples for received frames out-of-band via the global CSI channel.
 
 use core::cell::UnsafeCell;
+use core::future::poll_fn;
 use core::mem::MaybeUninit;
 use core::net::Ipv4Addr;
+use core::task::Poll;
 use embassy_futures::join::{join3, join4};
-use embassy_futures::select::{select, select3, Either, Either3};
+use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_net::raw::{IpProtocol, IpVersion, PacketMetadata, RawSocket};
 use embassy_net::{Ipv4Address, Ipv4Cidr, Runner, Stack, StackResources};
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_radio::wifi::csi::CsiConfig;
 use esp_radio::wifi::{Config, Interface, WifiController};
 use portable_atomic::{AtomicBool, Ordering};
@@ -23,9 +25,17 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal}
 use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, Ipv4Packet, Ipv4Repr};
 
 use crate::log_ln;
-use crate::{set_csi, IOTaskConfig, WifiStationConfig, STOP_SIGNAL};
+use crate::{IOTaskConfig, STOP_SIGNAL, WifiStationConfig, set_csi};
 
 static DHCP_CLIENT_INFO: Signal<CriticalSectionRawMutex, IpInfo> = Signal::new();
+
+/// Raw-socket TX queue depth — a single slot caps offered traffic at ~30 Hz
+/// because each `send().await` waits for the previous datagram to leave smoltcp.
+const ICMP_FLOOD_TX_SLOTS: usize = 16;
+const ICMP_FLOOD_RX_SLOTS: usize = 4;
+/// Max datagrams queued per scheduler wake (matches `esp_now_central_min_drop`).
+const ICMP_FLOOD_CATCH_UP_BURST: u8 = 16;
+const ICMP_FLOOD_QUEUE_BACKOFF_US: u64 = 50;
 
 /// One-shot-then-reusable storage for the STA stack's `StackResources`.
 ///
@@ -34,7 +44,7 @@ static DHCP_CLIENT_INFO: Signal<CriticalSectionRawMutex, IpInfo> = Signal::new()
 /// is always gone by the time we land here again (`node.run` joins every
 /// STA task before returning, dropping the `Stack`/`Runner`), so we can
 /// safely hand the same buffer back out.
-struct StackResourcesSlot {
+pub(crate) struct StackResourcesSlot {
     cell: UnsafeCell<MaybeUninit<StackResources<6>>>,
     inited: AtomicBool,
 }
@@ -46,7 +56,7 @@ struct StackResourcesSlot {
 unsafe impl Sync for StackResourcesSlot {}
 
 impl StackResourcesSlot {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             cell: UnsafeCell::new(MaybeUninit::uninit()),
             inited: AtomicBool::new(false),
@@ -57,7 +67,7 @@ impl StackResourcesSlot {
     // `Sync` impl and the SAFETY note below), so the `&mut`-from-`&` is sound
     // by construction — clippy's `mut_from_ref` is a false positive here.
     #[allow(clippy::mut_from_ref)]
-    fn get_or_init(&'static self) -> &'static mut StackResources<6> {
+    pub(crate) fn get_or_init(&'static self) -> &'static mut StackResources<6> {
         // SAFETY: see the `Sync` impl. First call writes the value; later
         // calls reuse the same buffer. `StackResources` has no destructor
         // state that depends on initialising "fresh" — embassy-net reuses
@@ -217,7 +227,7 @@ pub async fn run_sta_connect(
 }
 
 /// Run the embassy-net runner until a stop signal is received.
-async fn run_net_task(mut sta_runner: Runner<'_, &mut Interface<'_>>) {
+pub(crate) async fn run_net_task(mut sta_runner: Runner<'_, &mut Interface<'_>>) {
     loop {
         match select(STOP_SIGNAL.wait(), sta_runner.run()).await {
             Either::First(_) => {
@@ -336,11 +346,8 @@ pub async fn sta_connection(controller: &mut WifiController<'_>) {
                         }
                         Either::Second(Err(e)) => {
                             log_ln!("STA reconnect failed: {:?}", e);
-                            match select(
-                                STOP_SIGNAL.wait(),
-                                Timer::after(Duration::from_secs(1)),
-                            )
-                            .await
+                            match select(STOP_SIGNAL.wait(), Timer::after(Duration::from_secs(1)))
+                                .await
                             {
                                 Either::First(_) => {
                                     STOP_SIGNAL.signal(());
@@ -356,32 +363,61 @@ pub async fn sta_connection(controller: &mut WifiController<'_>) {
     }
 }
 
-/// Manage station network operations and emit periodic ICMP traffic.
-pub async fn sta_network_ops(sta_stack: Stack<'_>, frequency_hz: Option<u16>) {
-    // Retrieve acquired IP information from DHCP. Guard against `STOP_SIGNAL`
-    // — if stop fires before DHCP completes (e.g. AP never associated), this
-    // unguarded wait would hang the join in `run_sta_connect`.
-    let mut ip_info = match select(STOP_SIGNAL.wait(), DHCP_CLIENT_INFO.wait()).await {
-        Either::First(_) => {
-            STOP_SIGNAL.signal(());
-            return;
-        }
-        Either::Second(info) => info,
+/// Build a raw IPv4/ICMP echo datagram into `out` and return the length.
+fn build_icmp_echo_ipv4(
+    out: &mut [u8],
+    src: Ipv4Address,
+    dst: Ipv4Address,
+    seq_no: u16,
+) -> Option<usize> {
+    if out.len() < 64 {
+        return None;
+    }
+    let mut icmp_buffer = [0u8; 12];
+    let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
+    let icmp_repr = Icmpv4Repr::EchoRequest {
+        ident: 0x22b,
+        seq_no,
+        data: &[0xDE, 0xAD, 0xBE, 0xEF],
     };
+    icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
 
-    // let mut start_collection_watch = match START_COLLECTION.receiver() {
-    //     Some(r) => r,
-    //     None => panic!("Maximum number of recievers reached"),
-    // };
+    let ipv4_repr = Ipv4Repr {
+        src_addr: src,
+        dst_addr: dst,
+        payload_len: icmp_repr.buffer_len(),
+        hop_limit: 64,
+        next_header: IpProtocol::Icmp,
+    };
+    let len = ipv4_repr.buffer_len() + icmp_repr.buffer_len();
+    let mut ipv4_packet = Ipv4Packet::new_unchecked(out);
+    ipv4_repr.emit(&mut ipv4_packet, &ChecksumCapabilities::default());
+    ipv4_packet
+        .payload_mut()
+        .copy_from_slice(icmp_packet.into_inner());
+    Some(len)
+}
 
-    // ------------------ ICMP Socket Setup ------------------
-    let mut rx_buffer = [0; 64];
-    let mut tx_buffer = [0; 64];
-    let mut rx_meta: [PacketMetadata; 1] = [PacketMetadata::EMPTY; 1];
-    let mut tx_meta: [PacketMetadata; 1] = [PacketMetadata::EMPTY; 1];
+/// High-rate ICMP echo flood over a raw socket.
+///
+/// Uses a deep TX queue and catch-up bursts so offered traffic is not capped at
+/// ~30 Hz by awaiting one in-flight datagram per timer tick. On the CSI
+/// collector, uplink 802.11 ACKs (and ICMP echo replies) become CSI reports.
+pub(crate) async fn run_icmp_flood(
+    stack: Stack<'_>,
+    mut src: Ipv4Address,
+    mut dst: Ipv4Address,
+    frequency_hz: Option<u16>,
+    label: &str,
+    watch_dhcp: bool,
+) {
+    let mut rx_meta = [PacketMetadata::EMPTY; ICMP_FLOOD_RX_SLOTS];
+    let mut rx_buffer = [0u8; 512];
+    let mut tx_meta = [PacketMetadata::EMPTY; ICMP_FLOOD_TX_SLOTS];
+    let mut tx_buffer = [0u8; 128 * ICMP_FLOOD_TX_SLOTS];
 
     let raw_socket = RawSocket::new::<Interface<'_>>(
-        sta_stack,
+        stack,
         IpVersion::Ipv4,
         IpProtocol::Icmp,
         &mut rx_meta,
@@ -390,96 +426,98 @@ pub async fn sta_network_ops(sta_stack: Stack<'_>, frequency_hz: Option<u16>) {
         &mut tx_buffer,
     );
 
-    // Buffer to hold ICMP Packet
-    let mut icmp_buffer = [0u8; 12];
-    // Buffer for the full IPv4 packet
+    let target_hz = frequency_hz.map(u64::from).unwrap_or(100).max(1);
+    let tx_interval_us = 1_000_000 / target_hz;
+    let mut next_tx_us = Instant::now().as_micros().saturating_add(tx_interval_us);
+    let mut seq_counter: u16 = 0;
     let mut tx_ipv4_buffer = [0u8; 64];
 
-    // Determine trigger frequency
-    let freq = match frequency_hz {
-        Some(freq) => freq as u64,
-        None => 100,
-    };
+    log_ln!(
+        "{label}: ICMP flood {target_hz} Hz → {} (deep TX queue, burst={ICMP_FLOOD_CATCH_UP_BURST})",
+        dst
+    );
 
-    // Initialize sequence counter
-    let mut seq_counter: u16 = 0;
-
-    log_ln!("Starting Trigger Traffic");
-
-    // Start sending trigger packets
     loop {
-        match select3(
-            STOP_SIGNAL.wait(),
-            Timer::after(Duration::from_hz(freq)),
-            DHCP_CLIENT_INFO.wait(),
-        )
-        .await
-        {
-            Either3::First(_) => {
-                // Stop signal received, exit the loop
-                STOP_SIGNAL.signal(());
+        let mut now_us = Instant::now().as_micros();
+        let mut burst_budget = ICMP_FLOOD_CATCH_UP_BURST;
+        while now_us >= next_tx_us && burst_budget > 0 {
+            burst_budget = burst_budget.saturating_sub(1);
+            seq_counter = seq_counter.wrapping_add(1);
+            let Some(len) = build_icmp_echo_ipv4(&mut tx_ipv4_buffer, src, dst, seq_counter) else {
+                break;
+            };
+            let buf = &tx_ipv4_buffer[..len];
+            let queued = poll_fn(|cx| match raw_socket.poll_send(buf, cx) {
+                Poll::Ready(()) => Poll::Ready(true),
+                Poll::Pending => Poll::Ready(false),
+            })
+            .await;
+            if queued {
+                next_tx_us = next_tx_us.saturating_add(tx_interval_us);
+                now_us = Instant::now().as_micros();
+            } else {
                 break;
             }
-            Either3::Second(_) => {
-                // Increment sequence number for this packet
-                seq_counter = seq_counter.wrapping_add(1);
+        }
 
-                // --- PACKET CONSTRUCTION START ---
-                // We reconstruct the packet inside the loop to update the 'seq_no'
+        let until_tx = next_tx_us.saturating_sub(Instant::now().as_micros());
+        let wait_us = if burst_budget < ICMP_FLOOD_CATCH_UP_BURST {
+            until_tx.min(tx_interval_us / 4).max(1)
+        } else {
+            ICMP_FLOOD_QUEUE_BACKOFF_US
+        };
 
-                // Create ICMP Packet wrapper around the existing buffer
-                let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
-
-                // Create an ICMPv4 Echo Request with dynamic Sequence Number
-                let icmp_repr = Icmpv4Repr::EchoRequest {
-                    ident: 0x22b,
-                    seq_no: seq_counter, // <--- Updated per loop iteration
-                    data: &[0xDE, 0xAD, 0xBE, 0xEF],
-                };
-
-                // Serialize the ICMP representation into the packet
-                icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
-
-                // Define the IPv4 representation
-                let ipv4_repr = Ipv4Repr {
-                    src_addr: ip_info.local_address.address(),
-                    dst_addr: ip_info.gateway_address,
-                    payload_len: icmp_repr.buffer_len(),
-                    hop_limit: 64, // Time-to-live value
-                    next_header: IpProtocol::Icmp,
-                };
-
-                // Create the IPv4 packet wrapper around the existing buffer
-                let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut tx_ipv4_buffer);
-
-                // Serialize the IPv4 representation into the packet
-                ipv4_repr.emit(&mut ipv4_packet, &ChecksumCapabilities::default());
-
-                // Copy the ICMP packet into the IPv4 packet's payload
-                ipv4_packet
-                    .payload_mut()
-                    .copy_from_slice(icmp_packet.into_inner());
-
-                // IP Packet buffer that will be sent
-                let ipv4_packet_buffer = ipv4_packet.into_inner();
-                // --- PACKET CONSTRUCTION END ---
-
-                // Send raw packet. Guard against `STOP_SIGNAL` because if the
-                // link drops or the egress queue stalls during shutdown, this
-                // future would otherwise pend forever and hang the join in
-                // `run_sta_connect` — which in turn hangs `node.run()`.
-                match select(STOP_SIGNAL.wait(), raw_socket.send(ipv4_packet_buffer)).await {
-                    Either::First(_) => {
-                        STOP_SIGNAL.signal(());
-                        break;
-                    }
-                    Either::Second(_) => {}
+        if watch_dhcp {
+            match select3(
+                STOP_SIGNAL.wait(),
+                Timer::after_micros(wait_us),
+                DHCP_CLIENT_INFO.wait(),
+            )
+            .await
+            {
+                Either3::First(_) => {
+                    STOP_SIGNAL.signal(());
+                    return;
+                }
+                Either3::Second(_) => {}
+                Either3::Third(new_ip) => {
+                    src = new_ip.local_address.address();
+                    dst = new_ip.gateway_address;
+                    log_ln!("{label}: updated ICMP target gateway {dst}");
                 }
             }
-            Either3::Third(new_ip_info) => {
-                ip_info = new_ip_info;
-                log_ln!("Updated station IP context for trigger traffic");
+        } else {
+            match select(STOP_SIGNAL.wait(), Timer::after_micros(wait_us)).await {
+                Either::First(_) => {
+                    STOP_SIGNAL.signal(());
+                    return;
+                }
+                Either::Second(_) => {}
             }
         }
     }
+}
+
+/// Manage station network operations and emit periodic ICMP traffic.
+pub async fn sta_network_ops(sta_stack: Stack<'_>, frequency_hz: Option<u16>) {
+    // Retrieve acquired IP information from DHCP. Guard against `STOP_SIGNAL`
+    // — if stop fires before DHCP completes (e.g. AP never associated), this
+    // unguarded wait would hang the join in `run_sta_connect`.
+    let ip_info = match select(STOP_SIGNAL.wait(), DHCP_CLIENT_INFO.wait()).await {
+        Either::First(_) => {
+            STOP_SIGNAL.signal(());
+            return;
+        }
+        Either::Second(info) => info,
+    };
+
+    run_icmp_flood(
+        sta_stack,
+        ip_info.local_address.address(),
+        ip_info.gateway_address,
+        frequency_hz,
+        "STA",
+        true,
+    )
+    .await;
 }

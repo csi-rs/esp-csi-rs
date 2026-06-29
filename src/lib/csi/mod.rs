@@ -4,10 +4,10 @@
 //! [`RxCSIFmt`] enumeration mirroring Espressif's HT/non-HT/HE-SU receive
 //! mode classification used to decode CSI tones.
 
+use crate::time::DateTime;
 use heapless::Vec;
 use postcard::experimental::max_size::MaxSize;
 use serde::{Deserialize, Serialize};
-use crate::time::DateTime;
 
 /// CSI delivery state machine (callbacks, async queue, inline logging).
 pub mod delivery;

@@ -6,10 +6,10 @@
 
 #[cfg(feature = "statistics")]
 use embassy_time::Instant;
-#[cfg(feature = "statistics")]
-use portable_atomic::{AtomicU32, AtomicU64, Ordering};
 #[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
 use portable_atomic::AtomicBool;
+#[cfg(feature = "statistics")]
+use portable_atomic::{AtomicU32, AtomicU64, Ordering};
 
 #[cfg(feature = "statistics")]
 use crate::logging::logging::reset_global_log_drops;

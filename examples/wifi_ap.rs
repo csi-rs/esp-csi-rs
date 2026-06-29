@@ -1,41 +1,44 @@
+//! Self-contained softAP CSI collector — channel 6, open network `esp-csi-ap`.
+//!
+//! Starts a Wi-Fi access point with a built-in single-lease DHCP server
+//! (`192.168.13.1` AP, `192.168.13.2` lease). Once a station associates, the AP
+//! pings the leased client at 4 kHz; ICMP echo replies are uplink data frames
+//! captured as CSI on this node. Pair with `wifi_station` on the same SSID for
+//! bidirectional traffic (STA gateway ping + AP lease ping).
+//!
+//! Build / run:
+//!   cargo esp32c6 --example wifi_ap
+//!   cargo esp32s3 --example wifi_ap
+
 #![no_std]
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CSIDataPacket;
-use esp_csi_rs::logging::logging::LogMode;
-use esp_csi_rs::{CSINode, CollectionMode, config::CsiConfig, logging::logging::init_logger};
-use esp_csi_rs::{CSINodeClient, CSINodeHardware, WifiSnifferConfig, log_ln, set_csi_callback};
+use esp_csi_rs::logging::logging::{LogMode, init_logger};
+use esp_csi_rs::{
+    CSINode, CSINodeHardware, CentralOpMode, CollectionMode, Node, WifiApConfig, log_ln,
+    set_csi_callback,
+};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_radio::wifi::WifiController;
+use esp_radio::wifi::{PowerSaveMode, WifiController};
+use esp_radio::wifi::ap::AccessPointConfig;
 use portable_atomic::{AtomicI32, AtomicU32, Ordering};
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
+
+const CHANNEL: u8 = 6;
+/// ICMP ping rate to the leased station (Hz) — each echo reply is uplink CSI.
+const PING_RATE_HZ: u16 = 4000;
 
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
     static_cell::StaticCell::new();
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-#[allow(
-    clippy::large_stack_frames,
-    reason = "it's not unusual to allocate larger buffers etc. in main"
-)]
-
-macro_rules! mk_static {
-    ($t:ty,$val:expr) => {{
-        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-        #[deny(unused_attributes)]
-        let x = STATIC_CELL.uninit().write(($val));
-        x
-    }};
-}
-
-// Shared state written by the inline CSI callback and read by `stats_task`.
 static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
 static CSI_PKT_COUNT: AtomicU32 = AtomicU32::new(0);
 
@@ -44,19 +47,15 @@ fn on_csi(packet: &CSIDataPacket) {
     CSI_PKT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
+#[embassy_executor::task]
 async fn stats_task() {
-    let mut last_count = 0u32;
     loop {
         Timer::after_secs(1).await;
-        let total = CSI_PKT_COUNT.load(Ordering::Relaxed);
-        let delta = total.wrapping_sub(last_count);
-        last_count = total;
         log_ln!(
-            "CSI rate: {}/s, total: {}, last RSSI: {}",
-            delta,
-            total,
+            "CSI Packets: {}, Latest RSSI: {}",
+            CSI_PKT_COUNT.load(Ordering::Relaxed),
             LATEST_RSSI.load(Ordering::Relaxed),
-        )
+        );
     }
 }
 
@@ -74,31 +73,37 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting Wi-Fi Sniffer Peripheral Node");
+    log_ln!(
+        "Starting softAP CSI collector — SSID esp-csi-ap, channel {}",
+        CHANNEL
+    );
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
     let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
+    let _ = controller.set_power_saving(PowerSaveMode::None);
 
-    let mut node_handle = CSINodeClient::new();
+    let ap_radio_config = AccessPointConfig::default()
+        .with_ssid("esp-csi-ap")
+        .with_channel(CHANNEL);
+    let ap_config = WifiApConfig::new(ap_radio_config, CHANNEL, None);
+
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(
-            WifiSnifferConfig::default().with_channel(7),
-        )),
+        Node::Central(CentralOpMode::WifiAccessPoint(ap_config)),
         CollectionMode::Collector,
-        Some(CsiConfig::default()),
-        Some(10000),
+        Some(esp_csi_rs::config::CsiConfig::default()),
+        Some(PING_RATE_HZ),
         csi_hardware,
     );
-
     node.set_protocol(esp_radio::wifi::Protocol::N);
 
     set_csi_callback(on_csi);
-    let _ = &mut node_handle;
-    join(node.run(), stats_task()).await;
+    spawner.spawn(stats_task().unwrap());
+    node.run().await;
 
     loop {
         log_ln!("Hello world!");

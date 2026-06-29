@@ -3,14 +3,14 @@
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_time::{Duration, Timer, with_timeout};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
+    CSINode, CollectionMode, EspNowConfig, config::CsiConfig, logging::logging::init_logger,
 };
-use esp_csi_rs::{
-    CSINodeClient, CSINodeHardware, get_pps_rx, get_pps_tx, get_dropped_packets_rx, log_ln,
-};
+use esp_csi_rs::{CSINodeClient, CSINodeHardware, log_ln};
+#[cfg(feature = "statistics")]
+use esp_csi_rs::{get_dropped_packets_rx, get_pps_rx, get_pps_tx};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -52,12 +52,19 @@ async fn node_task_collector(client: &mut CSINodeClient) {
     with_timeout(Duration::from_secs(10), async {
         loop {
             Timer::after_secs(1).await;
-            log_ln!(
-                "RX PPS: {}, TX PPS: {}, RX Dropped Packets: {}",
-                get_pps_rx(),
-                get_pps_tx(),
-                get_dropped_packets_rx()
-            )
+            #[cfg(feature = "statistics")]
+            {
+                log_ln!(
+                    "RX PPS: {}, TX PPS: {}, RX Dropped Packets: {}",
+                    get_pps_rx(),
+                    get_pps_tx(),
+                    get_dropped_packets_rx()
+                );
+            }
+            #[cfg(not(feature = "statistics"))]
+            {
+                log_ln!("Collector running...");
+            }
         }
     })
     .await
@@ -84,18 +91,15 @@ async fn main(spawner: Spawner) -> ! {
     log_ln!("Starting Runtime Config Node");
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, mut interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, config_radio)
-            .expect("Failed to initialize Wi-Fi controller");
+    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+        .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let mut node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(
-            EspNowConfig::default(),
-        )),
+        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(EspNowConfig::default())),
         CollectionMode::Collector,
         Some(CsiConfig::default()),
         Some(1000),
@@ -103,7 +107,7 @@ async fn main(spawner: Spawner) -> ! {
     );
     node.set_protocol(esp_radio::wifi::Protocol::LR);
     node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
-    
+
     join(node.run(), node_task_collector(&mut node_handle)).await;
     node.set_collection_mode(CollectionMode::Listener);
     join(node.run(), node_task_listener(&mut node_handle)).await;

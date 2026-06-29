@@ -82,11 +82,7 @@ pub fn is_leap_year(year: u64) -> bool {
 
 /// Return the number of days in `year`.
 pub fn days_in_year(year: u64) -> u64 {
-    if is_leap_year(year) {
-        366
-    } else {
-        365
-    }
+    if is_leap_year(year) { 366 } else { 365 }
 }
 
 /// Return the number of days in `month` for a given `year`.

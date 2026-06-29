@@ -8,24 +8,26 @@
 #[cfg(any(feature = "statistics", feature = "cpu-test-tx"))]
 use core::sync::atomic::Ordering;
 
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{Either, select};
 use embassy_time::Instant;
 use embassy_time::Timer;
 use heapless::LinearMap;
 
-use crate::log_ln;
-use crate::parse_with_magic;
-use crate::serialize_with_magic;
-use crate::ControlPacket;
-use crate::PeripheralPacket;
 use crate::CENTRAL_MAGIC_NUMBER;
+use crate::ControlPacket;
 use crate::PERIPHERAL_MAGIC_NUMBER;
+use crate::PeripheralPacket;
 #[cfg(feature = "statistics")]
 use crate::STATS;
 use crate::STOP_SIGNAL;
-use esp_radio::esp_now::{Error as EspNowInnerError, EspNow, EspNowError, PeerInfo, BROADCAST_ADDRESS};
+use crate::log_ln;
+use crate::parse_with_magic;
+use crate::serialize_with_magic;
 #[cfg(feature = "cpu-test-tx")]
 use esp_radio::esp_now::ESP_NOW_MAX_DATA_LEN;
+use esp_radio::esp_now::{
+    BROADCAST_ADDRESS, Error as EspNowInnerError, EspNow, EspNowError, PeerInfo,
+};
 
 use crate::esp_now_pool::PoolFrame;
 #[cfg(any(feature = "statistics", feature = "cpu-test-tx"))]
@@ -35,7 +37,6 @@ use crate::espnow_phy::with_espnow_recv_suspended;
 use crate::{EspNowConfig, IOTaskConfig};
 
 const TX_BACKOFF_US: u64 = 200;
-const TX_FAST_BACKOFF_US: u64 = 50;
 const TX_WAIT_SLICE_US: u64 = 100;
 const ADAPT_UP_EVERY_SUCCESSES: u16 = 32;
 const ADAPT_DOWN_PERCENT: u64 = 25;
@@ -44,9 +45,8 @@ const MIN_TX_HZ_FLOOR: u64 = 100;
 const MAX_TX_HZ_CEILING: u64 = 8_000;
 #[cfg(not(feature = "cpu-test-tx"))]
 const CONTROL_PACKET_BUF_LEN: usize = 16;
-const TX_CATCH_UP_BURST: u8 = 3;
-const TX_CATCH_UP_BURST_NO_WAIT: u8 = 16;
-const RX_BURST_MAX_WITH_TX: u16 = 16;
+const TX_CATCH_UP_BURST: u8 = 1;
+const RX_BURST_MAX_WITH_TX: u16 = 1;
 const RX_RESERVED_TX_GUARD_US: u64 = 15;
 const RX_TRACKED_PEERS_CAPACITY: usize = 16;
 
@@ -173,11 +173,7 @@ pub async fn run_esp_now_central(
     // handle_interrupts). HT40 broadcast is also skipped — see below.
     #[cfg(not(feature = "esp32c5"))]
     if config.force_phy() && config.secondary_channel().is_none() {
-        crate::set_peer_espnow_phy(
-            &tx_target,
-            *config.phy_rate(),
-            config.secondary_channel(),
-        );
+        crate::set_peer_espnow_phy(&tx_target, *config.phy_rate(), config.secondary_channel());
     }
     // Manual pairing (unicast): ensure the configured peer exists before TX
     // starts, otherwise `esp_now.send` will fail with NotFound and TX stalls.
@@ -194,7 +190,12 @@ pub async fn run_esp_now_central(
         if add_res.is_err() {
             log_ln!(
                 "ESP-NOW central: failed to add manual peer {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                mac[0],
+                mac[1],
+                mac[2],
+                mac[3],
+                mac[4],
+                mac[5]
             );
         }
     }
@@ -247,12 +248,6 @@ pub async fn run_esp_now_central(
         hz_to_interval_us(freq)
     };
     let adaptive_pacing_enabled = io_tasks.rx_enabled && io_tasks.tx_enabled;
-    // TX-only fast mode (queue-and-forget) is fine for broadcast sweeps, but
-    // with a fixed unicast peer it can saturate the driver queue (~32 packets)
-    // and stick in perpetual OutOfMemory when callbacks lag/peer is absent.
-    // For manual-peer unicast, use blocking send/wait so queue pressure tracks
-    // actual link progress.
-    let tx_fast_no_wait = io_tasks.tx_enabled && !io_tasks.rx_enabled && peer_mac.is_none();
     let mut consecutive_tx_ok: u16 = 0;
     let mut next_tx_us = Instant::now().as_micros().saturating_add(tx_interval_us);
     // CPU-test TX pads the control frame up to the cell payload, so the buffer
@@ -264,8 +259,6 @@ pub async fn run_esp_now_central(
     let mut known_peers: LinearMap<[u8; 6], (), RX_TRACKED_PEERS_CAPACITY> = LinearMap::new();
 
     loop {
-        let mut now_us = Instant::now().as_micros();
-
         // CPU-test: steer the real TX loop from the experiment schedule. Rate
         // is re-read each iteration; while paused (baseline phases) the loop
         // sends nothing and keeps the deadline anchored to `now` so unpausing
@@ -274,21 +267,50 @@ pub async fn run_esp_now_central(
         let tx_active = io_tasks.tx_enabled;
         #[cfg(feature = "cpu-test-tx")]
         let tx_active = {
+            let schedule_now_us = Instant::now().as_micros();
             let rate = crate::TEST_TX_RATE_HZ.load(Ordering::Relaxed) as u64;
             tx_interval_us = hz_to_interval_us(rate);
             let paused = crate::TEST_TX_PAUSED.load(Ordering::Relaxed);
             if paused {
-                next_tx_us = now_us.saturating_add(tx_interval_us);
+                next_tx_us = schedule_now_us.saturating_add(tx_interval_us);
             }
             io_tasks.tx_enabled && !paused
         };
 
-        if tx_active {
-            let mut burst_budget = if tx_fast_no_wait {
-                TX_CATCH_UP_BURST_NO_WAIT
+        // Service queued replies before starting a due TX burst. This keeps
+        // RX from being overtaken by send_async latency while the bounded burst
+        // and TX deadline guard still prevent RX from monopolizing the loop.
+        if io_tasks.rx_enabled {
+            let rx_deadline_us = if tx_active {
+                next_tx_us.saturating_sub(RX_RESERVED_TX_GUARD_US)
             } else {
-                TX_CATCH_UP_BURST
+                u64::MAX
             };
+            let rx_burst_drain_limit = if tx_active {
+                RX_BURST_MAX_WITH_TX
+            } else {
+                u16::MAX
+            };
+
+            let mut rx_packets: u16 = 0;
+            while rx_packets < rx_burst_drain_limit {
+                if tx_active && rx_packets > 0 && Instant::now().as_micros() >= rx_deadline_us {
+                    break;
+                }
+
+                let Some(r) = crate::esp_now_pool::receive() else {
+                    break;
+                };
+
+                handle_peripheral_packet(esp_now, r, config.channel, peer_mac, &mut known_peers);
+                rx_packets = rx_packets.saturating_add(1);
+                embassy_futures::yield_now().await;
+            }
+        }
+        let mut now_us = Instant::now().as_micros();
+
+        if tx_active {
+            let mut burst_budget = TX_CATCH_UP_BURST;
             while now_us >= next_tx_us && burst_budget > 0 {
                 burst_budget = burst_budget.saturating_sub(1);
 
@@ -318,8 +340,8 @@ pub async fn run_esp_now_central(
                 #[cfg(feature = "cpu-test-tx")]
                 {
                     const TEST_TX_FILL_BYTE: u8 = 0xA5;
-                    let payload_b =
-                        (crate::TEST_TX_PAYLOAD_B.load(Ordering::Relaxed) as usize).min(tx_buf.len());
+                    let payload_b = (crate::TEST_TX_PAYLOAD_B.load(Ordering::Relaxed) as usize)
+                        .min(tx_buf.len());
                     if payload_b > body_len {
                         for b in &mut tx_buf[body_len..payload_b] {
                             *b = TEST_TX_FILL_BYTE;
@@ -330,56 +352,20 @@ pub async fn run_esp_now_central(
                 let message = &tx_buf[..msg_len];
 
                 let mut send_succeeded = false;
-                let mut packet_queued = false;
-                if tx_fast_no_wait {
-                    match esp_now.send(&tx_target, message) {
-                        Ok(waiter) => {
-                            // Max-throughput mode: queue packets as fast as the
-                            // driver accepts them and avoid per-packet callback waits.
-                            core::mem::forget(waiter);
+                // esp-radio has one global ESP-NOW send-completion flag/waker.
+                // Keep exactly one send in flight and await it to completion;
+                // dropping this future or queueing another send first can corrupt
+                // the driver's completion state and freeze later sends.
+                match esp_now.send_async(&tx_target, message).await {
+                    Ok(()) => {
                             send_succeeded = true;
-                            packet_queued = true;
-                            #[cfg(feature = "statistics")]
-                            STATS.tx_count.fetch_add(1, Ordering::Relaxed);
-                            #[cfg(any(feature = "statistics", feature = "cpu-test-tx"))]
-                            TX_QUEUED_COUNT.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(
-                            EspNowError::Error(EspNowInnerError::OutOfMemory)
-                            | EspNowError::SendFailed,
-                        ) => {
-                            #[cfg(any(feature = "statistics", feature = "cpu-test-tx"))]
-                            TX_FAILED_COUNT.fetch_add(1, Ordering::Relaxed);
-                            Timer::after_micros(TX_FAST_BACKOFF_US).await;
-                        }
-                        Err(e) => {
-                            #[cfg(any(feature = "statistics", feature = "cpu-test-tx"))]
-                            TX_FAILED_COUNT.fetch_add(1, Ordering::Relaxed);
-                            log_ln!("Failed to queue ESP-NOW packet: {:?}", e);
-                        }
-                    }
-                } else {
-                    let send_result = match esp_now.send(&tx_target, message) {
-                        Ok(waiter) => {
-                            packet_queued = true;
-                            #[cfg(feature = "statistics")]
-                            TX_QUEUED_COUNT.fetch_add(1, Ordering::Relaxed);
-                            waiter.wait()
-                        }
-                        Err(e) => {
-                            #[cfg(feature = "statistics")]
-                            TX_FAILED_COUNT.fetch_add(1, Ordering::Relaxed);
-                            Err(e)
-                        }
-                    };
-
-                    match send_result {
-                        Ok(()) => {
-                            send_succeeded = true;
+                        #[cfg(any(feature = "statistics", feature = "cpu-test-tx"))]
+                        TX_QUEUED_COUNT.fetch_add(1, Ordering::Relaxed);
                             #[cfg(feature = "statistics")]
                             {
                                 STATS.tx_count.fetch_add(1, Ordering::Relaxed);
-                                TX_CONFIRMED_COUNT.fetch_add(1, Ordering::Relaxed);
+                            TX_CONFIRMED_COUNT.fetch_add(1, Ordering::Relaxed);
+                            control_sequence = control_sequence.wrapping_add(1);
                             }
 
                             if adaptive_pacing_enabled {
@@ -391,35 +377,28 @@ pub async fn run_esp_now_central(
                                     tx_interval_us = hz_to_interval_us(adaptive_tx_hz);
                                 }
                             }
-                        }
-                        // Back off briefly when Wi-Fi TX buffers are full.
-                        Err(
-                            EspNowError::Error(EspNowInnerError::OutOfMemory)
-                            | EspNowError::SendFailed,
-                        ) => {
+                    }
+                    // Back off briefly when Wi-Fi TX buffers are full.
+                    Err(
+                        EspNowError::Error(EspNowInnerError::OutOfMemory)
+                        | EspNowError::SendFailed,
+                    ) => {
                             #[cfg(feature = "statistics")]
                             TX_FAILED_COUNT.fetch_add(1, Ordering::Relaxed);
                             consecutive_tx_ok = 0;
                             if adaptive_pacing_enabled {
                                 let step_down = (adaptive_tx_hz * ADAPT_DOWN_PERCENT / 100).max(1);
-                                adaptive_tx_hz = adaptive_tx_hz.saturating_sub(step_down).max(tx_hz_min);
+                                adaptive_tx_hz =
+                                    adaptive_tx_hz.saturating_sub(step_down).max(tx_hz_min);
                                 tx_interval_us = hz_to_interval_us(adaptive_tx_hz);
                                 Timer::after_micros(TX_BACKOFF_US).await;
                             }
-                        }
-                        Err(e) => {
+                    }
+                    Err(e) => {
                             #[cfg(feature = "statistics")]
                             TX_FAILED_COUNT.fetch_add(1, Ordering::Relaxed);
                             consecutive_tx_ok = 0;
                             log_ln!("Failed to send ESP-NOW packet: {:?}", e);
-                        }
-                    }
-                }
-
-                if packet_queued {
-                    #[cfg(feature = "statistics")]
-                    {
-                        control_sequence = control_sequence.wrapping_add(1);
                     }
                 }
 
@@ -432,50 +411,6 @@ pub async fn run_esp_now_central(
                 if !send_succeeded {
                     break;
                 }
-            }
-        }
-
-        // Drain a bounded RX burst after the TX step so TX deadlines stay
-        // prioritized at higher rates.
-        if io_tasks.rx_enabled {
-            let rx_deadline_us = if io_tasks.tx_enabled {
-                next_tx_us.saturating_sub(RX_RESERVED_TX_GUARD_US)
-            } else {
-                u64::MAX
-            };
-            let rx_burst_drain_limit = if io_tasks.tx_enabled {
-                RX_BURST_MAX_WITH_TX
-            } else {
-                u16::MAX
-            };
-
-            let mut rx_packets: u16 = 0;
-            while rx_packets < rx_burst_drain_limit {
-                if io_tasks.tx_enabled && Instant::now().as_micros() >= rx_deadline_us {
-                    break;
-                }
-
-                let Some(r) = crate::esp_now_pool::receive() else {
-                    break;
-                };
-
-                handle_peripheral_packet(
-                    esp_now,
-                    r,
-                    config.channel,
-                    peer_mac,
-                    &mut known_peers,
-                );
-                rx_packets = rx_packets.saturating_add(1);
-                embassy_futures::yield_now().await;
-            }
-
-            // If there is more RX work and TX is not immediately due, loop
-            // again without sleeping to reduce queueing latency.
-            if rx_packets > 0
-                && (!io_tasks.tx_enabled || Instant::now().as_micros() < next_tx_us)
-            {
-                continue;
             }
         }
 

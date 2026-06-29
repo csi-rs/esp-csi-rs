@@ -27,12 +27,10 @@
 
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
-use esp_csi_rs::logging::logging::{
-    init_logger, set_csi_tool_emit_cap, set_role, LogMode, Role,
-};
-use esp_csi_rs::{config::CsiConfig, CSINode, CollectionMode};
+use esp_csi_rs::logging::logging::{LogMode, Role, init_logger, set_csi_tool_emit_cap, set_role};
+use esp_csi_rs::{CSINode, CollectionMode, config::CsiConfig};
 use esp_csi_rs::{
-    log_ln, set_csi_logging_enabled, CSINodeClient, CSINodeHardware, WifiSnifferConfig,
+    CSINodeClient, CSINodeHardware, WifiSnifferConfig, log_ln, set_csi_logging_enabled,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -52,7 +50,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
-
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     // generator version: 1.1.0
@@ -82,9 +79,8 @@ async fn main(spawner: Spawner) -> ! {
         .with_static_rx_buf_num(25)
         .with_dynamic_rx_buf_num(128)
         .with_rx_queue_size(32);
-    let (wifi_controller, mut interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, config_radio)
-            .expect("Failed to initialize Wi-Fi controller");
+    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+        .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 

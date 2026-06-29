@@ -7,26 +7,26 @@
 //! queue + waker, the [`CSINodeClient`] consumer handle, and the
 //! `WifiController` CSI wiring (`set_csi` / [`build_csi_config`]).
 
-use embassy_futures::select::{select3, Either3};
+use embassy_futures::select::{Either3, select3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_sync::waitqueue::AtomicWaker;
-use embassy_time::Timer;
 #[cfg(feature = "statistics")]
 use embassy_time::Instant;
+use embassy_time::Timer;
 use heapless::Vec;
 use portable_atomic::{AtomicBool, Ordering};
 
-use esp_radio::wifi::csi::CsiConfig;
 use esp_radio::wifi::WifiController;
+use esp_radio::wifi::csi::CsiConfig;
 
-use crate::config::CsiConfig as CsiConfiguration;
 use super::{CSIDataPacket, RxCSIFmt};
 use crate::STOP_SIGNAL;
+use crate::config::CsiConfig as CsiConfiguration;
 #[cfg(feature = "statistics")]
 use crate::stats::STATS;
 #[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
-use crate::stats::{seq_drop_detection_enabled, MAX_TRACKED_PEERS, RESET_SEQ_TRACKER};
+use crate::stats::{MAX_TRACKED_PEERS, RESET_SEQ_TRACKER, seq_drop_detection_enabled};
 #[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
 use heapless::LinearMap;
 
@@ -553,7 +553,10 @@ fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
                         }
                     }
                 }
-                if PEER_SEQ_TRACKER.insert(csi_packet.mac, current_seq).is_err() {
+                if PEER_SEQ_TRACKER
+                    .insert(csi_packet.mac, current_seq)
+                    .is_err()
+                {
                     PEER_SEQ_TRACKER.clear();
                     let _ = PEER_SEQ_TRACKER.insert(csi_packet.mac, current_seq);
                 }
@@ -632,7 +635,9 @@ pub async fn run_process_csi_packet() {
             }
             Either3::Second(_) => {
                 COLLECTION_MODE_CHANGED.reset();
-                crate::reset_globals();
+                // A runtime Collector/Listener switch is not a collection
+                // teardown. Keep CSI delivery gates and callbacks intact; closing
+                // them here disables output mid-run until the next CLI `start`.
                 #[cfg(feature = "statistics")]
                 {
                     STATS
@@ -653,10 +658,10 @@ pub async fn run_process_csi_packet() {
                         let current_rx = STATS.rx_count.load(Ordering::Relaxed);
                         let current_tx = STATS.tx_count.load(Ordering::Relaxed);
 
-                        let rx_rate = ((current_rx.saturating_sub(last_rx_count))
-                            / elapsed_secs) as u32;
-                        let tx_rate = ((current_tx.saturating_sub(last_tx_count))
-                            / elapsed_secs) as u32;
+                        let rx_rate =
+                            ((current_rx.saturating_sub(last_rx_count)) / elapsed_secs) as u32;
+                        let tx_rate =
+                            ((current_tx.saturating_sub(last_tx_count)) / elapsed_secs) as u32;
 
                         STATS.rx_rate_hz.store(rx_rate, Ordering::Relaxed);
                         STATS.tx_rate_hz.store(tx_rate, Ordering::Relaxed);

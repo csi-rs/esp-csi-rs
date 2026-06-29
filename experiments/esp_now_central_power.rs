@@ -23,10 +23,10 @@ use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::config::CsiConfig;
-use esp_csi_rs::logging::logging::{init_logger, LogMode};
+use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    log_ln, set_csi_logging_enabled, CSINode, CSINodeClient, CSINodeHardware, CollectionMode,
-    EspNowConfig, IOTaskConfig,
+    CSINode, CSINodeClient, CSINodeHardware, CollectionMode, EspNowConfig, IOTaskConfig, log_ln,
+    set_csi_logging_enabled,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;

@@ -6,7 +6,7 @@ use embassy_futures::join::join;
 use embassy_time::{Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
+    CSINode, CollectionMode, EspNowConfig, config::CsiConfig, logging::logging::init_logger,
 };
 use esp_csi_rs::{CSINodeClient, CSINodeHardware, log_ln, set_csi_logging_enabled};
 use esp_hal::clock::CpuClock;
@@ -92,9 +92,8 @@ async fn main(spawner: Spawner) -> ! {
         .with_dynamic_rx_buf_num(128)
         .with_ampdu_rx_enable(false)
         .with_rx_queue_size(32);
-    let (wifi_controller, mut interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, config_radio)
-            .expect("Failed to initialize Wi-Fi controller");
+    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+        .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 

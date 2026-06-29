@@ -1,16 +1,21 @@
 #![no_std]
 #![no_main]
 
+#[cfg(not(feature = "statistics"))]
+compile_error!("This experiment requires the `statistics` feature.");
+
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
+    CSINode, CollectionMode, EspNowConfig, config::CsiConfig, logging::logging::init_logger,
 };
 use esp_csi_rs::{
-    get_total_tx_packets, log_ln, set_csi_logging_enabled, CSINodeClient, CSINodeHardware,
+    CSINodeClient, CSINodeHardware, log_ln, set_csi_logging_enabled,
 };
+#[cfg(feature = "statistics")]
+use esp_csi_rs::get_total_tx_packets;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -50,10 +55,7 @@ async fn node_task(_client: &mut CSINodeClient) {
         let tx_total = get_total_tx_packets();
         let tx_delta = tx_total.saturating_sub(last_tx_total);
         last_tx_total = tx_total;
-        log_ln!(
-            "TX: {}",
-            tx_delta
-        );
+        log_ln!("TX: {}", tx_delta);
     }
 }
 
@@ -81,20 +83,21 @@ async fn main(spawner: Spawner) -> ! {
     log_ln!("Starting EspNow Central Node (Exper)");
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-        // .with_static_tx_buf_num(25)
-        // .with_dynamic_tx_buf_num(128)
-        // .with_ampdu_tx_enable(false).
-        // with_tx_queue_size(32);
-    let (wifi_controller, mut interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, config_radio)
-            .expect("Failed to initialize Wi-Fi controller");
+    // .with_static_tx_buf_num(25)
+    // .with_dynamic_tx_buf_num(128)
+    // .with_ampdu_tx_enable(false).
+    // with_tx_queue_size(32);
+    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+        .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let mut node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(EspNowConfig::default().with_channel(11))),
+        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(
+            EspNowConfig::default().with_channel(11),
+        )),
         CollectionMode::Listener,
         Some(CsiConfig::default()),
         Some(10000),

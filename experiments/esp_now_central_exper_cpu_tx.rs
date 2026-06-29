@@ -39,23 +39,24 @@ use embassy_futures::join::join3;
 use embassy_time::{Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
+    CSINode, CSINodeClient, CSINodeHardware, CentralOpMode, CollectionMode, EspNowConfig,
+    IOTaskConfig, Node,
     central::esp_now::{get_tx_failed_packets, get_tx_queued_packets},
     config::CsiConfig,
     log_ln,
     logging::logging::init_logger,
-    set_test_tx_paused, set_test_tx_payload_b, set_test_tx_rate_hz, CSINode, CSINodeClient,
-    CSINodeHardware, CentralOpMode, CollectionMode, EspNowConfig, IOTaskConfig, Node,
+    set_test_tx_paused, set_test_tx_payload_b, set_test_tx_rate_hz,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_radio::esp_now::{WifiPhyRate, ESP_NOW_MAX_DATA_LEN};
+use esp_radio::esp_now::{ESP_NOW_MAX_DATA_LEN, WifiPhyRate};
 use esp_radio::wifi::WifiController;
 use portable_atomic::{AtomicU32, Ordering};
 use {esp_backtrace as _, esp_println as _};
 
 #[path = "cpu_test_schedule.rs"]
 mod cpu_test_schedule;
-use cpu_test_schedule::{phases_iter, PhaseKind, BOOT_DELAY_S, TEST_CHANNEL};
+use cpu_test_schedule::{BOOT_DELAY_S, PhaseKind, TEST_CHANNEL, phases_iter};
 
 extern crate alloc;
 

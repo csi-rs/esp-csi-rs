@@ -32,10 +32,7 @@ pub struct ControlPacket {
 impl ControlPacket {
     /// Create a new control packet with the collector flag (and, under the
     /// `statistics` feature, a sequence number).
-    pub fn new(
-        is_collector: bool,
-        #[cfg(feature = "statistics")] sequence_number: u32,
-    ) -> Self {
+    pub fn new(is_collector: bool, #[cfg(feature = "statistics")] sequence_number: u32) -> Self {
         Self {
             is_collector,
             #[cfg(feature = "statistics")]
@@ -111,5 +108,7 @@ pub(crate) fn parse_with_magic<T: for<'de> Deserialize<'de>>(
     } else {
         data
     };
-    postcard::take_from_bytes::<T>(body).ok().map(|(v, _rest)| v)
+    postcard::take_from_bytes::<T>(body)
+        .ok()
+        .map(|(v, _rest)| v)
 }

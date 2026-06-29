@@ -11,30 +11,35 @@
 use embassy_time::with_timeout;
 
 use embassy_futures::join::{join, join3};
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
 use enumset::EnumSet;
 use esp_radio::esp_now::WifiPhyRate;
-use esp_radio::wifi::sta::StationConfig;
-use esp_radio::wifi::{Interfaces, Protocol, Protocols, SecondaryChannel, WifiController};
 #[cfg(feature = "esp32c5")]
 use esp_radio::wifi::BandMode;
+use esp_radio::wifi::sta::StationConfig;
+use esp_radio::wifi::{Interfaces, Protocol, Protocols, SecondaryChannel, WifiController};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use portable_atomic::Ordering;
 
+use crate::central::ap::{ap_init, run_ap};
 use crate::central::esp_now::run_esp_now_central;
+use crate::central::esp_now_fast::run_esp_now_fast_collector;
 use crate::central::sta::{run_sta_connect, sta_init};
 use crate::config::CsiConfig as CsiConfiguration;
 use crate::peripheral::esp_now::run_esp_now_peripheral;
+use crate::peripheral::esp_now_fast::run_esp_now_fast_source;
 
-use crate::csi::delivery::{build_csi_config, run_process_csi_packet, set_csi, CSINodeClient, IS_COLLECTOR};
-use crate::espnow_phy::{
-    apply_espnow_band_for_channel, apply_espnow_ht40_mode, install_static_espnow_recv, takeover_esp_now_recv,
-    with_espnow_recv_suspended,
+use crate::csi::delivery::{
+    CSINodeClient, IS_COLLECTOR, build_csi_config, run_process_csi_packet, set_csi,
 };
 use crate::espnow_phy::bring_up_espnow_sta;
+use crate::espnow_phy::{
+    apply_espnow_band_for_channel, apply_espnow_ht40_mode, install_static_espnow_recv,
+    takeover_esp_now_recv, with_espnow_recv_suspended,
+};
 use crate::log_ln;
 use crate::stats::set_seq_drop_detection;
 
@@ -90,7 +95,12 @@ async fn wait_for_stop() {
 }
 
 async fn stop_after_duration(duration: u64) {
-    match select(STOP_SIGNAL.wait(), Timer::after(Duration::from_secs(duration))).await {
+    match select(
+        STOP_SIGNAL.wait(),
+        Timer::after(Duration::from_secs(duration)),
+    )
+    .await
+    {
         Either::First(_) | Either::Second(_) => STOP_SIGNAL.signal(()),
     }
 }
@@ -139,6 +149,14 @@ impl Default for EspNowConfig {
 }
 
 impl EspNowConfig {
+    /// Recommended base config for the fast one-to-one (asymmetric simplex)
+    /// mode: forces HT20 at MCS7 Long-GI for maximum CSI packets/sec. Chain
+    /// `with_channel` / `with_ht40` to override. Used by
+    /// [`CentralOpMode::EspNowFastCollector`] / [`PeripheralOpMode::EspNowFastSource`].
+    pub fn fast_default() -> Self {
+        Self::default().with_phy_rate(WifiPhyRate::RateMcs7Lgi)
+    }
+
     /// Override the 2.4 GHz channel (1–14). Both central and peripheral
     /// must be configured with the same channel.
     pub fn with_channel(mut self, channel: u8) -> Self {
@@ -288,6 +306,87 @@ impl defmt::Format for WifiStationConfig {
     }
 }
 
+/// Configuration for self-contained softAP CSI collector mode.
+///
+/// Wraps esp-radio's [`AccessPointConfig`] (SSID, channel, auth, secondary
+/// channel) and the static IPv4 addressing used by the built-in single-lease
+/// DHCP server. The AP hands the associating station an address in the AP's /24
+/// subnet with the gateway set to the AP itself, so the station's pings target
+/// the AP and land as CSI on the AP RX path.
+///
+/// `channel`/`secondary_channel` are duplicated here because esp-radio's
+/// `AccessPointConfig` fields are not externally readable; [`CSINode`] needs them
+/// for band/HT40 setup.
+///
+/// [`AccessPointConfig`]: esp_radio::wifi::ap::AccessPointConfig
+pub struct WifiApConfig {
+    /// Underlying esp-radio access-point configuration.
+    pub ap_config: esp_radio::wifi::ap::AccessPointConfig,
+    /// Primary channel the AP operates on (mirror of `ap_config`'s channel).
+    pub channel: u8,
+    /// Optional HT40 secondary channel (mirror of `ap_config`'s secondary).
+    pub secondary_channel: Option<SecondaryChannel>,
+    /// AP's static IPv4 address; also the gateway and DHCP server identifier.
+    pub ap_ipv4: core::net::Ipv4Addr,
+    /// IPv4 address leased to the single associating station.
+    pub lease_ipv4: core::net::Ipv4Addr,
+    /// Whether to run the built-in DHCP server. When `false`, the AP only starts
+    /// + collects CSI (clients must self-assign IPs).
+    pub serve_dhcp: bool,
+}
+
+impl WifiApConfig {
+    /// Create a config from an [`AccessPointConfig`], its primary `channel`, and
+    /// optional HT40 `secondary` channel. Defaults the AP to `192.168.13.1/24`,
+    /// leases `192.168.13.2`, and enables the DHCP server.
+    ///
+    /// [`AccessPointConfig`]: esp_radio::wifi::ap::AccessPointConfig
+    pub fn new(
+        ap_config: esp_radio::wifi::ap::AccessPointConfig,
+        channel: u8,
+        secondary: Option<SecondaryChannel>,
+    ) -> Self {
+        Self {
+            ap_config,
+            channel,
+            secondary_channel: secondary,
+            ap_ipv4: core::net::Ipv4Addr::new(192, 168, 13, 1),
+            lease_ipv4: core::net::Ipv4Addr::new(192, 168, 13, 2),
+            serve_dhcp: true,
+        }
+    }
+
+    /// Override the AP/lease IPv4 addresses (must share a /24).
+    pub fn with_ipv4(mut self, ap: core::net::Ipv4Addr, lease: core::net::Ipv4Addr) -> Self {
+        self.ap_ipv4 = ap;
+        self.lease_ipv4 = lease;
+        self
+    }
+
+    /// Enable or disable the built-in DHCP server (default enabled).
+    pub fn with_dhcp_server(mut self, enabled: bool) -> Self {
+        self.serve_dhcp = enabled;
+        self
+    }
+
+    /// Configured primary channel.
+    pub fn channel(&self) -> u8 {
+        self.channel
+    }
+
+    /// Configured HT40 secondary channel, or `None` for HT20.
+    pub fn secondary_channel(&self) -> Option<SecondaryChannel> {
+        self.secondary_channel
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for WifiApConfig {
+    fn format(&self, fmt: defmt::Formatter<'_>) {
+        defmt::write!(fmt, "WifiApConfig {{ ap_config: <opaque> }}");
+    }
+}
+
 // Enum for Central modes, each wrapping its specific config.
 
 /// Central node operational modes.
@@ -296,6 +395,16 @@ pub enum CentralOpMode {
     EspNow(EspNowConfig),
     /// Associate as a Wi-Fi station to harvest CSI from received frames.
     WifiStation(WifiStationConfig),
+    /// Run a self-contained softAP CSI collector: start an access point (plus a
+    /// minimal DHCP server) so a [`CentralOpMode::WifiStation`] node can
+    /// associate and generate steady uplink traffic, captured as CSI on this AP.
+    WifiAccessPoint(WifiApConfig),
+    /// Fast one-to-one ESP-NOW collector (asymmetric simplex): broadcast a
+    /// sparse discovery beacon until a [`PeripheralOpMode::EspNowFastSource`] is
+    /// heard, then stop beaconing and go RX-only, capturing CSI from the source's
+    /// continuous unicast flood. Maximizes CSI packets/sec by leaving all airtime
+    /// to the single transmitter.
+    EspNowFastCollector(EspNowConfig),
 }
 
 // Enum for Peripheral modes, each wrapping its specific config.
@@ -306,6 +415,10 @@ pub enum PeripheralOpMode {
     /// Run as a Wi-Fi promiscuous sniffer; CSI is captured from every
     /// frame received on the locked channel.
     WifiSniffer(WifiSnifferConfig),
+    /// Fast one-to-one ESP-NOW source (asymmetric simplex): listen for a
+    /// [`CentralOpMode::EspNowFastCollector`] beacon, learn its MAC, then unicast
+    /// a continuous forced-PHY flood for the collector to capture as CSI.
+    EspNowFastSource(EspNowConfig),
 }
 
 /// High-level node type and mode.
@@ -529,7 +642,9 @@ impl<'a> CSINode<'a> {
     pub fn set_rate(&mut self, rate: WifiPhyRate) {
         match &mut self.kind {
             Node::Central(CentralOpMode::EspNow(cfg))
-            | Node::Peripheral(PeripheralOpMode::EspNow(cfg)) => {
+            | Node::Central(CentralOpMode::EspNowFastCollector(cfg))
+            | Node::Peripheral(PeripheralOpMode::EspNow(cfg))
+            | Node::Peripheral(PeripheralOpMode::EspNowFastSource(cfg)) => {
                 cfg.phy_rate = rate;
                 cfg.force_phy = true;
             }
@@ -569,9 +684,14 @@ impl<'a> CSINode<'a> {
 
         let espnow_ht40 = matches!(
             &self.kind,
-            Node::Peripheral(PeripheralOpMode::EspNow(c)) | Node::Central(CentralOpMode::EspNow(c))
+            Node::Peripheral(PeripheralOpMode::EspNow(c))
+                | Node::Peripheral(PeripheralOpMode::EspNowFastSource(c))
+                | Node::Central(CentralOpMode::EspNow(c))
+                | Node::Central(CentralOpMode::EspNowFastCollector(c))
                 if c.secondary_channel().is_some()
         );
+
+        let is_ap = matches!(&self.kind, Node::Central(CentralOpMode::WifiAccessPoint(_)));
 
         // Apply protocol before STA bring-up / CSI — on C5, recv must stay
         // suspended across every controller mutation to avoid ISR WDT trips.
@@ -583,7 +703,9 @@ impl<'a> CSINode<'a> {
             if matches!(
                 &self.kind,
                 Node::Peripheral(PeripheralOpMode::EspNow(_))
+                    | Node::Peripheral(PeripheralOpMode::EspNowFastSource(_))
                     | Node::Central(CentralOpMode::EspNow(_))
+                    | Node::Central(CentralOpMode::EspNowFastCollector(_))
             ) {
                 protocols = protocols.with_5(Protocol::A | Protocol::N);
             }
@@ -598,7 +720,10 @@ impl<'a> CSINode<'a> {
         // forced-PHY / manual-unicast TX. On C5 dual-band, skip STA for TX-only
         // broadcast (no peer_mac, no RX) — restarting STA there can wedge the
         // Wi-Fi ISR when the TX loop starts immediately afterward.
-        if matches!(
+        // The fast simplex roles always need started STA: the collector for its
+        // RX/CSI path, the source for forced per-peer unicast PHY (which it
+        // applies after discovery, before any `peer_mac` is known).
+        let needs_sta_bringup = matches!(
             &self.kind,
             Node::Peripheral(PeripheralOpMode::EspNow(c)) | Node::Central(CentralOpMode::EspNow(c))
                 if self.io_tasks.rx_enabled
@@ -612,7 +737,12 @@ impl<'a> CSINode<'a> {
                             c.peer_mac().is_some()
                         }
                     }
-        ) {
+        ) || matches!(
+            &self.kind,
+            Node::Peripheral(PeripheralOpMode::EspNowFastSource(_))
+                | Node::Central(CentralOpMode::EspNowFastCollector(_))
+        );
+        if needs_sta_bringup {
             with_espnow_recv_suspended(|| {
                 bring_up_espnow_sta(controller, false);
             });
@@ -624,6 +754,30 @@ impl<'a> CSINode<'a> {
         // Tasks Necessary for Central Station & Sniffer
         let sta_interface = if let Node::Central(CentralOpMode::WifiStation(config)) = &self.kind {
             Some(sta_init(&mut interfaces.station, config, controller))
+        } else {
+            None
+        };
+
+        // Self-contained softAP: bring up the AP-side embassy-net stack (static
+        // IP) and apply the AP config to the controller. `interfaces.access_point`
+        // is disjoint from `.station`/`.esp_now`/`.sniffer`, so this borrow is fine.
+        let ap_interface = if let Node::Central(CentralOpMode::WifiAccessPoint(config)) = &self.kind {
+            #[cfg(feature = "esp32c5")]
+            if config.secondary_channel().is_none() {
+                with_espnow_recv_suspended(|| {
+                    apply_espnow_band_for_channel(controller, config.channel());
+                });
+            }
+            if let Some(secondary) = config.secondary_channel() {
+                with_espnow_recv_suspended(|| {
+                    apply_espnow_ht40_mode(controller, config.channel(), secondary);
+                });
+                c5_radio_settle().await;
+            }
+            let ifaces = ap_init(&mut interfaces.access_point, config, controller);
+            // The AP `set_config` restarts the radio; settle before `set_csi`.
+            c5_radio_settle().await;
+            Some(ifaces)
         } else {
             None
         };
@@ -652,7 +806,9 @@ impl<'a> CSINode<'a> {
         set_seq_drop_detection(matches!(
             &self.kind,
             Node::Peripheral(PeripheralOpMode::EspNow(_))
+                | Node::Peripheral(PeripheralOpMode::EspNowFastSource(_))
                 | Node::Central(CentralOpMode::EspNow(_))
+                | Node::Central(CentralOpMode::EspNowFastCollector(_))
         ));
 
         // Set Peripheral/Central to Collect CSI. Keep a clone so the STA
@@ -669,7 +825,10 @@ impl<'a> CSINode<'a> {
             &self.kind,
             Node::Peripheral(PeripheralOpMode::WifiSniffer(_))
         );
-        if self.io_tasks.rx_enabled && !is_sniffer && !espnow_ht40 {
+        // AP is excluded here: `set_config(AccessPoint)` in `ap_init` restarts the
+        // radio and clears the CSI filter, so the AP arm registers CSI itself
+        // after start.
+        if self.io_tasks.rx_enabled && !is_sniffer && !espnow_ht40 && !is_ap {
             with_espnow_recv_suspended(|| {
                 set_csi(controller, config.clone());
             });
@@ -705,11 +864,7 @@ impl<'a> CSINode<'a> {
                     // routes to the deprecated `esp_wifi_config_espnow_rate`.
                     if let Some(secondary) = esp_now_config.secondary_channel() {
                         with_espnow_recv_suspended(|| {
-                            apply_espnow_ht40_mode(
-                                controller,
-                                esp_now_config.channel(),
-                                secondary,
-                            );
+                            apply_espnow_ht40_mode(controller, esp_now_config.channel(), secondary);
                         });
                         install_static_espnow_recv();
                         c5_radio_settle().await;
@@ -722,6 +877,36 @@ impl<'a> CSINode<'a> {
                     }
 
                     let main_task = run_esp_now_peripheral(
+                        &mut interfaces.esp_now,
+                        esp_now_config,
+                        self.traffic_freq_hz,
+                        self.io_tasks,
+                    );
+                    drive_main(main_task, rx_enabled, duration, client).await;
+                }
+                PeripheralOpMode::EspNowFastSource(esp_now_config) => {
+                    // Pre-setup mirrors the ESP-NOW peripheral arm above.
+                    #[cfg(feature = "esp32c5")]
+                    if esp_now_config.secondary_channel().is_none() {
+                        with_espnow_recv_suspended(|| {
+                            apply_espnow_band_for_channel(controller, esp_now_config.channel());
+                        });
+                    }
+                    if let Some(secondary) = esp_now_config.secondary_channel() {
+                        with_espnow_recv_suspended(|| {
+                            apply_espnow_ht40_mode(controller, esp_now_config.channel(), secondary);
+                        });
+                        install_static_espnow_recv();
+                        c5_radio_settle().await;
+                        if rx_enabled {
+                            with_espnow_recv_suspended(|| {
+                                set_csi(controller, config.clone());
+                            });
+                            c5_radio_settle().await;
+                        }
+                    }
+
+                    let main_task = run_esp_now_fast_source(
                         &mut interfaces.esp_now,
                         esp_now_config,
                         self.traffic_freq_hz,
@@ -786,11 +971,7 @@ impl<'a> CSINode<'a> {
                     // HT40 handling mirrors the peripheral ESP-NOW arm above.
                     if let Some(secondary) = esp_now_config.secondary_channel() {
                         with_espnow_recv_suspended(|| {
-                            apply_espnow_ht40_mode(
-                                controller,
-                                esp_now_config.channel(),
-                                secondary,
-                            );
+                            apply_espnow_ht40_mode(controller, esp_now_config.channel(), secondary);
                         });
                         install_static_espnow_recv();
                         c5_radio_settle().await;
@@ -811,6 +992,52 @@ impl<'a> CSINode<'a> {
                         self.io_tasks,
                     );
                     drive_main(main_task, rx_enabled, duration, client).await;
+                }
+                CentralOpMode::EspNowFastCollector(esp_now_config) => {
+                    // Pre-setup mirrors the ESP-NOW central arm above.
+                    #[cfg(feature = "esp32c5")]
+                    if esp_now_config.secondary_channel().is_none() {
+                        with_espnow_recv_suspended(|| {
+                            apply_espnow_band_for_channel(controller, esp_now_config.channel());
+                        });
+                    }
+                    if let Some(secondary) = esp_now_config.secondary_channel() {
+                        with_espnow_recv_suspended(|| {
+                            apply_espnow_ht40_mode(controller, esp_now_config.channel(), secondary);
+                        });
+                        install_static_espnow_recv();
+                        c5_radio_settle().await;
+                        if rx_enabled {
+                            with_espnow_recv_suspended(|| {
+                                set_csi(controller, config.clone());
+                            });
+                            c5_radio_settle().await;
+                        }
+                    }
+
+                    let main_task = run_esp_now_fast_collector(
+                        &mut interfaces.esp_now,
+                        esp_now_config,
+                        self.io_tasks,
+                    );
+                    drive_main(main_task, rx_enabled, duration, client).await;
+                }
+                CentralOpMode::WifiAccessPoint(ap_config) => {
+                    // Start the AP, run the net stack + optional DHCP server, and
+                    // collect CSI from associated stations' uplink frames. CSI is
+                    // registered inside `run_ap` (after the AP-start radio restart).
+                    let (ap_stack, ap_runner) = ap_interface.unwrap();
+                    let main_task = run_ap(
+                        controller,
+                        ap_stack,
+                        ap_runner,
+                        ap_config,
+                        csi_config_for_recovery,
+                        self.io_tasks,
+                        self.traffic_freq_hz,
+                    );
+                    drive_main(main_task, rx_enabled, duration, client).await;
+                    sniffer.set_promiscuous_mode(false).unwrap();
                 }
                 CentralOpMode::WifiStation(_sta_config) => {
                     // Initialize as Wifi Station Collector with WifiStationConfig

@@ -34,7 +34,7 @@ use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{log_ln, logging::logging::init_logger, set_peer_espnow_phy};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_radio::esp_now::{EspNow, WifiPhyRate, BROADCAST_ADDRESS, ESP_NOW_MAX_DATA_LEN};
+use esp_radio::esp_now::{BROADCAST_ADDRESS, ESP_NOW_MAX_DATA_LEN, EspNow, WifiPhyRate};
 use esp_radio::wifi::sta::StationConfig;
 use esp_radio::wifi::{Config, SecondaryChannel, WifiController};
 use portable_atomic::{AtomicU32, Ordering};
@@ -42,7 +42,7 @@ use {esp_backtrace as _, esp_println as _};
 
 #[path = "cpu_test_schedule.rs"]
 mod cpu_test_schedule;
-use cpu_test_schedule::{phases_iter, PhaseKind, BOOT_DELAY_S, TEST_CHANNEL};
+use cpu_test_schedule::{BOOT_DELAY_S, PhaseKind, TEST_CHANNEL, phases_iter};
 
 extern crate alloc;
 
@@ -175,7 +175,9 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting MINIMAL ESP-NOW TX CPU-Utilization Traffic Generator (matched to esp-now-idf)");
+    log_ln!(
+        "Starting MINIMAL ESP-NOW TX CPU-Utilization Traffic Generator (matched to esp-now-idf)"
+    );
 
     let config_radio = esp_radio::wifi::ControllerConfig::default()
         .with_static_tx_buf_num(25)

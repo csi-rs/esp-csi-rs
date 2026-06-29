@@ -34,10 +34,10 @@ use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, set_raw_listen, set_raw_recv_callback,
-    CSINode, CollectionMode, EspNowConfig, IOTaskConfig,
+    CSINode, CollectionMode, EspNowConfig, IOTaskConfig, config::CsiConfig,
+    logging::logging::init_logger, set_raw_listen, set_raw_recv_callback,
 };
-use esp_csi_rs::{log_ln, set_csi_logging_enabled, set_csi_raw_callback, CSINodeHardware};
+use esp_csi_rs::{CSINodeHardware, log_ln, set_csi_logging_enabled, set_csi_raw_callback};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::esp_now::WifiPhyRate;

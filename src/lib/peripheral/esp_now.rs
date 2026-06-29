@@ -8,37 +8,38 @@
 
 use core::sync::atomic::Ordering;
 
+use crate::CENTRAL_MAGIC_NUMBER;
+use crate::ControlPacket;
+use crate::IS_COLLECTOR;
+use crate::PERIPHERAL_BEACON_SENTINEL;
+use crate::PERIPHERAL_MAGIC_NUMBER;
+use crate::PeripheralPacket;
+#[cfg(feature = "statistics")]
+use crate::STATS;
+use crate::STOP_SIGNAL;
 use crate::log_ln;
 use crate::parse_with_magic;
 use crate::serialize_with_magic;
 use crate::set_runtime_collection_mode;
-use crate::ControlPacket;
-use crate::PeripheralPacket;
-use crate::CENTRAL_MAGIC_NUMBER;
-use crate::PERIPHERAL_BEACON_SENTINEL;
-use crate::PERIPHERAL_MAGIC_NUMBER;
-use crate::IS_COLLECTOR;
-#[cfg(feature = "statistics")]
-use crate::STATS;
-use crate::STOP_SIGNAL;
 
 use crate::espnow_phy::{apply_peer_espnow_phy, with_espnow_recv_suspended};
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{Either, select};
 use embassy_futures::yield_now;
 use embassy_time::Instant;
 use embassy_time::Timer;
-use esp_radio::esp_now::{Error as EspNowInnerError, EspNow, EspNowError, PeerInfo, BROADCAST_ADDRESS};
+use esp_radio::esp_now::{
+    BROADCAST_ADDRESS, Error as EspNowInnerError, EspNow, EspNowError, PeerInfo,
+};
 
 use crate::esp_now_pool::PoolFrame;
 
-use portable_atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8};
 #[cfg(feature = "statistics")]
 use portable_atomic::AtomicU32;
+use portable_atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64};
 
 use crate::{EspNowConfig, IOTaskConfig};
 
 const TX_BACKOFF_US: u64 = 200;
-const TX_FAST_BACKOFF_US: u64 = 50;
 const TX_WAIT_SLICE_US: u64 = 100;
 const ADAPT_UP_EVERY_SUCCESSES: u16 = 32;
 const ADAPT_DOWN_PERCENT: u64 = 25;
@@ -46,9 +47,8 @@ const ADAPT_UP_PERCENT: u64 = 10;
 const MIN_REPLY_HZ_FLOOR: u64 = 100;
 const MAX_REPLY_HZ_CEILING: u64 = 8_000;
 const PERIPHERAL_PACKET_BUF_LEN: usize = 8;
-const TX_CATCH_UP_BURST: u8 = 3;
-const TX_CATCH_UP_BURST_NO_WAIT: u8 = 16;
-const RX_BURST_MAX_WITH_TX: u16 = 16;
+const TX_CATCH_UP_BURST: u8 = 1;
+const RX_BURST_MAX_WITH_TX: u16 = 1;
 const RX_RESERVED_TX_GUARD_US: u64 = 15;
 const PEER_HEALTHCHECK_PERIOD: u16 = 256;
 // Cap any single drain burst so an arbitrarily large RX queue cannot keep the
@@ -412,10 +412,7 @@ fn ingest_control_packet(
             .store(central_is_listener, Ordering::Relaxed);
         shared.mode_streak.store(1, Ordering::Relaxed);
     } else {
-        let streak = shared
-            .mode_streak
-            .load(Ordering::Relaxed)
-            .saturating_add(1);
+        let streak = shared.mode_streak.load(Ordering::Relaxed).saturating_add(1);
         shared.mode_streak.store(streak, Ordering::Relaxed);
 
         if streak == MODE_SWITCH_HYSTERESIS && central_is_listener {
@@ -524,19 +521,48 @@ async fn responder(
         hz_to_interval_us(frequency_hz)
     };
     let adaptive_pacing_enabled = io_tasks.rx_enabled && io_tasks.tx_enabled;
-    let tx_fast_no_wait = io_tasks.tx_enabled && !io_tasks.rx_enabled;
     let mut consecutive_tx_ok: u16 = 0;
     let mut next_tx_us = Instant::now().as_micros().saturating_add(tx_interval_us);
     let mut tx_buf = [0u8; PERIPHERAL_PACKET_BUF_LEN];
 
     loop {
+        // Service queued control packets before attempting a due reply. In
+        // bidirectional mode this prevents TX from overtaking already-received
+        // central control frames; the burst cap and deadline guard keep replies
+        // from being starved by a busy RX queue.
+        if io_tasks.rx_enabled && io_tasks.tx_enabled {
+            let mut rx_packets: u16 = 0;
+            while rx_packets < RX_BURST_MAX_WITH_TX {
+                let tx_reply_pending = shared.is_connected.load(Ordering::Acquire)
+                    && shared.pending_flag.load(Ordering::Acquire);
+                let rx_deadline_us = if tx_reply_pending {
+                    next_tx_us.saturating_sub(RX_RESERVED_TX_GUARD_US)
+                } else {
+                    u64::MAX
+                };
+
+                if rx_packets > 0 && Instant::now().as_micros() >= rx_deadline_us {
+                    #[cfg(feature = "statistics")]
+                    RX_TX_GUARD_BREAK_COUNT.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+
+                let Some(r) = crate::esp_now_pool::receive() else {
+                    break;
+                };
+
+                ingest_control_packet(esp_now, channel, config, r, &shared, true, peer_mac);
+                rx_packets = rx_packets.saturating_add(1);
+            }
+
+            if rx_packets > 0 {
+                yield_now().await;
+            }
+        }
         let mut now_us = Instant::now().as_micros();
+
         if io_tasks.tx_enabled {
-            let mut burst_budget = if tx_fast_no_wait {
-                TX_CATCH_UP_BURST_NO_WAIT
-            } else {
-                TX_CATCH_UP_BURST
-            };
+            let mut burst_budget = TX_CATCH_UP_BURST;
             while now_us >= next_tx_us
                 && burst_budget > 0
                 && shared.is_connected.load(Ordering::Acquire)
@@ -572,34 +598,12 @@ async fn responder(
                 };
 
                 let mut send_succeeded = false;
-                if tx_fast_no_wait {
-                    match esp_now.send(&dest_mac, message) {
-                        Ok(waiter) => {
-                            // Max-throughput mode: queue packets as fast as the
-                            // driver accepts them and avoid per-packet callback waits.
-                            core::mem::forget(waiter);
-                            send_succeeded = true;
-                            #[cfg(feature = "statistics")]
-                            STATS.tx_count.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(
-                            EspNowError::Error(EspNowInnerError::OutOfMemory)
-                            | EspNowError::SendFailed,
-                        ) => {
-                            Timer::after_micros(TX_FAST_BACKOFF_US).await;
-                        }
-                        Err(e) => {
-                            log_ln!("Failed to queue ESP-NOW packet: {:?}", e);
-                        }
-                    }
-                } else {
-                    let send_result = match esp_now.send(&dest_mac, message) {
-                        Ok(waiter) => waiter.wait(),
-                        Err(e) => Err(e),
-                    };
-
-                    match send_result {
-                        Ok(()) => {
+                // esp-radio has one global ESP-NOW send-completion flag/waker.
+                // Keep exactly one send in flight and await it to completion;
+                // dropping this future or queueing another send first can corrupt
+                // the driver's completion state and freeze later sends.
+                match esp_now.send_async(&dest_mac, message).await {
+                    Ok(()) => {
                             send_succeeded = true;
                             #[cfg(feature = "statistics")]
                             STATS.tx_count.fetch_add(1, Ordering::Relaxed);
@@ -608,29 +612,32 @@ async fn responder(
                                 consecutive_tx_ok = consecutive_tx_ok.saturating_add(1);
                                 if consecutive_tx_ok >= ADAPT_UP_EVERY_SUCCESSES {
                                     consecutive_tx_ok = 0;
-                                    let step_up = (adaptive_reply_hz * ADAPT_UP_PERCENT / 100).max(1);
-                                    adaptive_reply_hz = (adaptive_reply_hz + step_up).min(reply_hz_max);
+                                    let step_up =
+                                        (adaptive_reply_hz * ADAPT_UP_PERCENT / 100).max(1);
+                                    adaptive_reply_hz =
+                                        (adaptive_reply_hz + step_up).min(reply_hz_max);
                                     tx_interval_us = hz_to_interval_us(adaptive_reply_hz);
                                 }
                             }
-                        }
-                        Err(
-                            EspNowError::Error(EspNowInnerError::OutOfMemory)
-                            | EspNowError::SendFailed,
-                        ) => {
+                    }
+                    Err(
+                        EspNowError::Error(EspNowInnerError::OutOfMemory)
+                        | EspNowError::SendFailed,
+                    ) => {
                             consecutive_tx_ok = 0;
                             if adaptive_pacing_enabled {
-                                let step_down = (adaptive_reply_hz * ADAPT_DOWN_PERCENT / 100).max(1);
-                                adaptive_reply_hz =
-                                    adaptive_reply_hz.saturating_sub(step_down).max(reply_hz_min);
+                                let step_down =
+                                    (adaptive_reply_hz * ADAPT_DOWN_PERCENT / 100).max(1);
+                                adaptive_reply_hz = adaptive_reply_hz
+                                    .saturating_sub(step_down)
+                                    .max(reply_hz_min);
                                 tx_interval_us = hz_to_interval_us(adaptive_reply_hz);
                                 Timer::after_micros(TX_BACKOFF_US).await;
                             }
-                        }
-                        Err(e) => {
+                    }
+                    Err(e) => {
                             consecutive_tx_ok = 0;
                             log_ln!("Failed to send ESP-NOW packet: {:?}", e);
-                        }
                     }
                 }
 
@@ -643,61 +650,6 @@ async fn responder(
                 if !send_succeeded {
                     break;
                 }
-            }
-        }
-
-        // Drain a bounded RX burst after the TX step so TX deadlines stay
-        // prioritized at higher rates.
-        if io_tasks.rx_enabled {
-            let tx_reply_pending = io_tasks.tx_enabled
-                && shared.is_connected.load(Ordering::Acquire)
-                && shared.pending_flag.load(Ordering::Acquire);
-
-            let rx_deadline_us = if tx_reply_pending {
-                next_tx_us.saturating_sub(RX_RESERVED_TX_GUARD_US)
-            } else {
-                u64::MAX
-            };
-            let rx_burst_drain_limit = if tx_reply_pending {
-                RX_BURST_MAX_WITH_TX
-            } else {
-                RX_BURST_MAX_RX_ONLY
-            };
-
-            let mut rx_packets: u16 = 0;
-            while rx_packets < rx_burst_drain_limit {
-                if tx_reply_pending && Instant::now().as_micros() >= rx_deadline_us {
-                    #[cfg(feature = "statistics")]
-                    RX_TX_GUARD_BREAK_COUNT.fetch_add(1, Ordering::Relaxed);
-                    break;
-                }
-
-                let Some(r) = crate::esp_now_pool::receive() else {
-                    break;
-                };
-
-                ingest_control_packet(
-                    esp_now,
-                    channel,
-                    config,
-                    r,
-                    &shared,
-                    io_tasks.tx_enabled,
-                    peer_mac,
-                );
-                rx_packets = rx_packets.saturating_add(1);
-            }
-
-            // If there is more RX work and TX is not immediately due, loop
-            // again without sleeping to reduce queueing latency.  Yield once
-            // first so that co-scheduled tasks (e.g. node_task) get at least
-            // one executor turn between drain cycles; without this the inner
-            // join never returns Poll::Pending and the outer join starves them.
-            if rx_packets > 0
-                && (!tx_reply_pending || Instant::now().as_micros() < next_tx_us)
-            {
-                yield_now().await;
-                continue;
             }
         }
 
@@ -717,8 +669,12 @@ async fn responder(
                     // hold the executor here past the next loop iteration.
                     let mut drained: u16 = 0;
                     while drained < RX_BURST_MAX_RX_ONLY {
-                        let Some(r) = crate::esp_now_pool::receive() else { break; };
-                        ingest_control_packet(esp_now, channel, config, r, &shared, false, peer_mac);
+                        let Some(r) = crate::esp_now_pool::receive() else {
+                            break;
+                        };
+                        ingest_control_packet(
+                            esp_now, channel, config, r, &shared, false, peer_mac,
+                        );
                         drained = drained.saturating_add(1);
                     }
                 }

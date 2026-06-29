@@ -155,16 +155,25 @@ pub(crate) fn apply_espnow_ht40(
         log_ln!("HT40: set_channel failed");
     }
 
-    #[cfg(feature = "esp32c5")]
+    // Raise the interface bandwidth to 40 MHz. `set_channel` only configures the
+    // secondary-channel offset; without this the radio keeps a 20 MHz RX/TX path
+    // and HT40 frames can't be decoded. Required on every chip, not just C5 —
+    // single-band 2.4 GHz parts (C6/C3/S3/ESP32) were previously left at 20 MHz,
+    // so a central could never receive the peripheral's 40 MHz unicast replies.
     {
         use esp_radio::wifi::Bandwidth;
         match controller.bandwidths() {
             Ok(bw) => {
+                // 5 GHz (ch >= 36) only exists on the dual-band C5; `with_5` is
+                // not present in the single-band HAL, so gate that branch.
+                #[cfg(feature = "esp32c5")]
                 let bw = if primary >= 36 {
                     bw.with_5(Bandwidth::_40MHz)
                 } else {
                     bw.with_2_4(Bandwidth::_40MHz)
                 };
+                #[cfg(not(feature = "esp32c5"))]
+                let bw = bw.with_2_4(Bandwidth::_40MHz);
                 if let Err(e) = controller.set_bandwidths(bw) {
                     log_ln!("HT40: set_bandwidths failed: {:?}", e);
                 }
@@ -223,11 +232,7 @@ fn espnow_phymode(rate: WifiPhyRate, secondary: Option<SecondaryChannel>) -> u32
 }
 
 /// Force a peer's ESP-NOW TX PHY to the configured `rate` and bandwidth.
-pub fn set_peer_espnow_phy(
-    peer: &[u8; 6],
-    rate: WifiPhyRate,
-    secondary: Option<SecondaryChannel>,
-) {
+pub fn set_peer_espnow_phy(peer: &[u8; 6], rate: WifiPhyRate, secondary: Option<SecondaryChannel>) {
     let mut cfg = WifiTxRateConfig {
         phymode: espnow_phymode(rate, secondary),
         rate: wifi_phy_rate_to_c(rate),

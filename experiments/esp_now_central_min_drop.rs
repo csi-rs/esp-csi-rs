@@ -29,7 +29,7 @@ use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{log_ln, logging::logging::init_logger, set_peer_espnow_phy};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_radio::esp_now::{EspNow, WifiPhyRate, BROADCAST_ADDRESS};
+use esp_radio::esp_now::{BROADCAST_ADDRESS, EspNow, WifiPhyRate};
 use esp_radio::wifi::sta::StationConfig;
 use esp_radio::wifi::{Config, SecondaryChannel, WifiController};
 use portable_atomic::{AtomicU32, Ordering};

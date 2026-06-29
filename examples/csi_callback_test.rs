@@ -40,13 +40,15 @@ use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, CsiDeliveryMode,
-    WifiSnifferConfig,
+    CSINode, CollectionMode, CsiDeliveryMode, WifiSnifferConfig, config::CsiConfig,
+    logging::logging::init_logger,
 };
 use esp_csi_rs::{
-    get_dropped_packets_rx, log_ln, set_csi_callback, set_csi_delivery_mode,
-    set_csi_logging_enabled, CSINodeClient, CSINodeHardware,
+    CSINodeClient, CSINodeHardware, log_ln, set_csi_callback, set_csi_delivery_mode,
+    set_csi_logging_enabled,
 };
+#[cfg(feature = "statistics")]
+use esp_csi_rs::get_dropped_packets_rx;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -156,12 +158,16 @@ async fn stats_task() {
         let drain_delta = drain.wrapping_sub(last_drain);
         last_cb = cb;
         last_drain = drain;
+        #[cfg(feature = "statistics")]
+        let dropped = get_dropped_packets_rx();
+        #[cfg(not(feature = "statistics"))]
+        let dropped = 0u32;
         log_ln!(
             "mode={:?} cb/sec: {}, drain/sec: {}, dropped: {}, RSSI: {} dBm, tones: {}, cb_energy: {}, drain_energy: {}",
             esp_csi_rs::csi_delivery_mode(),
             cb_delta,
             drain_delta,
-            get_dropped_packets_rx(),
+            dropped,
             LATEST_RSSI.load(Ordering::Relaxed),
             LATEST_TONE_COUNT.load(Ordering::Relaxed),
             LATEST_TONE_ENERGY.load(Ordering::Relaxed),
@@ -208,9 +214,8 @@ async fn main(spawner: Spawner) -> ! {
     log_ln!("Starting CSI callback test (sniffer mode)");
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, mut interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, config_radio)
-            .expect("Failed to initialize Wi-Fi controller");
+    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+        .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 

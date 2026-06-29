@@ -60,11 +60,13 @@ Traffic carrying collected CSI data are tagged with sequence numbers that trigge
 
 ## Node Operation Modes
 
-`esp-csi-rs` supports three operational modes:
+`esp-csi-rs` supports five operational modes:
 
-1. ESP-NOW
-2. WiFi Sniffer
-3. WiFi Station
+1. **ESP-NOW** — balanced central/peripheral control exchange (auto-pairing, optional forced-PHY unicast replies).
+2. **ESP-NOW Fast** — asymmetric one-to-one simplex: collector beacons, source floods; maximizes CSI packets/sec.
+3. **WiFi Sniffer** — promiscuous capture on a locked channel (single-node topology).
+4. **WiFi Station** — associate to an AP or router and harvest CSI from received frames.
+5. **WiFi Access Point** — self-contained softAP collector with built-in DHCP; a `WifiStation` peer associates and generates uplink traffic captured as CSI on the AP.
 
 
 ## Network Architechtures
@@ -73,7 +75,9 @@ Traffic carrying collected CSI data are tagged with sequence numbers that trigge
 1. ***Single Node:***  This is the simplest setup where only one ESP device (CSI Node) is needed. The node is configured to "sniff" packets in surrounding networks and collect CSI data. The WiFi Sniffer Peripheral Collector is the only possible configuration that supports this topology. 
 2. ***Point-to-Point:*** This set up uses two CSI Nodes, a central and a peripheral. One of them can be a collector and the other a listener. Alternatively, both can be collectors as well. Some configuration examples include
     - **WiFi Station Central Collector <-> Access Point/Commercial Router**: In this configuration the CSI node can connect to any WiFi Access Point like an ESP AP or a commercial router. The node in turn sends traffic to the Access Point to acquire CSI data.
+    - **WiFi Access Point Central Collector <-> WiFi Station Peripheral Collector**: A self-contained softAP node (`WifiAccessPoint`) runs DHCP and ICMP flood to a paired `WifiStation` node — no external router required. See `wifi_ap` / `wifi_station`.
     - **ESP-NOW Central Listener/Collector <-> ESP-NOW Peripheral Listener/Collector**: In this configuration a CSI central node connects to one other ESP-NOW peripheral node. Both ESP-NOW peripheral and central nodes can operate either as listeners or collectors.
+    - **ESP-NOW Fast Collector <-> ESP-NOW Fast Source**: Asymmetric simplex — the source owns all TX airtime while the collector goes RX-only after discovery. See `esp_now_fast_collector` / `esp_now_fast_source`.
 3. ***Star:*** In this architechture a central node connects to several peripheral nodes. The central node triggers traffic and aggregates CSI sent back from peripheral nodes. Alternatively, CSI can be collected by the individual peripherals. Only the ESP-NOW operation mode supports this architechture. The ESP-NOW peripheral and central nodes can also operate either as listeners or collectors. 
 
 <div align="center">
@@ -95,7 +99,7 @@ Add the crate to your `Cargo.toml`. At a minimum, you would need to specify the 
 
 ```toml
 [dependencies]
-esp-csi-rs = { version = "0.5.2", features = ["esp32c3", "println"] }
+esp-csi-rs = { version = "0.8.0", features = ["esp32c3", "println"] }
 ```
 
 The crate uses Rust **edition 2024** and tracks the latest Espressif Rust ecosystem (`esp-hal` 1.1, `esp-radio` 0.18, `esp-rtos` 0.3).
@@ -116,7 +120,7 @@ When enabling the `defmt` feature, the user app needs three additional things on
 
 ```toml
 [dependencies]
-esp-csi-rs = { version = "0.5.2", features = ["esp32c3", "defmt"] }
+esp-csi-rs = { version = "0.8.0", features = ["esp32c3", "defmt"] }
 defmt = "1.0"
 ```
 
@@ -133,7 +137,50 @@ The repository contains an `examples/` folder with configurations for each suppo
 
 Replace `esp32c3` with any of: `esp32`, `esp32c3`, `esp32c5`, `esp32c6`, `esp32s3`. The `-defmt` aliases inject `--features=defmt`, override the espflash runner with `--log-format defmt`, and `build.rs` adds the `-Tdefmt.x` linker script automatically — no manual config edits required to switch between logging backends.
 
-Replace `<name>` with the file name of any example, e.g. `sniffer_wifi`, `esp_now_central`, `wifi_station`.
+Replace `<name>` with the file name of any example, e.g. `sniffer_wifi`, `esp_now_central`, `wifi_station`, `wifi_ap`, `esp_now_fast_collector`.
+
+## WiFi Access Point CSI Collection
+
+Run a **self-contained softAP collector** so a standard `WifiStation` node can
+associate without an external router. The AP hands out a single DHCP lease and
+pings the client at a configurable rate; uplink ICMP replies become CSI on the AP.
+
+```rust
+use esp_csi_rs::{CentralOpMode, WifiApConfig, /* ... */};
+use esp_radio::wifi::ap::AccessPointConfig;
+
+let ap = AccessPointConfig::default()
+    .with_ssid("esp-csi-ap".into())
+    .with_auth_method(AuthMethod::None);
+let ap_cfg = WifiApConfig::new(ap, 6, None); // channel 6, HT20
+// CSINode::Central(CentralOpMode::WifiAccessPoint(ap_cfg))
+```
+
+Defaults: AP `192.168.13.1`, lease `192.168.13.2`, DHCP enabled. Tune uplink
+traffic with `node.set_traffic_freq_hz(...)` (ICMP flood to the leased client).
+Pair with `examples/wifi_station.rs` on the same SSID. Expect tens to low
+hundreds of CSI pps depending on bidirectional contention and filter settings —
+WiFi airtime is the limit, not CPU.
+
+## ESP-NOW Fast Simplex (High Throughput)
+
+For **maximum CSI packets/sec** in a one-to-one link, use the asymmetric fast
+modes instead of balanced `EspNow` central/peripheral:
+
+1. **Collector** (`EspNowFastCollector`) broadcasts a sparse ~1 Hz discovery beacon.
+2. **Source** (`EspNowFastSource`) learns the collector MAC, registers forced-PHY
+   unicast, then floods continuously.
+3. Collector **stops beaconing** and goes RX-only — all airtime goes to the source.
+
+```rust
+let espnow_cfg = EspNowConfig::fast_default().with_channel(6); // HT20 MCS7-LGI
+// Central: CentralOpMode::EspNowFastCollector(espnow_cfg)
+// Peripheral: PeripheralOpMode::EspNowFastSource(espnow_cfg)
+```
+
+Auto-pairing uses the same magic-prefix protocol as standard ESP-NOW. Chain
+`with_ht40` for 40 MHz capture where supported. See `esp_now_fast_collector` /
+`esp_now_fast_source`.
 
 ## HT40 CSI Collection (ESP32-C5 / C6)
 
@@ -232,6 +279,8 @@ exactly this check.
 
 | Example pair | Chip(s) | Band / channel | Bandwidth |
 |---|---|---|---|
+| `wifi_ap` / `wifi_station` | all supported | 2.4 GHz 6 | HT20 |
+| `esp_now_fast_collector` / `esp_now_fast_source` | all supported | 2.4 GHz 6 | HT20 (MCS7) |
 | `esp_now_central_ht40` / `esp_now_peripheral_ht40` | C5 / C6 / C3 / S3 / ESP32 | C5: 5 GHz 149+153 · others: 2.4 GHz 6+10 | HT40 |
 
 See `examples/esp_now_central_ht40.rs` for a full working configuration.

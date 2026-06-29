@@ -37,11 +37,11 @@ use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, set_raw_listen, CSINode, CollectionMode,
-    EspNowConfig, IOTaskConfig,
+    CSINode, CollectionMode, EspNowConfig, IOTaskConfig, config::CsiConfig,
+    logging::logging::init_logger, set_raw_listen,
 };
 use esp_csi_rs::{
-    log_ln, set_csi_logging_enabled, set_csi_raw_callback, CSINodeClient, CSINodeHardware,
+    CSINodeClient, CSINodeHardware, log_ln, set_csi_logging_enabled, set_csi_raw_callback,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::time::Instant;
@@ -53,7 +53,7 @@ use {esp_backtrace as _, esp_println as _};
 
 #[path = "cpu_test_schedule.rs"]
 mod cpu_test_schedule;
-use cpu_test_schedule::{phases_iter, PhaseKind, BASELINE_MAX_SAMPLES, BOOT_DELAY_S, TEST_CHANNEL};
+use cpu_test_schedule::{BASELINE_MAX_SAMPLES, BOOT_DELAY_S, PhaseKind, TEST_CHANNEL, phases_iter};
 
 extern crate alloc;
 

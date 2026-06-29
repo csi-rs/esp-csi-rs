@@ -23,15 +23,15 @@ use crate::alloc::string::ToString;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
-use esp_csi_rs::logging::logging::{init_logger, LogMode};
+use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    config::CsiConfig, log_ln, set_csi_logging_enabled, CSINode, CSINodeClient, CSINodeHardware,
-    CollectionMode, IOTaskConfig, WifiStationConfig,
+    CSINode, CSINodeClient, CSINodeHardware, CollectionMode, IOTaskConfig, WifiStationConfig,
+    config::CsiConfig, log_ln, set_csi_logging_enabled,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_radio::wifi::sta::StationConfig;
 use esp_radio::wifi::WifiController;
+use esp_radio::wifi::sta::StationConfig;
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;

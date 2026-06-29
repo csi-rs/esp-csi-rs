@@ -23,14 +23,14 @@ use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::LogMode;
-use esp_csi_rs::{config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode};
+use esp_csi_rs::{CSINode, CollectionMode, config::CsiConfig, logging::logging::init_logger};
 use esp_csi_rs::{
-    log_ln, set_csi_logging_enabled, CSINodeClient, CSINodeHardware, WifiStationConfig,
+    CSINodeClient, CSINodeHardware, WifiStationConfig, log_ln, set_csi_logging_enabled,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_radio::wifi::sta::StationConfig;
 use esp_radio::wifi::WifiController;
+use esp_radio::wifi::sta::StationConfig;
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
@@ -62,7 +62,11 @@ async fn heap_reporter() -> ! {
         let largest_free: usize = 0;
         log_ln!(
             "HEAP,{},{},{},{},{}",
-            t_ms, free, used_delta, min_ever, largest_free
+            t_ms,
+            free,
+            used_delta,
+            min_ever,
+            largest_free
         );
     }
 }

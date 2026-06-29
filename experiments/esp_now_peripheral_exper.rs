@@ -1,14 +1,21 @@
 #![no_std]
 #![no_main]
 
+#[cfg(not(feature = "statistics"))]
+compile_error!("This experiment requires the `statistics` feature.");
+
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode, EspNowConfig,
+    CSINode, CollectionMode, EspNowConfig, config::CsiConfig, logging::logging::init_logger,
 };
-use esp_csi_rs::{CSINodeClient, CSINodeHardware, get_total_rx_packets, log_ln, set_csi_logging_enabled};
+use esp_csi_rs::{
+    CSINodeClient, CSINodeHardware, log_ln, set_csi_logging_enabled,
+};
+#[cfg(feature = "statistics")]
+use esp_csi_rs::get_total_rx_packets;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -72,13 +79,12 @@ async fn main(spawner: Spawner) -> ! {
 
     // Raise Wi-Fi buffer budget for sustained ESP-NOW + CSI traffic.
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-        // .with_static_rx_buf_num(25)
-        // .with_dynamic_rx_buf_num(128)
-        // .with_ampdu_rx_enable(false)
-        // .with_rx_queue_size(32);
-    let (wifi_controller, mut interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, config_radio)
-            .expect("Failed to initialize Wi-Fi controller");
+    // .with_static_rx_buf_num(25)
+    // .with_dynamic_rx_buf_num(128)
+    // .with_ampdu_rx_enable(false)
+    // .with_rx_queue_size(32);
+    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+        .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 

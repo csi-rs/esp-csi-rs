@@ -130,11 +130,7 @@ pub fn set_raw_recv_callback(cb: fn(&[u8])) {
 /// Custom receive callback installed via `esp_now_register_recv_cb`. Runs on
 /// the WiFi task in C-FFI context; must do no heap operations and finish
 /// quickly so the WiFi RX path keeps moving.
-unsafe extern "C" fn pool_rcv_cb(
-    info: *const EspNowRecvInfo,
-    data: *const u8,
-    data_len: i32,
-) {
+unsafe extern "C" fn pool_rcv_cb(info: *const EspNowRecvInfo, data: *const u8, data_len: i32) {
     // Raw-drop fast path (CPU-benchmark / min-drop): discard before any
     // copy/enqueue/wake, so no responder task is woken — the fair match to the
     // IDF empty recv_cb. If a raw-recv callback is registered (min drop test),
@@ -157,7 +153,9 @@ unsafe extern "C" fn pool_rcv_cb(
     let len = (data_len as usize).min(ESP_NOW_MAX_DATA_LEN);
 
     let mut frame = PoolFrame {
-        info: PoolInfo { src_address: [0; 6] },
+        info: PoolInfo {
+            src_address: [0; 6],
+        },
         data_buf: [0; ESP_NOW_MAX_DATA_LEN],
         data_len: len as u16,
     };

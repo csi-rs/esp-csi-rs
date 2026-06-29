@@ -1,53 +1,49 @@
+//! ESP-NOW fast one-to-one **source** — asymmetric simplex, channel 6, HT20.
+//!
+//! Companion to `esp_now_fast_collector`. This node listens for the collector's
+//! sparse discovery beacon, learns its MAC, registers it as a forced-PHY unicast
+//! peer, sends one magic hello, then floods unicast frames at max rate. With the
+//! collector silent on TX, all airtime goes to this flood → maximum CSI
+//! packets/sec on the collector.
+//!
+//! Pairing is automatic (magic-prefix; no hardcoded MACs). Flash this on one
+//! board and `esp_now_fast_collector` on another, both on channel 6.
+//!
+//! Build / run (optional throughput counters need `--features statistics`):
+//!   cargo esp32c6 --example esp_now_fast_source
+//!   cargo esp32s3 --example esp_now_fast_source
+
 #![no_std]
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
 #[cfg(feature = "statistics")]
 use embassy_time::Instant;
 use embassy_time::{Duration, Timer, with_timeout};
-use esp_csi_rs::csi::CSIDataPacket;
-use esp_csi_rs::logging::logging::LogMode;
+use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CollectionMode, EspNowConfig, config::CsiConfig, install_static_espnow_recv,
-    logging::logging::init_logger,
+    CSINode, CSINodeClient, CSINodeHardware, CollectionMode, EspNowConfig, IOTaskConfig,
+    install_static_espnow_recv, log_ln,
 };
-use esp_csi_rs::{CSINodeClient, CSINodeHardware, log_ln, set_csi_callback};
 #[cfg(feature = "statistics")]
-use esp_csi_rs::{
-    get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_total_rx_packets, get_total_tx_packets,
-};
+use esp_csi_rs::{get_pps_tx, get_total_tx_packets};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
-use portable_atomic::{AtomicI32, AtomicU32, Ordering};
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
+
+const CHANNEL: u8 = 6;
 
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
     static_cell::StaticCell::new();
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-#[allow(
-    clippy::large_stack_frames,
-    reason = "it's not unusual to allocate larger buffers etc. in main"
-)]
-
-static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
-static CSI_PKT_COUNT: AtomicU32 = AtomicU32::new(0);
-
-fn on_csi(packet: &CSIDataPacket) {
-    LATEST_RSSI.store(packet.rssi as i32, Ordering::Relaxed);
-    CSI_PKT_COUNT.fetch_add(1, Ordering::Relaxed);
-}
-
 async fn stats_task(client: &mut CSINodeClient) {
     #[cfg(feature = "statistics")]
     let mut last_sample = Instant::now();
-    #[cfg(feature = "statistics")]
-    let mut last_rx_total = get_total_rx_packets();
     #[cfg(feature = "statistics")]
     let mut last_tx_total = get_total_tx_packets();
 
@@ -58,44 +54,26 @@ async fn stats_task(client: &mut CSINodeClient) {
             #[cfg(feature = "statistics")]
             {
                 let elapsed_us = last_sample.elapsed().as_micros() as u64;
-                let rx_total = get_total_rx_packets();
                 let tx_total = get_total_tx_packets();
-                let rx_rate_hz = if elapsed_us == 0 {
-                    0
-                } else {
-                    (rx_total.saturating_sub(last_rx_total) * 1_000_000 / elapsed_us) as u32
-                };
                 let tx_rate_hz = if elapsed_us == 0 {
                     0
                 } else {
                     (tx_total.saturating_sub(last_tx_total) * 1_000_000 / elapsed_us) as u32
                 };
-
                 last_sample = Instant::now();
-                last_rx_total = rx_total;
                 last_tx_total = tx_total;
 
                 log_ln!(
-                    "RX PPS(avg): {}, TX PPS(avg): {}, RX Hz(inst): {}, TX Hz(inst): {}, RX Total: {}, TX Total: {}, RX Dropped Packets: {}, CSI Packets: {}, Latest RSSI: {}",
-                    get_pps_rx(),
+                    "TX PPS(avg): {}, TX Hz(inst): {}, TX Total: {}",
                     get_pps_tx(),
-                    rx_rate_hz,
                     tx_rate_hz,
-                    rx_total,
                     tx_total,
-                    get_dropped_packets_rx(),
-                    CSI_PKT_COUNT.load(Ordering::Relaxed),
-                    LATEST_RSSI.load(Ordering::Relaxed),
                 );
             }
 
             #[cfg(not(feature = "statistics"))]
             {
-                log_ln!(
-                    "CSI Packets: {}, Latest RSSI: {}",
-                    CSI_PKT_COUNT.load(Ordering::Relaxed),
-                    LATEST_RSSI.load(Ordering::Relaxed),
-                );
+                log_ln!("ESP-NOW fast source flooding...");
             }
         }
     })
@@ -110,7 +88,7 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
     init_logger(spawner, LogMode::Text);
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 60000);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -118,7 +96,10 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting EspNow Peripheral Node");
+    log_ln!(
+        "Starting ESP-NOW fast source — channel {}, HT20, discover then unicast flood",
+        CHANNEL
+    );
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
     let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
@@ -130,18 +111,23 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+
+    let espnow_cfg = EspNowConfig::fast_default().with_channel(CHANNEL);
+
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(EspNowConfig::default())),
+        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNowFastSource(
+            espnow_cfg,
+        )),
         CollectionMode::Listener,
-        Some(CsiConfig::default()),
-        Some(1000),
+        None,
+        None,
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::N);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs7Lgi);
+    // TX-only flood; CSI is captured on the collector.
+    node.set_io_tasks(IOTaskConfig::new(true, false));
 
-    set_csi_callback(on_csi);
-    join(node.run(), stats_task(&mut node_handle)).await;
+    embassy_futures::join::join(node.run(), stats_task(&mut node_handle)).await;
 
     loop {
         log_ln!("Hello world!");
