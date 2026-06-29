@@ -22,6 +22,7 @@ use crate::IS_COLLECTOR;
 use crate::STATS;
 use crate::STOP_SIGNAL;
 
+use crate::espnow_phy::{apply_peer_espnow_phy, with_espnow_recv_suspended};
 use embassy_futures::select::{select, Either};
 use embassy_futures::yield_now;
 use embassy_time::Instant;
@@ -184,6 +185,80 @@ fn u64_to_mac(v: u64) -> [u8; 6] {
     ]
 }
 
+/// Whether the peripheral replies by unicast to the auto-learned central MAC
+/// (vs. broadcast). The central MAC is always discovered from the first control
+/// frame in auto-pairing mode — unicast here never requires a configured MAC.
+///
+/// - **HT40** always unicasts: a per-peer HT40 rate config only applies to a
+///   unicast peer, never the broadcast peer.
+/// - **C5 HT20 with forced PHY** also unicasts. `esp_now_set_peer_rate_config`
+///   on the broadcast peer wedges the C5 dual-band Wi-Fi ISR, so forced MCS/HT20
+///   can only be applied to a learned unicast peer. This is what lets a C5
+///   central collect CSI automatically (OFDM replies) without hardcoded MACs.
+/// - **Non-C5 HT20** stays broadcast: the broadcast peer accepts forced PHY
+///   there, and broadcast is more robust for an unassociated started-STA central.
+fn unicast_replies(config: &EspNowConfig) -> bool {
+    if config.secondary_channel().is_some() {
+        return true;
+    }
+    #[cfg(feature = "esp32c5")]
+    {
+        config.force_phy()
+    }
+    #[cfg(not(feature = "esp32c5"))]
+    {
+        false
+    }
+}
+
+fn apply_central_peer_phy(config: &EspNowConfig, central_mac: &[u8; 6]) {
+    if !config.force_phy() {
+        return;
+    }
+    if unicast_replies(config) {
+        apply_peer_espnow_phy(central_mac, *config.phy_rate(), config.secondary_channel());
+    }
+}
+
+fn reply_destination(shared: &Shared, config: &EspNowConfig) -> [u8; 6] {
+    if unicast_replies(config) {
+        u64_to_mac(shared.central_mac.load(Ordering::Relaxed))
+    } else {
+        BROADCAST_ADDRESS
+    }
+}
+
+fn register_central_peer(
+    esp_now: &EspNow<'static>,
+    channel: u8,
+    config: &EspNowConfig,
+    central_mac: [u8; 6],
+) -> bool {
+    let add_res = if esp_now.peer_exists(&central_mac) {
+        Ok(())
+    } else {
+        esp_now.add_peer(PeerInfo {
+            interface: esp_radio::esp_now::EspNowWifiInterface::Station,
+            peer_address: central_mac,
+            lmk: None,
+            channel: Some(channel),
+            encrypt: false,
+        })
+    };
+
+    match add_res {
+        Ok(()) => {
+            apply_central_peer_phy(config, &central_mac);
+            true
+        }
+        Err(_) => {
+            #[cfg(feature = "statistics")]
+            RX_PEER_ADD_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+    }
+}
+
 /// Shared responder state.
 struct Shared {
     is_connected: AtomicBool,
@@ -209,6 +284,7 @@ struct Shared {
 fn ingest_control_packet(
     esp_now: &EspNow<'static>,
     channel: u8,
+    config: &EspNowConfig,
     r: PoolFrame,
     shared: &Shared,
     tx_enabled: bool,
@@ -274,22 +350,35 @@ fn ingest_control_packet(
         // Peer table management is only needed so we can send unicast replies.
         if !is_connected {
             // Lock onto the first valid central and add it as a unicast peer.
-            let add_res = esp_now.add_peer(PeerInfo {
-                interface: esp_radio::esp_now::EspNowWifiInterface::Station,
-                peer_address: r.info.src_address,
-                lmk: None,
-                channel: Some(channel),
-                encrypt: false,
-            });
-            if add_res.is_err() {
-                #[cfg(feature = "statistics")]
-                RX_PEER_ADD_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+            if register_central_peer(esp_now, channel, config, r.info.src_address) {
+                shared
+                    .central_mac
+                    .store(mac_to_u64(&r.info.src_address), Ordering::Relaxed);
+                shared.peer_healthcheck_counter.store(0, Ordering::Relaxed);
+                shared.is_connected.store(true, Ordering::Release);
+                if unicast_replies(config) {
+                    log_ln!(
+                        "ESP-NOW peripheral: locked central {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, unicast forced-PHY replies enabled (rate {:?})",
+                        r.info.src_address[0],
+                        r.info.src_address[1],
+                        r.info.src_address[2],
+                        r.info.src_address[3],
+                        r.info.src_address[4],
+                        r.info.src_address[5],
+                        config.phy_rate()
+                    );
+                } else {
+                    log_ln!(
+                        "ESP-NOW peripheral: locked central {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, broadcast HT20 replies",
+                        r.info.src_address[0],
+                        r.info.src_address[1],
+                        r.info.src_address[2],
+                        r.info.src_address[3],
+                        r.info.src_address[4],
+                        r.info.src_address[5]
+                    );
+                }
             }
-            shared
-                .central_mac
-                .store(mac_to_u64(&r.info.src_address), Ordering::Relaxed);
-            shared.peer_healthcheck_counter.store(0, Ordering::Relaxed);
-            shared.is_connected.store(true, Ordering::Release);
         } else {
             // Driver-side peer table can churn under pressure; keep unicast peer
             // present so TX doesn't get stuck on recurring NotFound. Checking on
@@ -299,20 +388,8 @@ fn ingest_control_packet(
                 .peer_healthcheck_counter
                 .fetch_add(1, Ordering::Relaxed)
                 .wrapping_add(1);
-            if (check_counter & (PEER_HEALTHCHECK_PERIOD - 1)) == 0
-                && !esp_now.peer_exists(&expected)
-                && esp_now
-                    .add_peer(PeerInfo {
-                        interface: esp_radio::esp_now::EspNowWifiInterface::Station,
-                        peer_address: expected,
-                        lmk: None,
-                        channel: Some(channel),
-                        encrypt: false,
-                    })
-                    .is_err()
-            {
-                #[cfg(feature = "statistics")]
-                RX_PEER_ADD_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+            if (check_counter & (PEER_HEALTHCHECK_PERIOD - 1)) == 0 {
+                let _ = register_central_peer(esp_now, channel, config, expected);
             }
         }
 
@@ -367,15 +444,14 @@ pub async fn run_esp_now_peripheral(
     // before this task ran; calling esp_now.set_channel here would reset the
     // secondary to HT20, so skip it.
     if config.secondary_channel().is_none() {
-        esp_now.set_channel(config.channel).unwrap();
+        with_espnow_recv_suspended(|| {
+            esp_now.set_channel(config.channel).unwrap();
+        });
     }
-    // Forced PHY: set the broadcast peer's ESP-NOW TX rate/bandwidth, mirroring
-    // the central. The peripheral replies via broadcast (see `responder`), so
-    // this forces those replies to the configured HT rate. Without it the
-    // replies go out at the driver default (legacy) rate, and a receiving
-    // ESP32-C6 generates no CSI for non-HT frames — leaving the central's CSI
-    // count stuck at 0 even though the frames are received.
-    if config.force_phy() {
+    // Forced PHY on the broadcast peer (HT20 only): skipped on C5 — see central/esp_now.rs.
+    // HT40 applies forced PHY to the learned central unicast peer inside `responder`.
+    #[cfg(not(feature = "esp32c5"))]
+    if config.force_phy() && config.secondary_channel().is_none() {
         crate::set_peer_espnow_phy(
             &BROADCAST_ADDRESS,
             *config.phy_rate(),
@@ -396,7 +472,7 @@ pub async fn run_esp_now_peripheral(
     #[cfg(feature = "statistics")]
     reset_rx_diagnostics();
 
-    responder(esp_now, config.channel, freq, io_tasks, config.peer_mac()).await;
+    responder(esp_now, config, freq, io_tasks).await;
 }
 
 /// Run a single sequential responder loop: receive/process first, then send.
@@ -404,11 +480,12 @@ pub async fn run_esp_now_peripheral(
 /// RX and TX intentionally do not run concurrently in this mode.
 async fn responder(
     esp_now: &mut EspNow<'static>,
-    channel: u8,
+    config: &EspNowConfig,
     frequency_hz: u64,
     io_tasks: IOTaskConfig,
-    peer_mac: Option<[u8; 6]>,
 ) {
+    let channel = config.channel;
+    let peer_mac = config.peer_mac();
     let send_magic = peer_mac.is_none();
     let shared = Shared {
         // Manual pairing skips the "lock onto first valid central" handshake:
@@ -431,18 +508,9 @@ async fn responder(
     // first reply can be sent without waiting to discover it.
     if let Some(mac) = peer_mac
         && io_tasks.tx_enabled
-        && esp_now
-            .add_peer(PeerInfo {
-                interface: esp_radio::esp_now::EspNowWifiInterface::Station,
-                peer_address: mac,
-                lmk: None,
-                channel: Some(channel),
-                encrypt: false,
-            })
-            .is_err()
+        && !register_central_peer(esp_now, channel, config, mac)
     {
-        #[cfg(feature = "statistics")]
-        RX_PEER_ADD_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+        // register_central_peer already counted the failure.
     }
 
     // Adaptive reply pacing: start from configured target and automatically
@@ -476,15 +544,12 @@ async fn responder(
             {
                 burst_budget = burst_budget.saturating_sub(1);
 
-                // Reply via broadcast rather than unicast to the learned central
-                // MAC. On ESP32-C6 an unassociated started-STA does not surface
-                // unicast ESP-NOW frames as CSI to the central, so a unicast
-                // reply leaves the central's CSI count stuck at 0. Broadcast RX
-                // is reliable on every chip, the frame still carries
-                // `PERIPHERAL_MAGIC_NUMBER` (auto) / the central's source-MAC
-                // filter still matches (manual), and the forced HT rate is
-                // applied to the broadcast peer (see `run_esp_now_peripheral`).
-                // Trade-off: broadcast frames are not MAC-acked — no retries.
+                // HT20 (e.g. C6 ch 11): reply via broadcast so an unassociated
+                // started-STA central surfaces CSI reliably. HT40 (e.g. C5 ch
+                // 149+153): unicast to the learned central MAC — broadcast
+                // forced PHY wedges the C5 dual-band path; per-peer HT40 applies
+                // only to that unicast peer (see `apply_central_peer_phy`).
+                let dest_mac = reply_destination(&shared, config);
 
                 // Auto mode: send the 4-byte magic prefix (empty beacon body).
                 // Manual mode: a single sentinel byte so the frame isn't empty.
@@ -508,7 +573,7 @@ async fn responder(
 
                 let mut send_succeeded = false;
                 if tx_fast_no_wait {
-                    match esp_now.send(&BROADCAST_ADDRESS, message) {
+                    match esp_now.send(&dest_mac, message) {
                         Ok(waiter) => {
                             // Max-throughput mode: queue packets as fast as the
                             // driver accepts them and avoid per-packet callback waits.
@@ -528,7 +593,7 @@ async fn responder(
                         }
                     }
                 } else {
-                    let send_result = match esp_now.send(&BROADCAST_ADDRESS, message) {
+                    let send_result = match esp_now.send(&dest_mac, message) {
                         Ok(waiter) => waiter.wait(),
                         Err(e) => Err(e),
                     };
@@ -611,7 +676,15 @@ async fn responder(
                     break;
                 };
 
-                ingest_control_packet(esp_now, channel, r, &shared, io_tasks.tx_enabled, peer_mac);
+                ingest_control_packet(
+                    esp_now,
+                    channel,
+                    config,
+                    r,
+                    &shared,
+                    io_tasks.tx_enabled,
+                    peer_mac,
+                );
                 rx_packets = rx_packets.saturating_add(1);
             }
 
@@ -638,14 +711,14 @@ async fn responder(
                     break;
                 }
                 Either::Second(r) => {
-                    ingest_control_packet(esp_now, channel, r, &shared, false, peer_mac);
+                    ingest_control_packet(esp_now, channel, config, r, &shared, false, peer_mac);
                     // Drain any frames that stacked up while we were processing.
                     // Bound the synchronous drain so a sustained inflow can't
                     // hold the executor here past the next loop iteration.
                     let mut drained: u16 = 0;
                     while drained < RX_BURST_MAX_RX_ONLY {
                         let Some(r) = crate::esp_now_pool::receive() else { break; };
-                        ingest_control_packet(esp_now, channel, r, &shared, false, peer_mac);
+                        ingest_control_packet(esp_now, channel, config, r, &shared, false, peer_mac);
                         drained = drained.saturating_add(1);
                     }
                 }

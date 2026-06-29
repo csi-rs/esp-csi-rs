@@ -32,71 +32,157 @@ use crate::log_ln;
 ///   discarded at the C layer with zero allocation (sniffers never consume
 ///   ESP-NOW data).
 pub(crate) fn takeover_esp_now_recv(is_sniffer: bool) {
-    crate::esp_now_pool::install();
+    install_static_espnow_recv();
     if is_sniffer {
-        unsafe extern "C" {
-            fn esp_now_unregister_recv_cb() -> i32;
-        }
-        unsafe {
-            let _ = esp_now_unregister_recv_cb();
-        }
+        suspend_esp_now_recv();
     }
 }
 
-/// Bring the radio up in **started STA mode** for the ESP-NOW HT40 path.
+/// Install this crate's static-pool ESP-NOW receive callback.
 ///
-/// ESP-NOW PHY configuration only takes effect on a started STA interface:
-/// esp-radio applies the ESP-NOW rate to `WIFI_IF_STA`
-/// (`esp_wifi_config_espnow_rate`) and gates `set_bandwidths` on STA/AP mode,
-/// and `esp_wifi_start()` runs *only* inside `set_config`. Without this the
-/// controller stays in `WIFI_MODE_NULL`, so `set_rate`/`set_bandwidths` are
-/// silent no-ops and frames go out legacy / 20 MHz regardless of
-/// `with_ht40()` + `set_rate()` (confirmed via the `bw_check` example).
+/// Call this immediately after `esp_radio::wifi::new()` in examples that may
+/// boot while another ESP-NOW node is already transmitting. `wifi::new()`
+/// constructs `EspNow` internally and briefly installs esp-radio's heap-backed
+/// receive queue; replacing it early keeps startup traffic out of that queue.
+/// On ESP32-C5 this also avoids Wi-Fi ISR work while the dual-band radio is
+/// still being reconfigured (a common source of interrupt watchdog timeouts).
+pub fn install_static_espnow_recv() {
+    crate::esp_now_pool::install();
+}
+
+/// Temporarily stop ESP-NOW receive dispatch at the C layer.
 ///
-/// We do not associate to an AP — an unassociated STA is all ESP-NOW needs
-/// (this mirrors the ESP-IDF reference, which runs ESP-NOW in `WIFI_MODE_STA`).
-/// Best-effort: on error we log and continue (the run still works, just at the
-/// default PHY). `set_config` restarts the radio, so the static-pool ESP-NOW
-/// receive callback is re-installed afterward.
-pub(crate) fn bring_up_espnow_sta(controller: &mut WifiController) {
+/// Dual-band bring-up (band switch, channel, bandwidth, STA restart) on
+/// ESP32-C5 must not deliver ESP-NOW frames into callbacks mid-transition.
+pub(crate) fn suspend_esp_now_recv() {
+    unsafe extern "C" {
+        fn esp_now_unregister_recv_cb() -> i32;
+    }
+    unsafe {
+        let _ = esp_now_unregister_recv_cb();
+    }
+}
+
+/// Run a Wi-Fi controller mutation with ESP-NOW recv suspended on C5.
+///
+/// On dual-band C5, recv callbacks firing during `set_protocols`,
+/// `set_config`, or `set_csi` can wedge the Wi-Fi ISR and trip the
+/// interrupt watchdog (`handle_interrupts` backtrace at boot).
+#[cfg(feature = "esp32c5")]
+pub(crate) fn with_espnow_recv_suspended<F: FnOnce()>(f: F) {
+    suspend_esp_now_recv();
+    f();
+    install_static_espnow_recv();
+}
+
+#[cfg(not(feature = "esp32c5"))]
+pub(crate) fn with_espnow_recv_suspended<F: FnOnce()>(f: F) {
+    f();
+}
+
+/// Bring the radio up in **started STA mode** for the ESP-NOW forced-PHY path.
+///
+/// ESP-NOW PHY configuration only takes effect on a started STA interface.
+/// Best-effort: on error we log and continue. `set_config` restarts the radio;
+/// reinstall the static recv callback afterward when `resume_recv` is true.
+pub(crate) fn bring_up_espnow_sta(controller: &mut WifiController, resume_recv: bool) {
     if controller
         .set_config(&Config::Station(StationConfig::default()))
         .is_err()
     {
-        log_ln!("ESP-NOW HT40: STA bring-up failed; PHY may stay legacy/20 MHz");
+        log_ln!("ESP-NOW: STA bring-up failed; PHY may stay legacy/20 MHz");
     }
-    // `set_config` stop/starts the radio; re-take the ESP-NOW receive dispatcher
-    // so frames keep landing in the BSS pool, not esp-radio's heap queue.
-    crate::esp_now_pool::install();
+    if resume_recv {
+        install_static_espnow_recv();
+    }
 }
 
-/// Put the radio on an HT40-capable channel (primary + secondary). This is
-/// necessary but **not sufficient** for HT40 ESP-NOW: the PPDU bandwidth/rate
-/// is set per-peer via [`set_peer_espnow_phy`], not by the interface bandwidth.
+/// HT40 ESP-NOW bring-up: on C5, switch from AP bootstrap to started STA
+/// (avoids `InterfaceMismatch` on Station-interface peers), then apply band,
+/// channel, and 40 MHz bandwidth.
+pub(crate) fn apply_espnow_ht40_mode(
+    controller: &mut WifiController,
+    primary: u8,
+    secondary: SecondaryChannel,
+) {
+    #[cfg(feature = "esp32c5")]
+    bring_up_espnow_sta(controller, false);
+    apply_espnow_ht40(controller, primary, secondary);
+}
+
+/// Select 2.4 / 5 GHz band from the primary channel (ESP32-C5 dual-band only).
+pub(crate) fn apply_espnow_band_for_channel(controller: &mut WifiController, primary: u8) {
+    #[cfg(feature = "esp32c5")]
+    {
+        use esp_radio::wifi::BandMode;
+        let band = if primary >= 36 {
+            BandMode::_5G
+        } else {
+            BandMode::_2_4G
+        };
+        if controller.set_band_mode(band).is_err() {
+            log_ln!("ESP-NOW: set_band_mode failed for ch {}", primary);
+        }
+    }
+    #[cfg(not(feature = "esp32c5"))]
+    {
+        let _ = (controller, primary);
+    }
+}
+
+/// Put the radio on an HT40-capable channel (primary + secondary). On C5 this
+/// also switches band, caps 5 GHz protocols to A/N (802.11ax breaks peer rate
+/// config), and sets interface bandwidth to 40 MHz before per-peer HT40 applies.
 pub(crate) fn apply_espnow_ht40(
     controller: &mut WifiController,
     primary: u8,
     secondary: SecondaryChannel,
 ) {
+    apply_espnow_band_for_channel(controller, primary);
+
+    #[cfg(feature = "esp32c5")]
+    {
+        use esp_radio::wifi::{Protocol, Protocols};
+        if primary >= 36 {
+            let protocols = Protocols::default().with_5(Protocol::A | Protocol::N);
+            if controller.set_protocols(protocols).is_err() {
+                log_ln!("HT40: set_protocols (A/N on 5G) failed");
+            }
+        }
+    }
+
     if controller.set_channel(primary, secondary).is_err() {
         log_ln!("HT40: set_channel failed");
+    }
+
+    #[cfg(feature = "esp32c5")]
+    {
+        use esp_radio::wifi::Bandwidth;
+        match controller.bandwidths() {
+            Ok(bw) => {
+                let bw = if primary >= 36 {
+                    bw.with_5(Bandwidth::_40MHz)
+                } else {
+                    bw.with_2_4(Bandwidth::_40MHz)
+                };
+                if let Err(e) = controller.set_bandwidths(bw) {
+                    log_ln!("HT40: set_bandwidths failed: {:?}", e);
+                }
+            }
+            Err(_) => log_ln!("HT40: read bandwidths failed"),
+        }
     }
 }
 
 // ESP-NOW per-peer TX rate config (ESP-IDF `esp_now_set_peer_rate_config`).
-// This is the ONLY way to force the ESP-NOW frame PHY (rate + HT bandwidth):
-// it's a per-peer property, not the interface bandwidth/rate (which esp-radio
-// sets via the deprecated `esp_wifi_config_espnow_rate`, a no-op on IDF v5.5).
-// esp-radio doesn't expose this, so we bind it directly (same pattern as the
-// pool's `esp_now_register_recv_cb`). `esp_now_rate_config_t == wifi_tx_rate_config_t`.
 #[repr(C)]
 struct WifiTxRateConfig {
-    phymode: u32, // wifi_phy_mode_t
-    rate: u32,    // wifi_phy_rate_t
+    phymode: u32,
+    rate: u32,
     ersu: bool,
     dcm: bool,
 }
-// wifi_phy_mode_t values (esp-wifi-sys).
+
 const WIFI_PHY_MODE_11B: u32 = 1;
 const WIFI_PHY_MODE_11G: u32 = 2;
 const WIFI_PHY_MODE_HT20: u32 = 4;
@@ -106,30 +192,21 @@ unsafe extern "C" {
     fn esp_now_set_peer_rate_config(peer_addr: *const u8, config: *mut WifiTxRateConfig) -> i32;
 }
 
-/// Map esp-radio's contiguous [`WifiPhyRate`] discriminant to the C
-/// `wifi_phy_rate_t` value. The C enum reserves `0x04`, so everything from
-/// `Rate2mS` (esp-radio 4) up is shifted by one; the two LoRa rates jump to
-/// 41/42. Without this fix-up, MCS rates would be off by one (e.g. esp-radio
-/// `RateMcs0Lgi` = 15 vs C `WIFI_PHY_RATE_MCS0_LGI` = 16).
 fn wifi_phy_rate_to_c(rate: WifiPhyRate) -> u32 {
     match rate {
         WifiPhyRate::RateLora250k => 41,
         WifiPhyRate::RateLora500k => 42,
         WifiPhyRate::RateMax => 43,
+        // `esp-radio::WifiPhyRate` is a contiguous Rust enum, but ESP-IDF's
+        // `wifi_phy_rate_t` has a gap at value 4 (there is no *_4M symbol).
+        // Shift all non-LoRa values >= 4 to preserve the C ABI mapping.
         other => {
             let idx = other as u32;
-            if idx < 4 {
-                idx
-            } else {
-                idx + 1
-            }
+            if idx < 4 { idx } else { idx + 1 }
         }
     }
 }
 
-/// Derive the ESP-NOW `phymode` from the rate and the HT40 secondary-channel
-/// choice. MCS rates (C 16–31) are HT → HT40 if a secondary channel is set,
-/// else HT20. Legacy DSSS rates (C 0–7) are 11b; legacy OFDM (8–15) is 11g.
 fn espnow_phymode(rate: WifiPhyRate, secondary: Option<SecondaryChannel>) -> u32 {
     let c = wifi_phy_rate_to_c(rate);
     if (16..=31).contains(&c) {
@@ -145,15 +222,7 @@ fn espnow_phymode(rate: WifiPhyRate, secondary: Option<SecondaryChannel>) -> u32
     }
 }
 
-/// Force a peer's ESP-NOW TX PHY to the configured `rate` and bandwidth
-/// (HT40 when `secondary` is set, else HT20/legacy per the rate). Must be
-/// called after `esp_wifi_start()`, `esp_now_init` (done in `wifi::new`), and
-/// the peer being added. Best-effort: a non-zero return is logged, not fatal.
-///
-/// The library applies this automatically for `EspNowConfig`-driven nodes; it's
-/// public so raw-ESP-NOW examples (e.g. the CPU-test TX) can match the same PHY
-/// after bringing the radio up in started STA mode (`Config::Station`) and
-/// setting an HT40 channel.
+/// Force a peer's ESP-NOW TX PHY to the configured `rate` and bandwidth.
 pub fn set_peer_espnow_phy(
     peer: &[u8; 6],
     rate: WifiPhyRate,
@@ -167,6 +236,22 @@ pub fn set_peer_espnow_phy(
     };
     let rc = unsafe { esp_now_set_peer_rate_config(peer.as_ptr(), &mut cfg) };
     if rc != 0 {
-        log_ln!("ESP-NOW: set_peer_rate_config rc={} (PHY may stay default)", rc);
+        log_ln!(
+            "ESP-NOW: set_peer_rate_config rc={} phymode={} rate={}",
+            rc,
+            cfg.phymode,
+            cfg.rate
+        );
     }
+}
+
+/// Apply per-peer ESP-NOW PHY with recv suspended during the driver call (C5-safe).
+pub fn apply_peer_espnow_phy(
+    peer: &[u8; 6],
+    rate: WifiPhyRate,
+    secondary: Option<SecondaryChannel>,
+) {
+    with_espnow_recv_suspended(|| {
+        set_peer_espnow_phy(peer, rate, secondary);
+    });
 }

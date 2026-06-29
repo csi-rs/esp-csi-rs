@@ -7,12 +7,14 @@
 #[cfg(feature = "statistics")]
 use embassy_time::Instant;
 #[cfg(feature = "statistics")]
-use portable_atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use portable_atomic::{AtomicU32, AtomicU64, Ordering};
+#[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
+use portable_atomic::AtomicBool;
 
 #[cfg(feature = "statistics")]
 use crate::logging::logging::reset_global_log_drops;
 
-#[cfg(feature = "statistics")]
+#[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
 pub(crate) const MAX_TRACKED_PEERS: usize = 16;
 
 /// Global statistics counters (enabled with the `statistics` feature).
@@ -43,24 +45,24 @@ pub(crate) static STATS: GlobalStats = GlobalStats {
 };
 
 // Signals run_process_csi_packet to clear PEER_SEQ_TRACKER on the next ISR entry.
-#[cfg(feature = "statistics")]
+#[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
 pub(crate) static RESET_SEQ_TRACKER: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "statistics")]
+#[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
 static SEQ_DROP_DETECTION_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn set_seq_drop_detection(enabled: bool) {
-    #[cfg(feature = "statistics")]
+    #[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
     {
         SEQ_DROP_DETECTION_ENABLED.store(enabled, Ordering::Relaxed);
     }
 
-    #[cfg(not(feature = "statistics"))]
+    #[cfg(not(all(feature = "statistics", not(feature = "esp32c5"))))]
     {
         let _ = enabled;
     }
 }
 
-#[cfg(feature = "statistics")]
+#[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
 pub(crate) fn seq_drop_detection_enabled() -> bool {
     SEQ_DROP_DETECTION_ENABLED.load(Ordering::Relaxed)
 }

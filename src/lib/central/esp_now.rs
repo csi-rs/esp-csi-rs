@@ -31,6 +31,7 @@ use crate::esp_now_pool::PoolFrame;
 #[cfg(any(feature = "statistics", feature = "cpu-test-tx"))]
 use portable_atomic::AtomicU64;
 
+use crate::espnow_phy::with_espnow_recv_suspended;
 use crate::{EspNowConfig, IOTaskConfig};
 
 const TX_BACKOFF_US: u64 = 200;
@@ -157,23 +158,73 @@ pub async fn run_esp_now_central(
     let mut control_sequence: u32 = 0;
     let peer_mac = config.peer_mac();
     let send_magic = peer_mac.is_none();
+    let tx_target = peer_mac.unwrap_or(BROADCAST_ADDRESS);
     // Configure. In HT40 mode the channel (+secondary) was already set on the
     // controller before this task ran; calling esp_now.set_channel here would
     // reset the secondary to HT20, so skip it.
     if config.secondary_channel().is_none() {
-        esp_now.set_channel(config.channel).unwrap();
+        with_espnow_recv_suspended(|| {
+            esp_now.set_channel(config.channel).unwrap();
+        });
     }
-    // Forced PHY: set the broadcast peer's ESP-NOW TX rate/bandwidth. The
-    // broadcast peer already exists (esp-radio adds it; we broadcast to it),
-    // and esp_wifi_start has run, so the per-peer rate config applies.
-    if config.force_phy() {
+    // Forced PHY for central broadcast is safe for HT20/legacy on single-band
+    // chips, but on C5 `esp_now_set_peer_rate_config` on the broadcast peer
+    // wedges the dual-band Wi-Fi ISR when the TX loop starts (IWDT /
+    // handle_interrupts). HT40 broadcast is also skipped — see below.
+    #[cfg(not(feature = "esp32c5"))]
+    if config.force_phy() && config.secondary_channel().is_none() {
         crate::set_peer_espnow_phy(
-            &BROADCAST_ADDRESS,
+            &tx_target,
             *config.phy_rate(),
             config.secondary_channel(),
         );
     }
+    // Manual pairing (unicast): ensure the configured peer exists before TX
+    // starts, otherwise `esp_now.send` will fail with NotFound and TX stalls.
+    if let Some(mac) = peer_mac
+        && !esp_now.peer_exists(&mac)
+    {
+        let add_res = esp_now.add_peer(PeerInfo {
+            interface: esp_radio::esp_now::EspNowWifiInterface::Station,
+            peer_address: mac,
+            lmk: None,
+            channel: Some(config.channel),
+            encrypt: false,
+        });
+        if add_res.is_err() {
+            log_ln!(
+                "ESP-NOW central: failed to add manual peer {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            );
+        }
+    }
+    // C5 manual-unicast path: explicitly apply per-peer PHY (rate + HT20/HT40)
+    // once the peer exists. This keeps broadcast safety guards in place while
+    // enabling forced PHY on the targeted unicast test path.
+    #[cfg(feature = "esp32c5")]
+    if let Some(mac) = peer_mac
+        && config.force_phy()
+        && esp_now.peer_exists(&mac)
+    {
+        crate::apply_peer_espnow_phy(&mac, *config.phy_rate(), config.secondary_channel());
+        log_ln!(
+            "ESP-NOW central: applied peer PHY to {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} rate={:?} secondary={:?}",
+            mac[0],
+            mac[1],
+            mac[2],
+            mac[3],
+            mac[4],
+            mac[5],
+            config.phy_rate(),
+            config.secondary_channel(),
+        );
+    }
     log_ln!("esp-now version {}", esp_now.version().unwrap());
+
+    // Yield once before the first TX burst so other embassy tasks (e.g. the
+    // stats printer in examples) get scheduled on C5.
+    #[cfg(feature = "esp32c5")]
+    Timer::after_millis(50).await;
 
     // The static-pool `rcv_cb` is installed in `lib::run` before `set_csi`,
     // so by the time we reach this function ESP-NOW receives are already
@@ -196,7 +247,12 @@ pub async fn run_esp_now_central(
         hz_to_interval_us(freq)
     };
     let adaptive_pacing_enabled = io_tasks.rx_enabled && io_tasks.tx_enabled;
-    let tx_fast_no_wait = io_tasks.tx_enabled && !io_tasks.rx_enabled;
+    // TX-only fast mode (queue-and-forget) is fine for broadcast sweeps, but
+    // with a fixed unicast peer it can saturate the driver queue (~32 packets)
+    // and stick in perpetual OutOfMemory when callbacks lag/peer is absent.
+    // For manual-peer unicast, use blocking send/wait so queue pressure tracks
+    // actual link progress.
+    let tx_fast_no_wait = io_tasks.tx_enabled && !io_tasks.rx_enabled && peer_mac.is_none();
     let mut consecutive_tx_ok: u16 = 0;
     let mut next_tx_us = Instant::now().as_micros().saturating_add(tx_interval_us);
     // CPU-test TX pads the control frame up to the cell payload, so the buffer
@@ -276,7 +332,7 @@ pub async fn run_esp_now_central(
                 let mut send_succeeded = false;
                 let mut packet_queued = false;
                 if tx_fast_no_wait {
-                    match esp_now.send(&BROADCAST_ADDRESS, message) {
+                    match esp_now.send(&tx_target, message) {
                         Ok(waiter) => {
                             // Max-throughput mode: queue packets as fast as the
                             // driver accepts them and avoid per-packet callback waits.
@@ -303,7 +359,7 @@ pub async fn run_esp_now_central(
                         }
                     }
                 } else {
-                    let send_result = match esp_now.send(&BROADCAST_ADDRESS, message) {
+                    let send_result = match esp_now.send(&tx_target, message) {
                         Ok(waiter) => {
                             packet_queued = true;
                             #[cfg(feature = "statistics")]

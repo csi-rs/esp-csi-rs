@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-rs"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2024"
 authors = ["theembeddedrustacean", "stacks-of-data", "Abdullah-Alawad", "modatt"]
 description = "ESP CSI Driver for Rust"
@@ -23,7 +23,16 @@ default = ["no-std", "println", "auto"]
 no-std = []
 ## Enable logging via `println!()`.
 println = ["dep:log", "esp-backtrace/println"]
-## Automatically select the best available backend for the target.
+## Automatically select the logging backend at runtime.
+##
+## Runtime behavior (when `async-print` is NOT enabled):
+## - USB SOF detected (USB-Serial-JTAG/JTAG path) -> async logging backend
+## - no USB SOF (UART path) -> sync inline logging
+##
+## Precedence:
+## - `async-print` overrides `auto` and forces async logging.
+## - `jtag-serial` / `uart` force transport selection; `auto` is for runtime
+##   transport selection.
 auto = ["esp-println/auto"]
 ## Enable logging via defmt.
 defmt = [
@@ -34,10 +43,11 @@ defmt = [
     "esp-backtrace/defmt",
     "embassy-executor/defmt",
 ]
-## Force the JTAG backend for logging. Requires `async-print` (non-blocking logging),
-## which is enabled automatically by this feature — the JTAG backend can block under
-## load, so async logging is mandatory here.
-jtag-serial = ["esp-println/jtag-serial", "async-print"]
+## Force the JTAG backend for logging.
+##
+## With `auto` (and without explicit `async-print`), runtime selection enables
+## async drain when USB SOF indicates JTAG/USB-Serial-JTAG is active.
+jtag-serial = ["esp-println/jtag-serial"]
 ## Force the UART backend for logging (not recommended, much slower than JTAG backend).
 ## Do NOT combine with `async-print`: UART is already blocking and slow, and the async
 ## logging path provides no benefit while adding overhead and risk of unexpected behavior.
@@ -46,10 +56,11 @@ uart = ["esp-println/uart"]
 no-print = ["esp-println/no-op"]
 ## Enable collection of runtime statistics (e.g., latency, dropped packets).
 statistics = []
-## Non-blocking async logging. This is an unstable feature and may cause unexpected behavior. Use with caution.
-## Required by (and enabled automatically with) `jtag-serial`. Should NOT be combined with `uart`,
-## where it adds overhead without benefit.
+## Non-blocking async logging override.
+## When enabled explicitly, async logging is forced regardless of runtime backend detection.
 async-print = []
+## Use an external defmt global logger instead of registering one from this crate.
+external-defmt-logger = []
 ## Enable esp-rtos scheduler tracing so the CPU-utilization DUT
 ## (`esp_now_peripheral_exper_cpu`) can measure absolute idle *time* from
 ## `system_idle`/`task_exec_begin` switch hooks (spec v2 §2.2). Only the CPU

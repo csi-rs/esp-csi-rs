@@ -6,7 +6,7 @@ use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{config::CsiConfig, logging::logging::init_logger, CSINode, CollectionMode};
 use esp_csi_rs::{
-    CSINodeClient, CSINodeHardware, WifiSnifferConfig, log_ln, set_csi_logging_enabled,
+    CSINodeHardware, WifiSnifferConfig, log_ln, set_csi_logging_enabled,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -17,6 +17,7 @@ extern crate alloc;
 
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
     static_cell::StaticCell::new();
+const SNIFFER_CHANNEL: u8 = 11;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -36,7 +37,7 @@ async fn main(spawner: Spawner) -> ! {
     init_logger(spawner, LogMode::Text);
     set_csi_logging_enabled(true);
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98440);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 65000);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -45,18 +46,21 @@ async fn main(spawner: Spawner) -> ! {
 
     log_ln!("Embassy initialized!");
     log_ln!("Starting Wi-Fi Sniffer Peripheral Node (Exper)");
+    log_ln!(
+        "Sniffer config: mode=promiscuous, channel={}, protocol_mask=default (no forced N-only), csi_logging=enabled",
+        SNIFFER_CHANNEL
+    );
 
-    let config_radio = esp_radio::wifi::ControllerConfig::default()
-        .with_static_rx_buf_num(25)
-        .with_dynamic_rx_buf_num(128)
-        .with_rx_queue_size(32);
+    let config_radio = esp_radio::wifi::ControllerConfig::default();
+        // .with_static_rx_buf_num(25)
+        // .with_dynamic_rx_buf_num(128)
+        // .with_rx_queue_size(32);
     let (wifi_controller, mut interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    let mut node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
 
     // Match C++ passive sniffer's CSI scope (SHOULD_COLLECT_ONLY_LLTF=y):
@@ -73,14 +77,16 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut node = CSINode::new(
         esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(
-            WifiSnifferConfig::default().with_channel(1),
+            WifiSnifferConfig::default().with_channel(SNIFFER_CHANNEL),
         )),
         CollectionMode::Collector,
         Some(csi_config),
         Some(10000),
         csi_hardware,
     );
-    node.set_protocol(esp_radio::wifi::Protocol::N);
+    // Do not force N-only here: on C5 the ESP-NOW central broadcast PHY is not
+    // forced (by design), so frames can be legacy/11g. Keeping default
+    // protocols avoids filtering those out in sniffer mode.
     node.run().await;
 
     loop {

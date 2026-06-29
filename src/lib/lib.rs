@@ -251,7 +251,7 @@ pub use crate::csi::delivery::{
     set_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled, set_csi_raw_callback,
     CSINodeClient, CsiDeliveryMode,
 };
-pub use crate::espnow_phy::set_peer_espnow_phy;
+pub use crate::espnow_phy::{apply_peer_espnow_phy, install_static_espnow_recv, set_peer_espnow_phy};
 pub use crate::node::{
     CSINode, CSINodeHardware, CentralOpMode, CollectionMode, EspNowConfig, IOTaskConfig, Node,
     PeripheralOpMode, WifiSnifferConfig, WifiStationConfig,

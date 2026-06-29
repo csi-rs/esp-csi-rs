@@ -7,7 +7,7 @@
 //! wire up Wi-Fi, CSI, and the mode-specific tasks. It also holds the shared
 //! stop signal and the per-run lifecycle helpers.
 
-#[cfg(feature = "async-print")]
+#[cfg(any(feature = "async-print", feature = "auto"))]
 use embassy_time::with_timeout;
 
 use embassy_futures::join::{join, join3};
@@ -30,32 +30,56 @@ use crate::config::CsiConfig as CsiConfiguration;
 use crate::peripheral::esp_now::run_esp_now_peripheral;
 
 use crate::csi::delivery::{build_csi_config, run_process_csi_packet, set_csi, CSINodeClient, IS_COLLECTOR};
-use crate::espnow_phy::{apply_espnow_ht40, bring_up_espnow_sta, takeover_esp_now_recv};
+use crate::espnow_phy::{
+    apply_espnow_band_for_channel, apply_espnow_ht40_mode, install_static_espnow_recv, takeover_esp_now_recv,
+    with_espnow_recv_suspended,
+};
+use crate::espnow_phy::bring_up_espnow_sta;
 use crate::log_ln;
 use crate::stats::set_seq_drop_detection;
 
 // Signals
 pub(crate) static STOP_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-// Drives the per-`run_duration` lifecycle. In async-print mode this is the
-// loop that pulls packets out of `CSI_PACKET` and forwards them to the
-// logger task — without it, the channel would fill and packets would drop.
-// In sync mode the WiFi callback writes inline, so we just wait for the
-// duration and then signal stop.
-#[cfg(feature = "async-print")]
-async fn csi_data_collection(client: &mut CSINodeClient, duration: u64) {
-    with_timeout(Duration::from_secs(duration), async {
-        loop {
-            client.print_csi_w_metadata().await;
-        }
-    })
-    .await
-    .unwrap_err();
-    client.send_stop().await;
+/// Per-mutation radio-quiesce delay on C5 dual-band bring-up.
+///
+/// The C5 Wi-Fi ISR can wedge if a MAC interrupt fires mid-reconfiguration
+/// (`set_protocols` / `set_config` STA restart / `set_csi` / `set_channel`),
+/// tripping the interrupt watchdog (`handle_interrupts` backtrace at boot) or
+/// hard-freezing before any task runs. `with_espnow_recv_suspended` already
+/// shrinks that window; inserting a short settle *between* the mutations lets
+/// the MAC drain any pending interrupt before the next driver call, shrinking it
+/// further. This is a probabilistic mitigation, not a guarantee — the radio
+/// restart still races the MAC IRQ — so keeping no ESP-NOW traffic on air during
+/// a node's bring-up remains the most effective measure.
+#[cfg(feature = "esp32c5")]
+const C5_RADIO_SETTLE_MS: u64 = 60;
+
+/// Await a brief radio-settle delay on C5; no-op on every other chip.
+/// See [`C5_RADIO_SETTLE_MS`].
+async fn c5_radio_settle() {
+    #[cfg(feature = "esp32c5")]
+    Timer::after(Duration::from_millis(C5_RADIO_SETTLE_MS)).await;
 }
 
-#[cfg(not(feature = "async-print"))]
 async fn csi_data_collection(client: &mut CSINodeClient, duration: u64) {
+    #[cfg(any(feature = "async-print", feature = "auto"))]
+    if crate::logging::logging::is_async_logging_active() {
+        with_timeout(Duration::from_secs(duration), async {
+            loop {
+                client.print_csi_w_metadata().await;
+            }
+        })
+        .await
+        .unwrap_err();
+        client.send_stop().await;
+        return;
+    }
+
+    #[cfg(not(any(feature = "async-print", feature = "auto")))]
+    {
+        let _ = client;
+    }
     Timer::after(Duration::from_secs(duration)).await;
     client.send_stop().await;
 }
@@ -539,16 +563,62 @@ impl<'a> CSINode<'a> {
             &self.kind,
             Node::Peripheral(PeripheralOpMode::WifiSniffer(_))
         ));
+        // Let the freshly-constructed radio/ESP-NOW state settle before the
+        // first C5 reconfiguration mutation (no-op off C5).
+        c5_radio_settle().await;
 
-        // A forced ESP-NOW PHY (rate/bandwidth via per-peer config) needs the
-        // radio in started STA mode (see `bring_up_espnow_sta`). Do it before
-        // `set_protocols`/`set_csi` so they apply on the started STA interface.
+        let espnow_ht40 = matches!(
+            &self.kind,
+            Node::Peripheral(PeripheralOpMode::EspNow(c)) | Node::Central(CentralOpMode::EspNow(c))
+                if c.secondary_channel().is_some()
+        );
+
+        // Apply protocol before STA bring-up / CSI — on C5, recv must stay
+        // suspended across every controller mutation to avoid ISR WDT trips.
+        if let Some(protocol) = self.protocol.take() {
+            let old_protocol = reconstruct_protocol(&protocol);
+            let mut protocols = Protocols::default().with_2_4(EnumSet::only(protocol));
+            // ESP-NOW peer rate config fails / misbehaves with 802.11ax enabled on 5G.
+            #[cfg(feature = "esp32c5")]
+            if matches!(
+                &self.kind,
+                Node::Peripheral(PeripheralOpMode::EspNow(_))
+                    | Node::Central(CentralOpMode::EspNow(_))
+            ) {
+                protocols = protocols.with_5(Protocol::A | Protocol::N);
+            }
+            with_espnow_recv_suspended(|| {
+                controller.set_protocols(protocols).unwrap();
+            });
+            self.protocol = Some(old_protocol);
+            c5_radio_settle().await;
+        }
+
+        // Started STA mode is required for ESP-NOW CSI capture (RX path) and for
+        // forced-PHY / manual-unicast TX. On C5 dual-band, skip STA for TX-only
+        // broadcast (no peer_mac, no RX) — restarting STA there can wedge the
+        // Wi-Fi ISR when the TX loop starts immediately afterward.
         if matches!(
             &self.kind,
             Node::Peripheral(PeripheralOpMode::EspNow(c)) | Node::Central(CentralOpMode::EspNow(c))
-                if c.force_phy()
+                if self.io_tasks.rx_enabled
+                    || {
+                        #[cfg(not(feature = "esp32c5"))]
+                        {
+                            c.force_phy()
+                        }
+                        #[cfg(feature = "esp32c5")]
+                        {
+                            c.peer_mac().is_some()
+                        }
+                    }
         ) {
-            bring_up_espnow_sta(controller);
+            with_espnow_recv_suspended(|| {
+                bring_up_espnow_sta(controller, false);
+            });
+            // The STA restart is the riskiest C5 op — settle before the next
+            // mutation (set_csi) so a post-restart MAC interrupt can drain.
+            c5_radio_settle().await;
         }
 
         // Tasks Necessary for Central Station & Sniffer
@@ -574,13 +644,7 @@ impl<'a> CSINode<'a> {
             }
         };
 
-        // Apply Protocol if specified
-        if let Some(protocol) = self.protocol.take() {
-            let old_protocol = reconstruct_protocol(&protocol);
-            let protocols = Protocols::default().with_2_4(EnumSet::only(protocol));
-            controller.set_protocols(protocols).unwrap();
-            self.protocol = Some(old_protocol);
-        }
+        // Apply Protocol if specified — handled above (before STA bring-up).
 
         log_ln!("Wi-Fi Controller Started");
         let is_collector = self.collection_mode == CollectionMode::Collector;
@@ -605,8 +669,13 @@ impl<'a> CSINode<'a> {
             &self.kind,
             Node::Peripheral(PeripheralOpMode::WifiSniffer(_))
         );
-        if self.io_tasks.rx_enabled && !is_sniffer {
-            set_csi(controller, config.clone());
+        if self.io_tasks.rx_enabled && !is_sniffer && !espnow_ht40 {
+            with_espnow_recv_suspended(|| {
+                set_csi(controller, config.clone());
+            });
+            // Settle after enabling CSI before the mode task issues its first
+            // set_channel / TX so the run loop doesn't start into a pending IRQ.
+            c5_radio_settle().await;
         }
         let rx_enabled = self.io_tasks.rx_enabled;
         // Immutable borrow of a *different* `interfaces` field than the ESP-NOW
@@ -620,13 +689,36 @@ impl<'a> CSINode<'a> {
             Node::Peripheral(op_mode) => match op_mode {
                 PeripheralOpMode::EspNow(esp_now_config) => {
                     // Initialize as Peripheral node with EspNowConfig
+                    // Non-HT40 path on dual-band C5: select band from primary
+                    // channel as well, so a prior 5 GHz app doesn't leave this
+                    // run pinned to 5 GHz when channel is 2.4 GHz (e.g. ch 11).
+                    #[cfg(feature = "esp32c5")]
+                    if esp_now_config.secondary_channel().is_none() {
+                        with_espnow_recv_suspended(|| {
+                            apply_espnow_band_for_channel(controller, esp_now_config.channel());
+                        });
+                    }
                     // HT40: set the secondary channel before the run loop (which
                     // then skips its own `esp_now.set_channel`). The TX rate/PHY
                     // is forced per-peer inside the run loops (see
                     // `set_peer_espnow_phy`); `esp_now.set_rate` is unused — it
                     // routes to the deprecated `esp_wifi_config_espnow_rate`.
                     if let Some(secondary) = esp_now_config.secondary_channel() {
-                        apply_espnow_ht40(controller, esp_now_config.channel(), secondary);
+                        with_espnow_recv_suspended(|| {
+                            apply_espnow_ht40_mode(
+                                controller,
+                                esp_now_config.channel(),
+                                secondary,
+                            );
+                        });
+                        install_static_espnow_recv();
+                        c5_radio_settle().await;
+                        if rx_enabled {
+                            with_espnow_recv_suspended(|| {
+                                set_csi(controller, config.clone());
+                            });
+                            c5_radio_settle().await;
+                        }
                     }
 
                     let main_task = run_esp_now_peripheral(
@@ -682,9 +774,32 @@ impl<'a> CSINode<'a> {
             Node::Central(op_mode) => match op_mode {
                 CentralOpMode::EspNow(esp_now_config) => {
                     // Initialize as Central node with EspNowConfig.
+                    // Non-HT40 path on dual-band C5: select band from primary
+                    // channel as well, so a prior 5 GHz app doesn't leave this
+                    // run pinned to 5 GHz when channel is 2.4 GHz (e.g. ch 11).
+                    #[cfg(feature = "esp32c5")]
+                    if esp_now_config.secondary_channel().is_none() {
+                        with_espnow_recv_suspended(|| {
+                            apply_espnow_band_for_channel(controller, esp_now_config.channel());
+                        });
+                    }
                     // HT40 handling mirrors the peripheral ESP-NOW arm above.
                     if let Some(secondary) = esp_now_config.secondary_channel() {
-                        apply_espnow_ht40(controller, esp_now_config.channel(), secondary);
+                        with_espnow_recv_suspended(|| {
+                            apply_espnow_ht40_mode(
+                                controller,
+                                esp_now_config.channel(),
+                                secondary,
+                            );
+                        });
+                        install_static_espnow_recv();
+                        c5_radio_settle().await;
+                        if rx_enabled {
+                            with_espnow_recv_suspended(|| {
+                                set_csi(controller, config.clone());
+                            });
+                            c5_radio_settle().await;
+                        }
                     }
 
                     let main_task = run_esp_now_central(

@@ -15,8 +15,6 @@ use embassy_time::Timer;
 #[cfg(feature = "statistics")]
 use embassy_time::Instant;
 use heapless::Vec;
-#[cfg(feature = "statistics")]
-use heapless::LinearMap;
 use portable_atomic::{AtomicBool, Ordering};
 
 use esp_radio::wifi::csi::CsiConfig;
@@ -26,7 +24,11 @@ use crate::config::CsiConfig as CsiConfiguration;
 use super::{CSIDataPacket, RxCSIFmt};
 use crate::STOP_SIGNAL;
 #[cfg(feature = "statistics")]
-use crate::stats::{seq_drop_detection_enabled, MAX_TRACKED_PEERS, RESET_SEQ_TRACKER, STATS};
+use crate::stats::STATS;
+#[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
+use crate::stats::{seq_drop_detection_enabled, MAX_TRACKED_PEERS, RESET_SEQ_TRACKER};
+#[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
+use heapless::LinearMap;
 
 /// Lock-free 32-slot MPMC ring used by the WiFi callback to deliver
 /// captured `CSIDataPacket`s to user code via
@@ -531,7 +533,7 @@ fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
         csi_data,
     };
 
-    #[cfg(feature = "statistics")]
+    #[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
     #[allow(static_mut_refs)] // single writer (WiFi callback) by construction
     {
         if seq_drop_detection_enabled() {
@@ -639,6 +641,7 @@ pub async fn run_process_csi_packet() {
                     last_rate_update = Instant::now();
                     last_rx_count = STATS.rx_count.load(Ordering::Relaxed);
                     last_tx_count = STATS.tx_count.load(Ordering::Relaxed);
+                    #[cfg(not(feature = "esp32c5"))]
                     RESET_SEQ_TRACKER.store(true, Ordering::Relaxed);
                 }
             }

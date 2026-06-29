@@ -29,7 +29,14 @@ With exception to the ESP32, `esp-csi-rs` leverages the `USB-JTAG-SERIAL` periph
 `esp-csi-rs` reduces device-to-host transfer overhead by supporting both serialized output and `defmt`. The defmt frames are emitted directly over USB-Serial-JTAG via `esp-println`'s `defmt-espflash` backend — `espflash --monitor --log-format defmt` decodes them inline. `defmt` is a highly efficient logging framework introduced by Ferrous Systems that targets resource-constrained devices. More detail about `defmt` can be found [here](https://defmt.ferrous-systems.com/).
 
 ### ✅ Async Logging
-By enabling the optional async-print feature, the crate delegates packet serialization and output to an asynchronous driver. This ensures that heavy I/O operations won't block the async executor. Keeping logging non-blocking is critical for maintaining higher throughput and preventing dropped CSI packets.
+The crate supports both sync and async logging paths:
+
+- `async-print` **forces async logging** (override mode).
+- With `auto` (and without `async-print`), runtime backend selection applies:
+  - USB-Serial-JTAG detected -> async logging
+  - UART path -> sync logging
+
+This keeps JTAG throughput benefits while preserving UART's low-overhead sync path.
 
 ### ✅ Traffic Generation
 When setting up a CSI collection system, dummy traffic on the network is needed to exchange packets that encapsulate the CSI data. `esp-csi-rs` allows you to control the intervals at which traffic is generated.
@@ -127,6 +134,107 @@ The repository contains an `examples/` folder with configurations for each suppo
 Replace `esp32c3` with any of: `esp32`, `esp32c3`, `esp32c5`, `esp32c6`, `esp32s3`. The `-defmt` aliases inject `--features=defmt`, override the espflash runner with `--log-format defmt`, and `build.rs` adds the `-Tdefmt.x` linker script automatically — no manual config edits required to switch between logging backends.
 
 Replace `<name>` with the file name of any example, e.g. `sniffer_wifi`, `esp_now_central`, `wifi_station`.
+
+## HT40 CSI Collection (ESP32-C5 / C6)
+
+Wide-bandwidth (40 MHz) CSI gives ~2× the subcarriers of HT20 — typically
+**~117–128** subcarriers (`csi_data_len / 2`) versus **~56** for HT20 HT-LTF or
+**~53** for legacy 20 MHz L-LTF. This section covers how to collect it.
+
+### Key concept: bandwidth is a *per-peer PHY property*
+
+For ESP-NOW, the on-air bandwidth/rate of a frame is set **per peer**
+(`esp_now_set_peer_rate_config`), not by the interface bandwidth. So HT40 only
+engages when a PHY rate is **forced** on the peer the frame is sent to. Enable it
+on the config:
+
+```rust
+let espnow_cfg = EspNowConfig::default()
+    .with_channel(CHANNEL)
+    .with_phy_rate(WifiPhyRate::RateMcs7Lgi) // forced OFDM HT rate (carries HT-LTF)
+    .with_ht40(SecondaryChannel::Above);     // 40 MHz; implies force_phy
+// node.set_protocol(Protocol::N); node.set_rate(WifiPhyRate::RateMcs7Lgi);
+```
+
+`with_ht40` implies `force_phy`. CSI is derived from OFDM training fields, so the
+rate **must** be OFDM (an `RateMcsN*` HT rate for HT-LTF, or a legacy-OFDM
+6–54 Mbps rate for L-LTF). An 802.11b DSSS rate (`Rate1mL`, `Rate11mL`, …) carries
+no training fields and produces **no CSI at all**.
+
+### Topology: Collector + Listener with unicast replies
+
+The proven setup is **central = `CollectionMode::Collector`**, **peripheral =
+`CollectionMode::Listener`** with both RX and TX enabled
+(`IOTaskConfig::new(true, true)`):
+
+1. The central broadcasts control frames (auto-pairing, no hardcoded MACs).
+2. The peripheral receives them, learns the central's MAC, and sends **unicast**
+   replies back — applying the forced MCS/HT40 PHY to that learned peer.
+3. The central captures wide CSI from those unicast replies.
+
+> **Why unicast (especially on C5):** a per-peer HT40 rate config only applies to
+> a *unicast* peer, never the broadcast peer. On ESP32-C5,
+> `esp_now_set_peer_rate_config` on the broadcast address wedges the dual-band
+> Wi-Fi ISR, so broadcast PHY forcing is skipped there entirely. The peripheral
+> therefore unicasts its forced-PHY replies (HT40 always; HT20 too when a PHY rate
+> is forced on C5). The central's discovery broadcasts stay at the driver default
+> so a peer can boot safely while the central is already running.
+
+### Channel / secondary selection
+
+`with_ht40` takes the HT40 **secondary** channel offset. Pass the IEEE
+**primary** channel to `with_channel` (not the wide-channel center label):
+
+| Band | Primary | Secondary | Pair |
+|---|---|---|---|
+| 5 GHz (C5) | `149` | `SecondaryChannel::Above` | 149 + 153 |
+| 2.4 GHz | e.g. `6` | `Above` / `Below` | 6 + 10 / 6 + 2 |
+
+### Per-chip notes
+
+- **ESP32-C5 (dual-band):** validated on **5 GHz channel 149 + 153 HT40**. This
+  is the most reliable HT40 path.
+- **ESP32-C6 (2.4 GHz only):** HT40 on 2.4 GHz **channel 11 did not bring up the
+  central's CSI** in testing, so the C5/C6 examples fall back to **HT20** on C6.
+  Other 2.4 GHz HT40 channel pairs may work — verify on-air.
+- **C5 boot stability:** dual-band radio bring-up can intermittently wedge the
+  Wi-Fi ISR (`handle_interrupts` watchdog reset, or a silent freeze). The library
+  inserts short radio-settle delays between C5 reconfiguration steps to reduce
+  this, but the most effective measure is to **keep ESP-NOW traffic off the air
+  during a node's bring-up** — power the collector up first, then release the peer.
+
+### Filter out legacy / ACK CSI
+
+With the default `CsiConfig`, the radio also reports legacy and control-path CSI
+(including ACKs), which in a collector setup can dominate the stats and look
+"stuck at ~53 subcarriers" even though HT40 is configured (symptoms: `Subcarriers`
+stays ~53, `LastRate` stays legacy, CSI count tracks the control TX rate). For
+HT40-focused collection, use an HT40-only CSI filter:
+
+```rust
+let csi_cfg = CsiConfig {
+    acquire_csi_legacy: 0,
+    acquire_csi_ht20: 0,
+    acquire_csi_ht40: 1,
+    dump_ack_en: 0,
+    ..CsiConfig::default()
+};
+```
+
+### Verify HT40 actually engaged
+
+Check the **central's** captured CSI: a subcarrier count `≥ 100` (commonly ~117)
+confirms HT40; ~53/~56 means it fell back to legacy/HT20. The
+`esp_now_central_bw_tx` experiment prints a live subcarrier-count histogram for
+exactly this check.
+
+### Example matrix
+
+| Example pair | Chip(s) | Band / channel | Bandwidth |
+|---|---|---|---|
+| `esp_now_central_ht40` / `esp_now_peripheral_ht40` | C5 / C6 / C3 / S3 / ESP32 | C5: 5 GHz 149+153 · others: 2.4 GHz 6+10 | HT40 |
+
+See `examples/esp_now_central_ht40.rs` for a full working configuration.
 
 ## Documentation
 

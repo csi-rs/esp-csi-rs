@@ -31,6 +31,9 @@ pub struct CsiConfig {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg(feature = "esp32c6")]
 pub struct CsiConfig {
+    /// Note: the default C6 config enables legacy/HT20/HT40 acquisition and ACK
+    /// dump. For HT40-only collection, set `acquire_csi_legacy = 0`,
+    /// `acquire_csi_ht20 = 0`, and `dump_ack_en = 0`.
     /// Enable to acquire CSI.
     pub enable: u32,
     /// Enable to acquire L-LTF when receiving a 11g PPDU.
@@ -63,6 +66,9 @@ pub struct CsiConfig {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg(feature = "esp32c5")]
 pub struct CsiConfig {
+    /// Note: the default C5 config enables legacy/HT20/HT40 acquisition and ACK
+    /// dump. For HT40-only collection, set `acquire_csi_legacy = 0`,
+    /// `acquire_csi_ht20 = 0`, and `dump_ack_en = 0`.
     /// Enable to acquire CSI.
     pub enable: u32,
     /// Enable to acquire L-LTF.
@@ -132,6 +138,7 @@ impl Default for CsiConfig {
             acquire_csi_beamformed: 1,
             acquire_csi_he_stbc: 2,
             val_scale_cfg: 2,
+            // Enabled by default in IDF profile; disable for HT40-only capture.
             dump_ack_en: 1,
             reserved: 19,
         }
@@ -152,6 +159,7 @@ impl Default for CsiConfig {
             acquire_csi_beamformed: 1,
             acquire_csi_he_stbc: 2,
             val_scale_cfg: 2,
+            // Enabled by default in IDF profile; disable for HT40-only capture.
             dump_ack_en: 1,
             reserved: 0,
         }
