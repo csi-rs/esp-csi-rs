@@ -434,7 +434,7 @@ pub(crate) async fn run_icmp_flood(
 
     let dst_oct = dst.octets();
     log_ln!(
-        "{=str}: ICMP flood {} Hz → {}.{}.{}.{} (deep TX queue, burst={})",
+        "{}: ICMP flood {} Hz → {}.{}.{}.{} (deep TX queue, burst={})",
         label,
         target_hz,
         dst_oct[0],
@@ -492,7 +492,7 @@ pub(crate) async fn run_icmp_flood(
                     dst = new_ip.gateway_address;
                     let dst_oct = dst.octets();
                     log_ln!(
-                        "{=str}: updated ICMP target gateway {}.{}.{}.{}",
+                        "{}: updated ICMP target gateway {}.{}.{}.{}",
                         label,
                         dst_oct[0],
                         dst_oct[1],
