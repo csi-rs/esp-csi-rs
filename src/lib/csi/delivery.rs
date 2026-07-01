@@ -472,7 +472,7 @@ fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
     let timestamp_us = info.timestamp().duration_since_epoch().as_micros() as u32;
 
     #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
-    let csi_packet = CSIDataPacket {
+    let mut csi_packet = CSIDataPacket {
         sequence_number: info.rx_sequence(),
         data_format: RxCSIFmt::Undefined,
         date_time: None,
@@ -501,7 +501,7 @@ fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
     };
 
     #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
-    let csi_packet = CSIDataPacket {
+    let mut csi_packet = CSIDataPacket {
         mac: mac_arr,
         rssi: rssi as i32,
         timestamp: timestamp_us,
@@ -532,6 +532,10 @@ fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
         csi_data_len: csi_buf_len,
         csi_data,
     };
+
+    // Classify the frame format (HE20 / VHT / legacy-HT) from captured metadata so
+    // consumers can tell a high-resolution HE20 capture from a fallback frame.
+    csi_packet.csi_fmt_from_params();
 
     #[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
     #[allow(static_mut_refs)] // single writer (WiFi callback) by construction

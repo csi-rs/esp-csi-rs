@@ -111,7 +111,7 @@ async fn main(spawner: Spawner) -> ! {
         .with_ssid(SSID)
         .with_auth_method(esp_radio::wifi::AuthenticationMethod::None);
 
-    let station_config = WifiStationConfig { client_config };
+    let station_config = WifiStationConfig::new(client_config);
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
 
     let mut node = CSINode::new(

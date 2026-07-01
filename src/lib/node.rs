@@ -698,16 +698,28 @@ impl<'a> CSINode<'a> {
         if let Some(protocol) = self.protocol.take() {
             let old_protocol = reconstruct_protocol(&protocol);
             let mut protocols = Protocols::default().with_2_4(EnumSet::only(protocol));
-            // ESP-NOW peer rate config fails / misbehaves with 802.11ax enabled on 5G.
             #[cfg(feature = "esp32c5")]
-            if matches!(
-                &self.kind,
-                Node::Peripheral(PeripheralOpMode::EspNow(_))
-                    | Node::Peripheral(PeripheralOpMode::EspNowFastSource(_))
-                    | Node::Central(CentralOpMode::EspNow(_))
-                    | Node::Central(CentralOpMode::EspNowFastCollector(_))
-            ) {
-                protocols = protocols.with_5(Protocol::A | Protocol::N);
+            {
+                if matches!(
+                    &self.kind,
+                    Node::Peripheral(PeripheralOpMode::EspNow(_))
+                        | Node::Peripheral(PeripheralOpMode::EspNowFastSource(_))
+                        | Node::Central(CentralOpMode::EspNow(_))
+                        | Node::Central(CentralOpMode::EspNowFastCollector(_))
+                ) {
+                    // ESP-NOW peer rate config misbehaves with 802.11ax on 5G — cap to A/N.
+                    protocols = protocols.with_5(Protocol::A | Protocol::N);
+                } else if matches!(
+                    &self.kind,
+                    Node::Central(CentralOpMode::WifiAccessPoint(_))
+                        | Node::Central(CentralOpMode::WifiStation(_))
+                ) {
+                    // AP / STA: enable 802.11ax on 5 GHz so the link negotiates HE20
+                    // (~242-subcarrier CSI). Cumulative A|N|AX, NOT AX-only — HE can't
+                    // operate standalone (beacons/assoc/base PHY are legacy a/n), and
+                    // AX-only silently blocks association.
+                    protocols = protocols.with_5(Protocol::A | Protocol::N | Protocol::AX);
+                }
             }
             with_espnow_recv_suspended(|| {
                 controller.set_protocols(protocols).unwrap();

@@ -45,6 +45,13 @@ pub enum RxCSIFmt {
     SecaHtBw40,
     /// Sec Chnl = Above, Sig Mode = Ht, Chnl BW = 40MHz, STBC
     SecaHtBw40Stbc,
+    /// VHT 20 MHz (`cur_bb_format == 3` on C5/C6).
+    VhtBw20,
+    /// HE20 SU (802.11ax / Wi-Fi 6 single-user, `cur_bb_format == 4`). The
+    /// high-resolution ~242-subcarrier case wanted for 5 GHz sensing. C5/C6.
+    He20Su,
+    /// HE20 MU (802.11ax multi-user, `cur_bb_format == 5`). C5/C6.
+    He20Mu,
     /// Not a defined format
     Undefined,
 }
@@ -466,8 +473,20 @@ impl CSIDataPacket {
 
         log_csi(self);
     }
+    /// Derive `data_format` from the captured baseband format (`cur_bb_format`).
+    ///
+    /// Codes mirror ESP-IDF's `RX_BB_FORMAT_*` baseband enum: 3 = VHT, 4 = HE-SU,
+    /// 5 = HE-MU. HE-SU on the C5 5 GHz band is the high-resolution (~242
+    /// subcarrier) case. Anything else (legacy/HT, decoded via the older per-chip
+    /// table) stays `Undefined` here. Confirm the codes against your driver blob
+    /// if classification looks off.
     pub fn csi_fmt_from_params(&mut self) {
-        self.data_format = RxCSIFmt::Undefined;
+        self.data_format = match self.cur_bb_format {
+            3 => RxCSIFmt::VhtBw20,
+            4 => RxCSIFmt::He20Su,
+            5 => RxCSIFmt::He20Mu,
+            _ => RxCSIFmt::Undefined,
+        };
     }
 
     pub fn mac(&self) -> &[u8; 6] {
