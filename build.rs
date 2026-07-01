@@ -7,6 +7,12 @@ fn main() {
     let baud = std::env::var("MONITOR_BAUD").unwrap_or_else(|_| "115200".to_string());
     println!("cargo:rustc-env=UART_LOG_BAUDRATE={}", baud);
 
+    // Per-pair HE20 example overrides (`option_env!` in the wifi_*_5ghz_he20
+    // examples). Rebuild when they change so flashing N distinct pairs with
+    // different SSID/channel never reuses a stale binary.
+    println!("cargo:rerun-if-env-changed=HE20_SSID");
+    println!("cargo:rerun-if-env-changed=HE20_CHANNEL");
+
     // Pull in the defmt linker script only when the `defmt` feature is on.
     // Keeps println-only builds free of the defmt symbol table & sections.
     if std::env::var("CARGO_FEATURE_DEFMT").is_ok() {

@@ -165,3 +165,25 @@ impl Default for CsiConfig {
         }
     }
 }
+
+#[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+impl CsiConfig {
+    /// HE20-only acquisition preset (C5/C6).
+    ///
+    /// Requests HE-LTF (SU/MU/DCM/beamformed) while disabling legacy, HT, VHT,
+    /// and ACK dump so the CSI stream is not diluted by short legacy/ACK frames.
+    /// Pair with an associated 802.11ax AP/STA link — ESP-NOW cannot negotiate HE20.
+    pub fn he20() -> Self {
+        let mut cfg = Self::default();
+        cfg.acquire_csi_legacy = 0;
+        cfg.acquire_csi_ht20 = 0;
+        cfg.acquire_csi_ht40 = 0;
+        cfg.dump_ack_en = 0;
+        #[cfg(feature = "esp32c5")]
+        {
+            cfg.acquire_csi_force_lltf = false;
+            cfg.acquire_csi_vht = false;
+        }
+        cfg
+    }
+}

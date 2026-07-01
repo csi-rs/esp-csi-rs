@@ -721,6 +721,18 @@ impl<'a> CSINode<'a> {
                     protocols = protocols.with_5(Protocol::A | Protocol::N | Protocol::AX);
                 }
             }
+            #[cfg(feature = "esp32c6")]
+            {
+                if matches!(
+                    &self.kind,
+                    Node::Central(CentralOpMode::WifiAccessPoint(_))
+                        | Node::Central(CentralOpMode::WifiStation(_))
+                ) {
+                    // C6 is 2.4 GHz-only — enable N|AX (not AX-only) so HE20 AP/STA
+                    // on channel 6 can associate and negotiate HE20 PPDUs.
+                    protocols = Protocols::default().with_2_4(Protocol::N | Protocol::AX);
+                }
+            }
             with_espnow_recv_suspended(|| {
                 controller.set_protocols(protocols).unwrap();
             });

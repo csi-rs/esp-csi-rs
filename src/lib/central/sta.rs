@@ -398,11 +398,26 @@ fn build_icmp_echo_ipv4(
     Some(len)
 }
 
+/// How often the flood loop logs its enqueue/backpressure rate report.
+const ICMP_FLOOD_REPORT_INTERVAL_US: u64 = 1_000_000;
+
 /// High-rate ICMP echo flood over a raw socket.
 ///
 /// Uses a deep TX queue and catch-up bursts so offered traffic is not capped at
 /// ~30 Hz by awaiting one in-flight datagram per timer tick. On the CSI
 /// collector, uplink 802.11 ACKs (and ICMP echo replies) become CSI reports.
+///
+/// Neither `embassy-net`'s raw socket nor `esp-radio`'s WiFi event set expose a
+/// per-packet TX result: `RawSocket::poll_send` only ever returns `Ready` (send
+/// buffer accepted the datagram) or `Pending` (send buffer full) — there is no
+/// error variant for a frame that reached the radio and then failed over the
+/// air (no ACK, retry limit, CCA busy, etc). `esp-radio`'s only TX-completion
+/// event, `WifiEvent::ActionTransmissionStatus`, covers 802.11 Action frames,
+/// not the data frames this flood sends. So instead of a per-failure cause,
+/// this logs a periodic enqueue/backpressure rate: once the send buffer is
+/// kept full (`blocked` dominates `enqueued`), the `enqueued`-per-second figure
+/// is the true bottleneck rate, since the radio can only be pulling frames out
+/// of the buffer that slowly.
 pub(crate) async fn run_icmp_flood(
     stack: Stack<'_>,
     mut src: Ipv4Address,
@@ -432,6 +447,10 @@ pub(crate) async fn run_icmp_flood(
     let mut seq_counter: u16 = 0;
     let mut tx_ipv4_buffer = [0u8; 64];
 
+    let mut enqueued: u32 = 0;
+    let mut blocked: u32 = 0;
+    let mut last_report_us = Instant::now().as_micros();
+
     let dst_oct = dst.octets();
     log_ln!(
         "{}: ICMP flood {} Hz → {}.{}.{}.{} (deep TX queue, burst={})",
@@ -460,11 +479,31 @@ pub(crate) async fn run_icmp_flood(
             })
             .await;
             if queued {
+                enqueued = enqueued.saturating_add(1);
                 next_tx_us = next_tx_us.saturating_add(tx_interval_us);
                 now_us = Instant::now().as_micros();
             } else {
+                blocked = blocked.saturating_add(1);
                 break;
             }
+        }
+
+        let since_report_us = now_us.saturating_sub(last_report_us);
+        if since_report_us >= ICMP_FLOOD_REPORT_INTERVAL_US {
+            let actual_hz = (u64::from(enqueued) * 1_000_000 / since_report_us.max(1)) as u32;
+            log_ln!(
+                "{}: TX buffer {} enqueued/s (target {} Hz), {} blocked-on-full-buffer/s — \
+                 no per-packet TX error is available (see run_icmp_flood doc); a low \
+                 enqueued/s here with high blocked/s means the radio is draining the \
+                 buffer that slowly, not that sends are being rejected locally",
+                label,
+                actual_hz,
+                target_hz,
+                blocked,
+            );
+            enqueued = 0;
+            blocked = 0;
+            last_report_us = now_us;
         }
 
         let until_tx = next_tx_us.saturating_sub(Instant::now().as_micros());
