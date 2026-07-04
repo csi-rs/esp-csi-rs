@@ -363,22 +363,50 @@ pub async fn sta_connection(controller: &mut WifiController<'_>) {
     }
 }
 
+/// When set, the ICMP flood sends unsolicited **echo replies** instead of echo
+/// requests. A peer's smoltcp stack silently ignores an unsolicited reply
+/// (`Icmpv4Repr::EchoReply => None` in its ICMP dispatch), so the flood
+/// becomes strictly one-directional: the receiver still hardware-ACKs every
+/// data frame (keeping the sender's rate control fed) and still captures CSI
+/// per frame, but never transmits an IP-level response. Halves on-air frame
+/// count vs request/reply and removes the CSMA contention that makes the
+/// offered rate oscillate. The cost: the flooding node gets no CSI back.
+static ICMP_FLOOD_UNSOLICITED: AtomicBool = AtomicBool::new(false);
+
+/// Select unsolicited-echo-reply flood mode (see [`ICMP_FLOOD_UNSOLICITED`]).
+/// Applied by `CSINode::run` from node configuration on every run so the
+/// process-wide flag never leaks across differently-configured runs.
+pub(crate) fn set_icmp_flood_unsolicited(enabled: bool) {
+    ICMP_FLOOD_UNSOLICITED.store(enabled, Ordering::Relaxed);
+}
+
 /// Build a raw IPv4/ICMP echo datagram into `out` and return the length.
+/// `unsolicited_reply` selects echo reply (one-directional flood) over echo
+/// request (bidirectional request/reply).
 fn build_icmp_echo_ipv4(
     out: &mut [u8],
     src: Ipv4Address,
     dst: Ipv4Address,
     seq_no: u16,
+    unsolicited_reply: bool,
 ) -> Option<usize> {
     if out.len() < 64 {
         return None;
     }
     let mut icmp_buffer = [0u8; 12];
     let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
-    let icmp_repr = Icmpv4Repr::EchoRequest {
-        ident: 0x22b,
-        seq_no,
-        data: &[0xDE, 0xAD, 0xBE, 0xEF],
+    let icmp_repr = if unsolicited_reply {
+        Icmpv4Repr::EchoReply {
+            ident: 0x22b,
+            seq_no,
+            data: &[0xDE, 0xAD, 0xBE, 0xEF],
+        }
+    } else {
+        Icmpv4Repr::EchoRequest {
+            ident: 0x22b,
+            seq_no,
+            data: &[0xDE, 0xAD, 0xBE, 0xEF],
+        }
     };
     icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
 
@@ -406,6 +434,15 @@ const ICMP_FLOOD_REPORT_INTERVAL_US: u64 = 1_000_000;
 /// Uses a deep TX queue and catch-up bursts so offered traffic is not capped at
 /// ~30 Hz by awaiting one in-flight datagram per timer tick. On the CSI
 /// collector, uplink 802.11 ACKs (and ICMP echo replies) become CSI reports.
+///
+/// Catch-up debt is clamped to one burst's worth of ticks: a stall (radio
+/// busy, buffer full, heap pressure) is absorbed, not repaid at max rate —
+/// unbounded repayment previously drove a saturate/starve oscillation that
+/// showed up as bursty CSI with ~500 ms gaps on the collector.
+///
+/// With [`ICMP_FLOOD_UNSOLICITED`] set the flood sends echo *replies* instead
+/// of requests — the peer never answers at the IP level, making the traffic
+/// strictly one-directional (see that static's doc for the trade-off).
 ///
 /// Neither `embassy-net`'s raw socket nor `esp-radio`'s WiFi event set expose a
 /// per-packet TX result: `RawSocket::poll_send` only ever returns `Ready` (send
@@ -465,11 +502,24 @@ pub(crate) async fn run_icmp_flood(
 
     loop {
         let mut now_us = Instant::now().as_micros();
+        // Bound catch-up debt: after any stall (radio busy, TX buffer full,
+        // heap pressure) don't repay unbounded virtual ticks at max rate —
+        // that turns a one-off stall into a saturate/starve oscillation. Cap
+        // the backlog at one burst's worth so the flood re-converges to the
+        // target rate within a single wake instead of thousands of ticks.
+        let max_debt_us = tx_interval_us.saturating_mul(u64::from(ICMP_FLOOD_CATCH_UP_BURST));
+        let debt_floor = now_us.saturating_sub(max_debt_us);
+        if next_tx_us < debt_floor {
+            next_tx_us = debt_floor;
+        }
+        let unsolicited = ICMP_FLOOD_UNSOLICITED.load(Ordering::Relaxed);
         let mut burst_budget = ICMP_FLOOD_CATCH_UP_BURST;
         while now_us >= next_tx_us && burst_budget > 0 {
             burst_budget = burst_budget.saturating_sub(1);
             seq_counter = seq_counter.wrapping_add(1);
-            let Some(len) = build_icmp_echo_ipv4(&mut tx_ipv4_buffer, src, dst, seq_counter) else {
+            let Some(len) =
+                build_icmp_echo_ipv4(&mut tx_ipv4_buffer, src, dst, seq_counter, unsolicited)
+            else {
                 break;
             };
             let buf = &tx_ipv4_buffer[..len];

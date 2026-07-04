@@ -12,6 +12,9 @@ fn main() {
     // different SSID/channel never reuses a stale binary.
     println!("cargo:rerun-if-env-changed=HE20_SSID");
     println!("cargo:rerun-if-env-changed=HE20_CHANNEL");
+    println!("cargo:rerun-if-env-changed=HE20_PING_HZ");
+    println!("cargo:rerun-if-env-changed=HE20_CSI_ALL");
+    println!("cargo:rerun-if-env-changed=HE20_BIDIR");
 
     // Pull in the defmt linker script only when the `defmt` feature is on.
     // Keeps println-only builds free of the defmt symbol table & sections.

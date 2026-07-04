@@ -5,9 +5,19 @@
 //! 802.11ax negotiated on the link, those are HE20 PPDUs, so the station captures
 //! the dense ~242-subcarrier HE-LTF; this node captures the HE echo replies. This
 //! is the pair's only traffic generator — the station side is receive-only, so
-//! there is no competing uplink flood eating into the same airtime.
+//! there is no competing uplink flood eating into the same airtime. AMPDU is
+//! disabled on both sides so every echo rides its own PPDU (one CSI event per
+//! ping) instead of being aggregated into fewer, clumpier A-MPDUs.
 //!
-//! Band by chip: **C5** → 5 GHz ch149 (HE20); **C6** → 2.4 GHz ch6 (HE20);
+//! By default the flood sends unsolicited echo **replies**, which the station
+//! silently ignores at the IP level — strictly downlink traffic, so the
+//! offered rate stays stable (request/reply contention made it sag in waves).
+//! This means the AP itself captures ~no CSI (its stats counter stays near 0);
+//! build with `HE20_BIDIR=1` to send echo requests instead when AP-side CSI
+//! matters more than rate stability.
+//!
+//! Band by chip: **C5** → 5 GHz ch157 (HE20), or `HE20_CHANNEL=6` for 2.4 GHz;
+//! **C6** → 2.4 GHz ch6 (HE20);
 //! Wi-Fi 4 chips → 802.11n fallback (build/runs, no HE). CSI config is the crate
 //! default (acquires legacy + HT + HE-SU/MU), so CSI flows for every PPDU format
 //! and the station's `data_format` reveals which frames are actually HE20.
@@ -39,6 +49,7 @@ extern crate alloc;
 /// Compile-time `u8` from an optional env string (decimal), else `default`.
 /// Lets you flash N distinct pairs without editing source:
 ///   `HE20_CHANNEL=153 cargo esp32c5 --example wifi_ap_5ghz_he20`
+#[cfg(not(feature = "esp32c6"))]
 const fn parse_u8_or(s: Option<&str>, default: u8) -> u8 {
     match s {
         None => default,
@@ -55,6 +66,30 @@ const fn parse_u8_or(s: Option<&str>, default: u8) -> u8 {
                 i += 1;
             }
             if i == 0 || acc > 255 { default } else { acc as u8 }
+        }
+    }
+}
+
+/// Compile-time `u16` from an optional env string (decimal), else `default`.
+const fn parse_u16_or(s: Option<&str>, default: u16) -> u16 {
+    match s {
+        None => default,
+        Some(s) => {
+            let bytes = s.as_bytes();
+            let mut i = 0;
+            let mut acc: u32 = 0;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if b < b'0' || b > b'9' {
+                    return default;
+                }
+                acc = acc * 10 + (b - b'0') as u32;
+                if acc > 65535 {
+                    return default;
+                }
+                i += 1;
+            }
+            if i == 0 { default } else { acc as u16 }
         }
     }
 }
@@ -81,8 +116,13 @@ const PROTOCOL: Protocol = Protocol::AX;
 #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
 const PROTOCOL: Protocol = Protocol::N;
 
-/// ICMP ping rate to the leased station (Hz) — each is a downlink CSI trigger.
-const PING_RATE_HZ: u16 = 4000;
+/// ICMP ping rate to the leased station (Hz) — each echo is a downlink CSI
+/// trigger. Default 1000 Hz keeps the station's serialized output
+/// (~490 B/packet) inside USB-Serial-JTAG throughput (~0.7–1 MB/s) so its
+/// CSI channel doesn't saturate; 4000 Hz needs ~1.96 MB/s and guarantees
+/// drops at the output stage. Override per-pair at build time:
+///   `HE20_PING_HZ=2000 cargo esp32c5 --example wifi_ap_5ghz_he20`
+const PING_RATE_HZ: u16 = parse_u16_or(option_env!("HE20_PING_HZ"), 1000);
 
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
     static_cell::StaticCell::new();
@@ -97,16 +137,38 @@ fn on_csi(packet: &CSIDataPacket) {
     CSI_PKT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
+/// 1 Hz diagnostic line: per-second deltas plus heap watermark. A stall shows
+/// up as `csi_cb/s=0`; a heap sawtooth (free dipping toward 0 then recovering)
+/// points at driver buffer starvation. Build with `--features statistics` to
+/// also get the radio-side drop counter.
 #[embassy_executor::task]
 async fn stats_task() {
+    let mut last_cb = 0u32;
+    #[cfg(feature = "statistics")]
+    let mut last_rx_drop = 0u32;
     loop {
         Timer::after_secs(1).await;
+        let cb = CSI_PKT_COUNT.load(Ordering::Relaxed);
+        #[cfg(feature = "statistics")]
+        let rx_drop = esp_csi_rs::stats::get_dropped_packets_rx();
+        #[cfg(feature = "statistics")]
+        let rx_drop_delta = rx_drop.wrapping_sub(last_rx_drop);
+        #[cfg(not(feature = "statistics"))]
+        let rx_drop_delta = 0u32;
         log_ln!(
-            "AP HE20 ch{}: CSI packets {}, latest RSSI {}",
+            "AP-DIAG ch{}: csi_cb/s={} rx_drop/s={} heap_used={} heap_free={} rssi={}",
             CHANNEL,
-            CSI_PKT_COUNT.load(Ordering::Relaxed),
+            cb.wrapping_sub(last_cb),
+            rx_drop_delta,
+            esp_alloc::HEAP.used(),
+            esp_alloc::HEAP.free(),
             LATEST_RSSI.load(Ordering::Relaxed),
         );
+        last_cb = cb;
+        #[cfg(feature = "statistics")]
+        {
+            last_rx_drop = rx_drop;
+        }
     }
 }
 
@@ -133,7 +195,21 @@ async fn main(spawner: Spawner) -> ! {
         PROTOCOL
     );
 
-    let config_radio = esp_radio::wifi::ControllerConfig::default();
+    // Per-frame CSI wants one PPDU per ICMP echo: with AMPDU enabled (the
+    // esp-radio default) the AX link aggregates echoes into A-MPDUs — fewer,
+    // clumpier CSI events — and Block-Ack recovery after a loss stalls
+    // delivery for hundreds of ms. Espressif's esp-csi reference disables
+    // AMPDU for the same reason. Halving the dynamic RX/TX buffer counts
+    // bounds the driver's transient draw on the 64 KB heap (it shares
+    // esp-alloc with everything else); overflow then surfaces as bounded
+    // netstack frame drops, which CSI capture never sees (CSI comes from the
+    // PHY callback, not the netstack RX path).
+    let config_radio = esp_radio::wifi::ControllerConfig::default()
+        .with_ampdu_rx_enable(false)
+        .with_ampdu_tx_enable(false)
+        .with_dynamic_rx_buf_num(16)
+        .with_dynamic_tx_buf_num(16)
+        .with_rx_ba_win(4);
     let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
 
@@ -161,6 +237,14 @@ async fn main(spawner: Spawner) -> ! {
         csi_hardware,
     );
     node.set_protocol(PROTOCOL);
+    // Default: flood unsolicited echo REPLIES — the station never answers at
+    // the IP level, so traffic is strictly downlink. Request/reply doubled
+    // the on-air frame count and the resulting CSMA contention made the
+    // offered rate sag ~20% in waves. Trade-off: this AP gets ~no CSI itself
+    // (its CSI came from the station's replies) — set `HE20_BIDIR=1` at build
+    // time to restore echo requests when AP-side CSI is wanted.
+    const BIDIR: bool = matches!(option_env!("HE20_BIDIR"), Some(_));
+    node.set_flood_unsolicited_reply(!BIDIR);
 
     set_csi_callback(on_csi);
     spawner.spawn(stats_task().unwrap());

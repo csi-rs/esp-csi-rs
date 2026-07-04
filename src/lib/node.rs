@@ -37,9 +37,11 @@ use crate::csi::delivery::{
 };
 use crate::espnow_phy::bring_up_espnow_sta;
 use crate::espnow_phy::{
-    apply_espnow_band_for_channel, apply_espnow_ht40_mode, install_static_espnow_recv,
-    takeover_esp_now_recv, with_espnow_recv_suspended,
+    apply_espnow_ht40_mode, install_static_espnow_recv, takeover_esp_now_recv,
+    with_espnow_recv_suspended,
 };
+#[cfg(feature = "esp32c5")]
+use crate::espnow_phy::apply_espnow_band_for_channel;
 use crate::log_ln;
 use crate::stats::set_seq_drop_detection;
 
@@ -297,6 +299,25 @@ impl WifiSnifferConfig {
 pub struct WifiStationConfig {
     /// Underlying esp-radio station configuration (SSID, auth, etc.).
     pub client_config: StationConfig,
+    /// Primary channel of the target AP. On dual-band ESP32-C5 this selects
+    /// 2.4 vs 5 GHz (`set_band_mode`) before scan/association.
+    pub channel_hint: Option<u8>,
+}
+
+impl WifiStationConfig {
+    /// Build a station config from esp-radio's [`StationConfig`].
+    pub fn new(client_config: StationConfig) -> Self {
+        Self {
+            client_config,
+            channel_hint: None,
+        }
+    }
+
+    /// Pin the radio band from the AP's primary channel (C5 dual-band only).
+    pub fn with_channel_hint(mut self, channel: u8) -> Self {
+        self.channel_hint = Some(channel);
+        self
+    }
 }
 
 #[cfg(feature = "defmt")]
@@ -514,6 +535,9 @@ pub struct CSINode<'a> {
     traffic_freq_hz: Option<u16>,
     hardware: CSINodeHardware<'a>,
     protocol: Option<Protocol>,
+    /// ICMP flood sends unsolicited echo replies (one-directional traffic)
+    /// instead of echo requests. See [`CSINode::set_flood_unsolicited_reply`].
+    flood_unsolicited_reply: bool,
 }
 
 impl<'a> CSINode<'a> {
@@ -533,6 +557,7 @@ impl<'a> CSINode<'a> {
             traffic_freq_hz,
             hardware,
             protocol: None,
+            flood_unsolicited_reply: false,
         }
     }
 
@@ -552,6 +577,7 @@ impl<'a> CSINode<'a> {
             traffic_freq_hz,
             hardware,
             protocol: None,
+            flood_unsolicited_reply: false,
         }
     }
 
@@ -633,6 +659,20 @@ impl<'a> CSINode<'a> {
         self.protocol = Some(protocol);
     }
 
+    /// Make the ICMP traffic flood send unsolicited echo **replies** instead
+    /// of echo requests.
+    ///
+    /// The peer's IP stack silently ignores an unsolicited reply, so the
+    /// generated traffic becomes strictly one-directional: the peer still
+    /// hardware-ACKs every data frame (rate control stays fed) and captures
+    /// CSI per frame, but never transmits an IP-level response. This halves
+    /// the on-air frame count versus request/reply and stabilizes the offered
+    /// rate under CSMA contention. Trade-off: this node receives no CSI back
+    /// from the peer's replies.
+    pub fn set_flood_unsolicited_reply(&mut self, enabled: bool) {
+        self.flood_unsolicited_reply = enabled;
+    }
+
     /// Set the ESP-NOW TX PHY rate after construction.
     ///
     /// Equivalent to [`EspNowConfig::with_phy_rate`]: forces the per-peer PHY
@@ -670,6 +710,10 @@ impl<'a> CSINode<'a> {
     async fn run_inner(&mut self, duration: Option<u64>, client: Option<&mut CSINodeClient>) {
         let interfaces = &mut self.hardware.interfaces;
         let controller = &mut self.hardware.controller;
+
+        // Applied every run (not only when set) so the process-wide flood-kind
+        // flag never leaks from a previous, differently-configured run.
+        crate::central::sta::set_icmp_flood_unsolicited(self.flood_unsolicited_reply);
 
         // Take over esp-radio's ESP-NOW receive dispatcher *first*, before any
         // other Wi-Fi reconfiguration runs (`set_protocols`, `set_csi`) — see
@@ -713,11 +757,18 @@ impl<'a> CSINode<'a> {
                     &self.kind,
                     Node::Central(CentralOpMode::WifiAccessPoint(_))
                         | Node::Central(CentralOpMode::WifiStation(_))
+                ) && protocol == Protocol::AX {
+                    // HE20 AP/STA: N|AX on 2.4 GHz (not AX-only — beacons/assoc need
+                    // legacy HT) and A|N|AX on 5 GHz. AX-only on either band blocks
+                    // association or leaves DHCP wedged after link-up on C5 2.4 GHz.
+                    protocols = Protocols::default().with_2_4(Protocol::N | Protocol::AX);
+                    protocols = protocols.with_5(Protocol::A | Protocol::N | Protocol::AX);
+                } else if matches!(
+                    &self.kind,
+                    Node::Central(CentralOpMode::WifiAccessPoint(_))
+                        | Node::Central(CentralOpMode::WifiStation(_))
                 ) {
-                    // AP / STA: enable 802.11ax on 5 GHz so the link negotiates HE20
-                    // (~242-subcarrier CSI). Cumulative A|N|AX, NOT AX-only — HE can't
-                    // operate standalone (beacons/assoc/base PHY are legacy a/n), and
-                    // AX-only silently blocks association.
+                    // Non-HE AP/STA: still enable AX on 5 GHz for dual-band links.
                     protocols = protocols.with_5(Protocol::A | Protocol::N | Protocol::AX);
                 }
             }
@@ -727,7 +778,7 @@ impl<'a> CSINode<'a> {
                     &self.kind,
                     Node::Central(CentralOpMode::WifiAccessPoint(_))
                         | Node::Central(CentralOpMode::WifiStation(_))
-                ) {
+                ) && protocol == Protocol::AX {
                     // C6 is 2.4 GHz-only — enable N|AX (not AX-only) so HE20 AP/STA
                     // on channel 6 can associate and negotiate HE20 PPDUs.
                     protocols = Protocols::default().with_2_4(Protocol::N | Protocol::AX);
@@ -777,6 +828,13 @@ impl<'a> CSINode<'a> {
 
         // Tasks Necessary for Central Station & Sniffer
         let sta_interface = if let Node::Central(CentralOpMode::WifiStation(config)) = &self.kind {
+            #[cfg(feature = "esp32c5")]
+            if let Some(channel) = config.channel_hint {
+                with_espnow_recv_suspended(|| {
+                    apply_espnow_band_for_channel(controller, channel);
+                });
+                c5_radio_settle().await;
+            }
             Some(sta_init(&mut interfaces.station, config, controller))
         } else {
             None
