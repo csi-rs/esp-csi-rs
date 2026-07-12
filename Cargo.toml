@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-rs"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 authors = ["theembeddedrustacean", "stacks-of-data", "Abdullah-Alawad", "modatt"]
 description = "ESP CSI Driver for Rust"
@@ -18,61 +18,49 @@ path = "src/lib/lib.rs"
 [features]
 #! ⚠️ At minimum you are required to choose only ONE of the device options. For the most efficient (and fastest) logging, you should combine defmt with the jtag-serial features.
 
+## Logging/functional features forward to `esp-csi-rs-core` (which owns the
+## engine) and additionally enable the example-level backtrace/println transports.
 default = ["no-std", "println", "auto"]
 ## Build without the standard library.
-no-std = []
+no-std = ["esp-csi-rs-core/no-std"]
 ## Enable logging via `println!()`.
-println = ["dep:log", "esp-backtrace/println"]
+println = ["dep:log", "esp-backtrace/println", "esp-csi-rs-core/println"]
 ## Automatically select the logging backend at runtime.
-##
-## Runtime behavior (when `async-print` is NOT enabled):
-## - USB SOF detected (USB-Serial-JTAG/JTAG path) -> async logging backend
-## - no USB SOF (UART path) -> sync inline logging
-##
-## Precedence:
-## - `async-print` overrides `auto` and forces async logging.
-## - `jtag-serial` / `uart` force transport selection; `auto` is for runtime
-##   transport selection.
-auto = ["esp-println/auto"]
+auto = ["esp-println/auto", "esp-csi-rs-core/auto"]
 ## Enable logging via defmt.
 defmt = [
     "dep:defmt",
-    "esp-println/defmt-espflash",
     "esp-hal/defmt",
     "esp-radio/defmt",
     "esp-backtrace/defmt",
     "embassy-executor/defmt",
+    "esp-csi-rs-core/defmt",
 ]
 ## Force the JTAG backend for logging.
-##
-## With `auto` (and without explicit `async-print`), runtime selection enables
-## async drain when USB SOF indicates JTAG/USB-Serial-JTAG is active.
-jtag-serial = ["esp-println/jtag-serial"]
-## Force the UART backend for logging (not recommended, much slower than JTAG backend).
-## Do NOT combine with `async-print`: UART is already blocking and slow, and the async
-## logging path provides no benefit while adding overhead and risk of unexpected behavior.
-uart = ["esp-println/uart"]
+jtag-serial = ["esp-println/jtag-serial", "esp-csi-rs-core/jtag-serial"]
+## Force the UART backend for logging.
+uart = ["esp-println/uart", "esp-csi-rs-core/uart"]
 ## Disable all logging.
-no-print = ["esp-println/no-op"]
+no-print = ["esp-println/no-op", "esp-csi-rs-core/no-print"]
 ## Enable collection of runtime statistics (e.g., latency, dropped packets).
-statistics = []
+statistics = ["esp-csi-rs-core/statistics"]
 ## Non-blocking async logging override.
-## When enabled explicitly, async logging is forced regardless of runtime backend detection.
-async-print = []
+async-print = ["esp-csi-rs-core/async-print"]
 ## Use an external defmt global logger instead of registering one from this crate.
-external-defmt-logger = []
+external-defmt-logger = ["esp-csi-rs-core/external-defmt-logger"]
 ## Enable esp-rtos scheduler tracing so the CPU-utilization DUT
 ## (`esp_now_peripheral_exper_cpu`) can measure absolute idle *time* from
 ## `system_idle`/`task_exec_begin` switch hooks (spec v2 §2.2). Only the CPU
 ## experiment needs this; it adds a hook call to every context switch.
-cpu-trace = ["dep:rtos-trace", "esp-rtos/rtos-trace"]
+cpu-trace = ["dep:rtos-trace", "esp-rtos/rtos-trace", "esp-csi-rs-core/cpu-trace"]
 ## Expose runtime TX controls (rate / payload / pause) that let the CPU-test
 ## TX example (`esp_now_central_exper_cpu_tx`) steer the real `run_esp_now_central`
 ## loop from the experiment schedule. Only that example needs it.
-cpu-test-tx = []
+cpu-test-tx = ["esp-csi-rs-core/cpu-test-tx"]
 
 ## Support for the ESP32
 esp32 = [
+    "esp-csi-rs-core/esp32",
     "esp-backtrace/esp32",
     "esp-hal/esp32",
     "esp-hal/rt",
@@ -87,6 +75,7 @@ esp32 = [
 
 ## Support for the ESP32-C3
 esp32c3 = [
+    "esp-csi-rs-core/esp32c3",
     "esp-hal/esp32c3",
     "esp-hal/rt",
     "esp-backtrace/esp32c3",
@@ -98,8 +87,9 @@ esp32c3 = [
     "esp-rtos/esp32c3",
 ]
 
-## Support for the ESP32-C6 (WiFi 6)
+## Support for the ESP32-C6
 esp32c6 = [
+    "esp-csi-rs-core/esp32c6",
     "esp-hal/esp32c6",
     "esp-hal/rt",
     "esp-backtrace/esp32c6",
@@ -114,6 +104,7 @@ esp32c6 = [
 
 ## Support for the ESP32-S3 (AIoT)
 esp32s3 = [
+    "esp-csi-rs-core/esp32s3",
     "esp-hal/esp32s3",
     "esp-hal/rt",
     "esp-backtrace/esp32s3",
@@ -127,6 +118,7 @@ esp32s3 = [
 ]
 
 esp32c5 = [
+    "esp-csi-rs-core/esp32c5",
     "esp-hal/esp32c5",
     "esp-hal/rt",
     "esp-backtrace/esp32c5",
@@ -141,8 +133,11 @@ esp32c5 = [
 
 
 [dependencies]
+# Shared engine. This crate is a thin facade that re-exports it in full. Path dep
+# for local development; switch to `esp-csi-rs-core = "0.1"` before publishing.
+esp-csi-rs-core = { version = "0.1", default-features = false }
+
 # Core dependencies required for ESP HAL/RTOS, radio, and networking.
-# Core dependencies
 esp-hal = { version = "~1.1", default-features = false, optional = false, features = [
     "unstable",
 ] }
@@ -197,7 +192,7 @@ static_cell = "2.1.1"
 
 document-features = "0.2.11"
 
-defmt = { version = "1.0.1", optional = true }
+defmt = { version = "1.0.1", optional = true, features = ["encoding-rzcobs"] }
 
 log = { version = "0.4.29", optional = true }
 

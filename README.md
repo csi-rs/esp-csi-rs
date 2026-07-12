@@ -15,11 +15,11 @@ A Rust crate for collecting **Channel State Information (CSI)** on **ESP32** ser
 
 ## Features
 ### ✅ Device Support
-`esp-csi-rs` supports both 2.4 GHz and dual-band ESP devices, including ESP32-C6 (WiFi 6) and ESP32-C5 (WiFi 6 dual-band 2.4/5 GHz). The current list of supported devices is:
+`esp-csi-rs` supports both 2.4 GHz and dual-band ESP devices, including ESP32-C5 (dual-band 2.4/5 GHz). The current list of supported devices is:
 - ESP32
 - ESP32-C3
 - ESP32-C5 (2.4/5 GHz)
-- ESP32-C6 (WiFi 6)
+- ESP32-C6
 - ESP32-S3
 
 ### ✅ Host Interface
@@ -99,7 +99,7 @@ Add the crate to your `Cargo.toml`. At a minimum, you would need to specify the 
 
 ```toml
 [dependencies]
-esp-csi-rs = { version = "0.8.0", features = ["esp32c3", "println"] }
+esp-csi-rs = { version = "0.8.1", features = ["esp32c3", "println"] }
 ```
 
 The crate uses Rust **edition 2024** and tracks the latest Espressif Rust ecosystem (`esp-hal` 1.1, `esp-radio` 0.18, `esp-rtos` 0.3).
@@ -120,7 +120,7 @@ When enabling the `defmt` feature, the user app needs three additional things on
 
 ```toml
 [dependencies]
-esp-csi-rs = { version = "0.8.0", features = ["esp32c3", "defmt"] }
+esp-csi-rs = { version = "0.8.1", features = ["esp32c3", "defmt"] }
 defmt = "1.0"
 ```
 
@@ -142,8 +142,9 @@ Replace `<name>` with the file name of any example, e.g. `sniffer_wifi`, `esp_no
 ## WiFi Access Point CSI Collection
 
 Run a **self-contained softAP collector** so a standard `WifiStation` node can
-associate without an external router. The AP hands out a single DHCP lease and
-pings the client at a configurable rate; uplink ICMP replies become CSI on the AP.
+associate without an external router. The AP hands out DHCP leases from a
+configurable pool and pings associated clients at a configurable rate; uplink
+ICMP replies become CSI on the AP.
 
 ```rust
 use esp_csi_rs::{CentralOpMode, WifiApConfig, /* ... */};
@@ -152,15 +153,17 @@ use esp_radio::wifi::ap::AccessPointConfig;
 let ap = AccessPointConfig::default()
     .with_ssid("esp-csi-ap".into())
     .with_auth_method(AuthMethod::None);
-let ap_cfg = WifiApConfig::new(ap, 6, None); // channel 6, HT20
+let ap_cfg = WifiApConfig::new(ap, 6, None).with_lease_pool(4); // .2–.5
 // CSINode::Central(CentralOpMode::WifiAccessPoint(ap_cfg))
 ```
 
-Defaults: AP `192.168.13.1`, lease `192.168.13.2`, DHCP enabled. Tune uplink
-traffic with `node.set_traffic_freq_hz(...)` (ICMP flood to the leased client).
-Pair with `examples/wifi_station.rs` on the same SSID. Expect tens to low
-hundreds of CSI pps depending on bidirectional contention and filter settings —
-WiFi airtime is the limit, not CPU.
+Defaults: AP `192.168.13.1`, single lease `192.168.13.2`, DHCP enabled. Use
+[`WifiApConfig::with_lease_pool`] to support multiple associated stations — each
+client gets a distinct address (MAC→IP binding) and the AP round-robins ICMP
+downlink across the pool. Tune uplink traffic with `node.set_traffic_freq_hz(...)`
+(or the example's ping rate). Pair with `examples/wifi_station.rs` on the same
+SSID. Expect tens to low hundreds of CSI pps depending on bidirectional
+contention and filter settings — WiFi airtime is the limit, not CPU.
 
 ## ESP-NOW Fast Simplex (High Throughput)
 
