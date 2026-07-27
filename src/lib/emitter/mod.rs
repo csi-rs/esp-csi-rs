@@ -214,6 +214,12 @@ pub async fn run_emitter(
         src[5]
     );
 
+    // A raw injection that the driver rejects is silent otherwise: the loop keeps
+    // running and the node looks healthy while nothing reaches the air. Report the
+    // first rejection (and only the first, to keep the hot path quiet) so a
+    // "collector sees nothing" investigation starts at the right end.
+    let mut reported_failure = false;
+
     loop {
         // Under the CPU-utilization harness the rate, frame size, and silence are
         // steered per phase from the experiment's schedule; otherwise the
@@ -232,14 +238,23 @@ pub async fn run_emitter(
         #[cfg(not(feature = "cpu-test-tx"))]
         let (period, len, paused) = (cfg.period, len, false);
 
-        if !paused && inject_probe_once(&mut interfaces.sniffer, cfg.use_sta_if, &frame[..len]).is_ok()
-        {
-            // Count accepted frames so `get_pps_tx` / `get_total_tx_packets`
-            // report an emitter's offered rate. Without this an emitter looks
-            // idle in `show-stats`, which is exactly the wrong signal when
-            // diagnosing "the collector sees nothing".
-            #[cfg(feature = "statistics")]
-            crate::stats::record_tx();
+        if !paused {
+            match inject_probe_once(&mut interfaces.sniffer, cfg.use_sta_if, &frame[..len]) {
+                Ok(()) => {
+                    // Count accepted frames so `get_pps_tx` / `get_total_tx_packets`
+                    // report an emitter's offered rate. Without this an emitter looks
+                    // idle in `show-stats`, which is exactly the wrong signal when
+                    // diagnosing "the collector sees nothing".
+                    #[cfg(feature = "statistics")]
+                    crate::stats::record_tx();
+                }
+                Err(e) => {
+                    if !reported_failure {
+                        reported_failure = true;
+                        log_ln!("Emitter: raw injection rejected by the driver: {:?}", e);
+                    }
+                }
+            }
         }
         match select(STOP_SIGNAL.wait(), Timer::after(period)).await {
             Either::First(_) => {
