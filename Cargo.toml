@@ -81,6 +81,7 @@ esp32 = [
     "esp-radio/esp32",
     "esp-radio/csi",
     "esp-radio/sniffer",
+    "esp-radio/esp-now",
     "esp-rtos/esp32",
 ]
 
@@ -93,6 +94,7 @@ esp32c3 = [
     "esp-bootloader-esp-idf/esp32c3",
     "esp-radio/csi",
     "esp-radio/sniffer",
+    "esp-radio/esp-now",
     "esp-println/esp32c3",
     "esp-rtos/esp32c3",
 ]
@@ -106,6 +108,7 @@ esp32c6 = [
     "esp-bootloader-esp-idf/esp32c6",
     "esp-radio/csi",
     "esp-radio/sniffer",
+    "esp-radio/esp-now",
     "esp-println/esp32c6",
     "esp-println/critical-section",
     "esp-rtos/esp32c6",
@@ -120,6 +123,7 @@ esp32s3 = [
     "esp-bootloader-esp-idf/esp32s3",
     "esp-radio/csi",
     "esp-radio/sniffer",
+    "esp-radio/esp-now",
     "esp-println/esp32s3",
     "esp-println/critical-section",
     "esp-rtos/esp32s3",
@@ -133,6 +137,7 @@ esp32c5 = [
     "esp-bootloader-esp-idf/esp32c5",
     "esp-radio/csi",
     "esp-radio/sniffer",
+    "esp-radio/esp-now",
     "esp-println/esp32c5",
     "esp-println/critical-section",
     "esp-rtos/esp32c5",
