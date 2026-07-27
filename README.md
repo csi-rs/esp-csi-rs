@@ -42,43 +42,40 @@ This keeps JTAG throughput benefits while preserving UART's low-overhead sync pa
 When setting up a CSI collection system, dummy traffic on the network is needed to exchange packets that encapsulate the CSI data. `esp-csi-rs` allows you to control the intervals at which traffic is generated.
 
 ### ✅ Sequence Number Tags
-Traffic carrying collected CSI data are tagged with sequence numbers that triggered the collection. This is useful in star topologies where the traffic generator wants to track the CSI generated with a single broadcast across several stations.
+Collected CSI is tagged with the sequence number of the frame that triggered it. Because an emitter's frames carry driver-assigned incrementing sequence numbers, a collector can measure gaps — i.e. how much of the sounding traffic it actually captured — and can do so per source MAC when several emitters share a channel.
 
 ## Node Roles
 
-`esp-csi-rs` defines two types of roles that a node can take in a collection network:
+A CSI measurement needs energy in the channel and something to measure the channel's response to it. Those are the two roles, and they are exhaustive:
 
-1. **Central Node**: This type of node is one that generates traffic, also can connect to one or more peripheral nodes.
-2. **Peripheral Node**: This type of node does not generate traffic, also can optionally connect to one central node at most.
+1. **Emitter** — puts known RF energy into the channel and never captures. It forces its transmit PHY to a fixed format and loop-injects a raw sounding frame, without associating to anything.
+2. **Collector** — captures the channel's response and delivers it.
 
-## Node CSI Collection Modes
+Because the emitter's frames carry no meaning, it needs no peer, no handshake, and no protocol. That is what lets the two roles compose into any arrangement you like.
 
-`esp-csi-rs` defines two types of collection modes:
+## Collector Capture Paths
 
-1. **Collector**: A collector node collects and provides CSI data output from one or more devices.
-2. **Listener**: A listener is a passive node. It only enables CSI collection and does not provide any CSI output.
+*How* a collector gets frames to measure is a separate question from what it is for, so these are variants of the collector role rather than roles of their own:
 
-## Node Operation Modes
+1. **Sniffer** — lock a channel in promiscuous mode and measure every frame overheard. This is the path that pairs with an emitter.
+2. **Station** — associate to an AP or commercial router and measure CSI from the frames received.
+3. **Access Point** — run a self-contained softAP with built-in DHCP, so an associated station generates steady uplink traffic to measure.
 
-`esp-csi-rs` supports five operational modes:
+## CSI Output
 
-1. **ESP-NOW** — balanced central/peripheral control exchange (auto-pairing, optional forced-PHY unicast replies).
-2. **ESP-NOW Fast** — asymmetric one-to-one simplex: collector beacons, source floods; maximizes CSI packets/sec.
-3. **WiFi Sniffer** — promiscuous capture on a locked channel (single-node topology).
-4. **WiFi Station** — associate to an AP or router and harvest CSI from received frames.
-5. **WiFi Access Point** — self-contained softAP collector with built-in DHCP; a `WifiStation` peer associates and generates uplink traffic captured as CSI on the AP.
+A collector delivers its CSI by default. `CSINode::set_csi_output_enabled(false)` turns delivery off while leaving capture running: the RX path and its timing stay identical, but nothing is decoded, logged, or handed to a callback. Useful for a node whose only job is to keep traffic on air, or for measuring capture overhead without the delivery cost.
 
+## Bandwidth
 
-## Network Architechtures
-`esp-csi-rs` allows you to configure a device to one several operational modes including ESP-NOW, wifi station, or sniffer. As such, `esp-csi-rs` supports several network setups allowing for flexibility in collecting of CSI. Some possible setups including the following:
+An emitter transmits **HT20** or **HT40** (`HtBandwidth`) — plain 802.11n, supported on every chip listed above. 40 MHz needs a secondary channel above or below the primary, and every node in a capture set must agree on the primary channel.
 
-1. ***Single Node:***  This is the simplest setup where only one ESP device (CSI Node) is needed. The node is configured to "sniff" packets in surrounding networks and collect CSI data. The WiFi Sniffer Peripheral Collector is the only possible configuration that supports this topology. 
-2. ***Point-to-Point:*** This set up uses two CSI Nodes, a central and a peripheral. One of them can be a collector and the other a listener. Alternatively, both can be collectors as well. Some configuration examples include
-    - **WiFi Station Central Collector <-> Access Point/Commercial Router**: In this configuration the CSI node can connect to any WiFi Access Point like an ESP AP or a commercial router. The node in turn sends traffic to the Access Point to acquire CSI data.
-    - **WiFi Access Point Central Collector <-> WiFi Station Peripheral Collector**: A self-contained softAP node (`WifiAccessPoint`) runs DHCP and ICMP flood to a paired `WifiStation` node — no external router required. See `wifi_ap` / `wifi_station`.
-    - **ESP-NOW Central Listener/Collector <-> ESP-NOW Peripheral Listener/Collector**: In this configuration a CSI central node connects to one other ESP-NOW peripheral node. Both ESP-NOW peripheral and central nodes can operate either as listeners or collectors.
-    - **ESP-NOW Fast Collector <-> ESP-NOW Fast Source**: Asymmetric simplex — the source owns all TX airtime while the collector goes RX-only after discovery. See `esp_now_fast_collector` / `esp_now_fast_source`.
-3. ***Star:*** In this architechture a central node connects to several peripheral nodes. The central node triggers traffic and aggregates CSI sent back from peripheral nodes. Alternatively, CSI can be collected by the individual peripherals. Only the ESP-NOW operation mode supports this architechture. The ESP-NOW peripheral and central nodes can also operate either as listeners or collectors. 
+## Collection Setups
+
+Roles compose, so the useful arrangements are combinations rather than fixed topologies:
+
+1. ***Single node:*** one sniffer collector, measuring whatever ambient traffic exists. The only setup that needs no second device. See `sniffer_wifi`.
+2. ***Emitter + collector:*** the controlled pairing. The emitter sounds the channel at a known rate and bandwidth; one or more sniffer collectors measure it. Adding collectors costs the emitter nothing, and several emitters can share one collector — each frame carries its transmitter's MAC, so a collector attributes measurements by source. See `ht20_emitter` / `ht40_emitter` / `collector_sniffer`.
+3. ***Associated link:*** a station collector against any access point — an ESP softAP collector or a commercial router — measuring the CSI of ordinary traffic on that link. See `wifi_ap` / `wifi_station`.
 
 <div align="center">
 
@@ -137,7 +134,7 @@ The repository contains an `examples/` folder with configurations for each suppo
 
 Replace `esp32c3` with any of: `esp32`, `esp32c3`, `esp32c5`, `esp32c6`, `esp32s3`. The `-defmt` aliases inject `--features=defmt`, override the espflash runner with `--log-format defmt`, and `build.rs` adds the `-Tdefmt.x` linker script automatically — no manual config edits required to switch between logging backends.
 
-Replace `<name>` with the file name of any example, e.g. `sniffer_wifi`, `esp_now_central`, `wifi_station`, `wifi_ap`, `esp_now_fast_collector`.
+Replace `<name>` with the file name of any example, e.g. `ht20_emitter`, `collector_sniffer`, `sniffer_wifi`, `wifi_station`, `wifi_ap`.
 
 ## WiFi Access Point CSI Collection
 
@@ -147,14 +144,14 @@ configurable pool and pings associated clients at a configurable rate; uplink
 ICMP replies become CSI on the AP.
 
 ```rust
-use esp_csi_rs::{CentralOpMode, WifiApConfig, /* ... */};
+use esp_csi_rs::{CollectorMode, WifiApConfig, /* ... */};
 use esp_radio::wifi::ap::AccessPointConfig;
 
 let ap = AccessPointConfig::default()
     .with_ssid("esp-csi-ap".into())
     .with_auth_method(AuthMethod::None);
 let ap_cfg = WifiApConfig::new(ap, 6, None).with_lease_pool(4); // .2–.5
-// CSINode::Central(CentralOpMode::WifiAccessPoint(ap_cfg))
+// CSINode::new_collector(CollectorMode::AccessPoint(ap_cfg), ..)
 ```
 
 Defaults: AP `192.168.13.1`, single lease `192.168.13.2`, DHCP enabled. Use
@@ -165,101 +162,53 @@ downlink across the pool. Tune uplink traffic with `node.set_traffic_freq_hz(...
 SSID. Expect tens to low hundreds of CSI pps depending on bidirectional
 contention and filter settings — WiFi airtime is the limit, not CPU.
 
-## ESP-NOW Fast Simplex (High Throughput)
+## Emitter / Collector CSI Collection
 
-For **maximum CSI packets/sec** in a one-to-one link, use the asymmetric fast
-modes instead of balanced `EspNow` central/peripheral:
-
-1. **Collector** (`EspNowFastCollector`) broadcasts a sparse ~1 Hz discovery beacon.
-2. **Source** (`EspNowFastSource`) learns the collector MAC, registers forced-PHY
-   unicast, then floods continuously.
-3. Collector **stops beaconing** and goes RX-only — all airtime goes to the source.
+The controlled pairing: an emitter sounds the channel at a known rate and bandwidth while one or more sniffer collectors measure it. Nothing associates, so there is no handshake to fail and no protocol overhead competing for airtime.
 
 ```rust
-let espnow_cfg = EspNowConfig::fast_default().with_channel(6); // HT20 MCS7-LGI
-// Central: CentralOpMode::EspNowFastCollector(espnow_cfg)
-// Peripheral: PeripheralOpMode::EspNowFastSource(espnow_cfg)
+use esp_csi_rs::{CSINode, CollectorMode, EmitterConfig, HtBandwidth, WifiSnifferConfig};
+use embassy_time::Duration;
+
+// TX node — sound channel 7 at ~50 frames/s.
+let emitter = EmitterConfig::new(7, HtBandwidth::Ht20)
+    .with_period(Duration::from_millis(20));
+let mut node = CSINode::new_emitter(emitter, hardware);
+
+// RX node — measure everything on channel 7.
+let mut node = CSINode::new_collector(
+    CollectorMode::Sniffer(WifiSnifferConfig::default().with_channel(7)),
+    Some(CsiConfig::default()),
+    None,
+    hardware,
+);
 ```
 
-Auto-pairing uses the same magic-prefix protocol as standard ESP-NOW. Chain
-`with_ht40` for 40 MHz capture where supported. See `esp_now_fast_collector` /
-`esp_now_fast_source`.
+Both nodes must agree on the primary channel. By default the emitter broadcasts; addressing a specific collector with `with_dst_mac` tends to raise that collector's CSI callback rate. See `ht20_emitter` / `ht40_emitter` / `collector_sniffer`.
 
-## HT40 CSI Collection (ESP32-C5 / C6)
+## HT40 (40 MHz) CSI Collection
 
-Wide-bandwidth (40 MHz) CSI gives ~2× the subcarriers of HT20 — typically
-**~117–128** subcarriers (`csi_data_len / 2`) versus **~56** for HT20 HT-LTF or
-**~53** for legacy 20 MHz L-LTF. This section covers how to collect it.
+40 MHz gives roughly twice the subcarriers of HT20 — typically **~117–128** (`csi_data_len / 2`) versus **~56** for HT20 HT-LTF or **~53** for legacy 20 MHz L-LTF.
 
-### Key concept: bandwidth is a *per-peer PHY property*
-
-For ESP-NOW, the on-air bandwidth/rate of a frame is set **per peer**
-(`esp_now_set_peer_rate_config`), not by the interface bandwidth. So HT40 only
-engages when a PHY rate is **forced** on the peer the frame is sent to. Enable it
-on the config:
+Select it on the emitter:
 
 ```rust
-let espnow_cfg = EspNowConfig::default()
-    .with_channel(CHANNEL)
-    .with_phy_rate(WifiPhyRate::RateMcs7Lgi) // forced OFDM HT rate (carries HT-LTF)
-    .with_ht40(SecondaryChannel::Above);     // 40 MHz; implies force_phy
-// node.set_protocol(Protocol::N); node.set_rate(WifiPhyRate::RateMcs7Lgi);
+// Secondary channel above the primary: the 40 MHz block spans channels 7–11.
+let emitter = EmitterConfig::new(7, HtBandwidth::Ht40Above);
 ```
 
-`with_ht40` implies `force_phy`. CSI is derived from OFDM training fields, so the
-rate **must** be OFDM (an `RateMcsN*` HT rate for HT-LTF, or a legacy-OFDM
-6–54 Mbps rate for L-LTF). An 802.11b DSSS rate (`Rate1mL`, `Rate11mL`, …) carries
-no training fields and produces **no CSI at all**.
+HT40 works on **every supported chip** — it is plain 802.11n, not a C5/C6 feature. On the dual-band C5 the band follows the primary channel number automatically (`>= 36` selects 5 GHz).
 
-### Topology: Collector + Listener with unicast replies
+Two things are easy to get wrong:
 
-The proven setup is **central = `CollectionMode::Collector`**, **peripheral =
-`CollectionMode::Listener`** with both RX and TX enabled
-(`IOTaskConfig::new(true, true)`):
-
-1. The central broadcasts control frames (auto-pairing, no hardcoded MACs).
-2. The peripheral receives them, learns the central's MAC, and sends **unicast**
-   replies back — applying the forced MCS/HT40 PHY to that learned peer.
-3. The central captures wide CSI from those unicast replies.
-
-> **Why unicast (especially on C5):** a per-peer HT40 rate config only applies to
-> a *unicast* peer, never the broadcast peer. On ESP32-C5,
-> `esp_now_set_peer_rate_config` on the broadcast address wedges the dual-band
-> Wi-Fi ISR, so broadcast PHY forcing is skipped there entirely. The peripheral
-> therefore unicasts its forced-PHY replies (HT40 always; HT20 too when a PHY rate
-> is forced on C5). The central's discovery broadcasts stay at the driver default
-> so a peer can boot safely while the central is already running.
-
-### Channel / secondary selection
-
-`with_ht40` takes the HT40 **secondary** channel offset. Pass the IEEE
-**primary** channel to `with_channel` (not the wide-channel center label):
-
-| Band | Primary | Secondary | Pair |
-|---|---|---|---|
-| 5 GHz (C5) | `149` | `SecondaryChannel::Above` | 149 + 153 |
-| 2.4 GHz | e.g. `6` | `Above` / `Below` | 6 + 10 / 6 + 2 |
-
-### Per-chip notes
-
-- **ESP32-C5 (dual-band):** validated on **5 GHz channel 149 + 153 HT40**. This
-  is the most reliable HT40 path.
-- **ESP32-C6 (2.4 GHz only):** HT40 on 2.4 GHz **channel 11 did not bring up the
-  central's CSI** in testing, so the C5/C6 examples fall back to **HT20** on C6.
-  Other 2.4 GHz HT40 channel pairs may work — verify on-air.
-- **C5 boot stability:** dual-band radio bring-up can intermittently wedge the
-  Wi-Fi ISR (`handle_interrupts` watchdog reset, or a silent freeze). The library
-  inserts short radio-settle delays between C5 reconfiguration steps to reduce
-  this, but the most effective measure is to **keep ESP-NOW traffic off the air
-  during a node's bring-up** — power the collector up first, then release the peer.
+- **Leave room in the band.** `Ht40Above` on channel 7 occupies up to channel 11; `Ht40Below` occupies down to channel 3. A primary too close to the band edge silently falls back.
+- **The collector needs a 40 MHz RX path.** Setting the secondary channel only configures the offset; the interface bandwidth has to be widened too, or 40 MHz frames cannot be decoded. The library does both together.
 
 ### Filter out legacy / ACK CSI
 
-With the default `CsiConfig`, the radio also reports legacy and control-path CSI
-(including ACKs), which in a collector setup can dominate the stats and look
-"stuck at ~53 subcarriers" even though HT40 is configured (symptoms: `Subcarriers`
-stays ~53, `LastRate` stays legacy, CSI count tracks the control TX rate). For
-HT40-focused collection, use an HT40-only CSI filter:
+With the default `CsiConfig`, the radio also reports legacy and control-path CSI (including ACKs), which can dominate the stats and look "stuck at ~53 subcarriers" even though HT40 is configured. Symptoms: subcarrier count stays ~53, the reported rate stays legacy, and the CSI count tracks ambient traffic rather than the emitter's rate.
+
+`emitter::phy::ht_csi_acquisition` sets an HT-only acquisition for you. Doing it by hand on the newer PHY (C5/C6):
 
 ```rust
 let csi_cfg = CsiConfig {
@@ -271,22 +220,20 @@ let csi_cfg = CsiConfig {
 };
 ```
 
+The classic esp32 / C3 / S3 parts expose different controls — `lltf_en` / `htltf_en` / `ltf_merge_en` rather than `acquire_csi_*` — so use `ht_csi_acquisition` if you want one call that works everywhere.
+
 ### Verify HT40 actually engaged
 
-Check the **central's** captured CSI: a subcarrier count `≥ 100` (commonly ~117)
-confirms HT40; ~53/~56 means it fell back to legacy/HT20. The
-`esp_now_central_bw_tx` experiment prints a live subcarrier-count histogram for
-exactly this check.
+Check the **collector's** captured CSI: a subcarrier count `>= 100` (commonly ~117) confirms HT40; ~53/~56 means it fell back to legacy or HT20. `collector_sniffer` prints a per-source CSI rate, which also tells you whether the emitter is being heard at all.
 
 ### Example matrix
 
 | Example pair | Chip(s) | Band / channel | Bandwidth |
 |---|---|---|---|
+| `ht20_emitter` / `collector_sniffer` | all supported | 2.4 GHz 7 | HT20 |
+| `ht40_emitter` / `collector_sniffer` | all supported | 2.4 GHz 7+11 (C5 also 5 GHz) | HT40 |
 | `wifi_ap` / `wifi_station` | all supported | 2.4 GHz 6 | HT20 |
-| `esp_now_fast_collector` / `esp_now_fast_source` | all supported | 2.4 GHz 6 | HT20 (MCS7) |
-| `esp_now_central_ht40` / `esp_now_peripheral_ht40` | C5 / C6 / C3 / S3 / ESP32 | C5: 5 GHz 149+153 · others: 2.4 GHz 6+10 | HT40 |
-
-See `examples/esp_now_central_ht40.rs` for a full working configuration.
+| `sniffer_wifi` | all supported | any single channel | follows received frames |
 
 ## Documentation
 

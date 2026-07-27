@@ -15,14 +15,9 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
-use esp_csi_rs::{
-    CSINode, CSINodeHardware, CentralOpMode, CollectionMode, Node, WifiStationConfig,
-    config::CsiConfig, log_ln, set_csi_callback,
-};
+use esp_csi_rs::{CollectorMode, config::CsiConfig, CSINode, log_ln, NodeHardware, set_csi_callback, WifiStationConfig};
 #[cfg(feature = "statistics")]
-use esp_csi_rs::{
-    get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_rx_rate_hz, get_tx_rate_hz,
-};
+use esp_csi_rs::{get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_rx_rate_hz, get_tx_rate_hz};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::{PowerSaveMode, WifiController};
@@ -112,11 +107,10 @@ async fn main(spawner: Spawner) -> ! {
         .with_auth_method(esp_radio::wifi::AuthenticationMethod::None);
 
     let station_config = WifiStationConfig::new(client_config);
-    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
 
-    let mut node = CSINode::new(
-        Node::Central(CentralOpMode::WifiStation(station_config)),
-        CollectionMode::Collector,
+    let mut node = CSINode::new_collector(
+        CollectorMode::Station(station_config),
         Some(CsiConfig::default()),
         Some(PING_RATE_HZ),
         csi_hardware,

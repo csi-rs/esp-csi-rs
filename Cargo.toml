@@ -48,14 +48,14 @@ statistics = ["esp-csi-rs-core/statistics"]
 async-print = ["esp-csi-rs-core/async-print"]
 ## Use an external defmt global logger instead of registering one from this crate.
 external-defmt-logger = ["esp-csi-rs-core/external-defmt-logger"]
-## Enable esp-rtos scheduler tracing so the CPU-utilization DUT
-## (`esp_now_peripheral_exper_cpu`) can measure absolute idle *time* from
-## `system_idle`/`task_exec_begin` switch hooks (spec v2 §2.2). Only the CPU
-## experiment needs this; it adds a hook call to every context switch.
+## Enable esp-rtos scheduler tracing so the CPU-utilization DUT can measure
+## absolute idle *time* from `system_idle`/`task_exec_begin` switch hooks
+## (spec v2 §2.2). Only the CPU experiment needs this; it adds a hook call to
+## every context switch.
 cpu-trace = ["dep:rtos-trace", "esp-rtos/rtos-trace", "esp-csi-rs-core/cpu-trace"]
-## Expose runtime TX controls (rate / payload / pause) that let the CPU-test
-## TX example (`esp_now_central_exper_cpu_tx`) steer the real `run_esp_now_central`
-## loop from the experiment schedule. Only that example needs it.
+## Expose runtime TX controls (rate / frame size / pause) that let a CPU-test
+## TX experiment steer the real emitter inject loop from its schedule. Only that
+## experiment needs it.
 cpu-test-tx = ["esp-csi-rs-core/cpu-test-tx"]
 
 ## Support for the ESP32
@@ -133,8 +133,7 @@ esp32c5 = [
 
 
 [dependencies]
-# Shared engine. This crate is a thin facade that re-exports it in full. Path dep
-# for local development; switch to `esp-csi-rs-core = "0.1"` before publishing.
+# Shared engine. This crate is a thin facade that re-exports it in full.
 esp-csi-rs-core = { version = "0.1", default-features = false }
 
 # Core dependencies required for ESP HAL/RTOS, radio, and networking.
@@ -246,82 +245,10 @@ features = ["esp32c3", "println"]
 # (not `examples/`) to keep the canonical examples uncluttered. Cargo only
 # auto-discovers examples under `examples/`, so each is registered here with
 # an explicit `path`. Build/run them exactly as before via the cargo aliases,
-# e.g. `cargo esp32c3-build --example esp_now_central_exper --features statistics`.
+# e.g. `cargo esp32c3-build --example sniffer_wifi_exper --features statistics`.
 # The shared `experiments/cpu_test_schedule.rs` module is included by the
 # CPU-test examples via `#[path]` and is intentionally not a target itself.
 # ---------------------------------------------------------------------------
-[[example]]
-name = "esp_now_central_bw_tx"
-path = "experiments/esp_now_central_bw_tx.rs"
-
-[[example]]
-name = "esp_now_central_drop"
-path = "experiments/esp_now_central_drop.rs"
-
-[[example]]
-name = "esp_now_central_exper"
-path = "experiments/esp_now_central_exper.rs"
-
-[[example]]
-name = "esp_now_central_exper_cpu_tx"
-path = "experiments/esp_now_central_exper_cpu_tx.rs"
-
-[[example]]
-name = "esp_now_central_exper_heap"
-path = "experiments/esp_now_central_exper_heap.rs"
-
-[[example]]
-name = "esp_now_central_min"
-path = "experiments/esp_now_central_min.rs"
-
-[[example]]
-name = "esp_now_central_min_cpu_tx"
-path = "experiments/esp_now_central_min_cpu_tx.rs"
-
-[[example]]
-name = "esp_now_central_min_drop"
-path = "experiments/esp_now_central_min_drop.rs"
-
-[[example]]
-name = "esp_now_central_min_power"
-path = "experiments/esp_now_central_min_power.rs"
-
-[[example]]
-name = "esp_now_central_power"
-path = "experiments/esp_now_central_power.rs"
-
-[[example]]
-name = "esp_now_peripheral_bw_check"
-path = "experiments/esp_now_peripheral_bw_check.rs"
-
-[[example]]
-name = "esp_now_peripheral_drop"
-path = "experiments/esp_now_peripheral_drop.rs"
-
-[[example]]
-name = "esp_now_peripheral_exper"
-path = "experiments/esp_now_peripheral_exper.rs"
-
-[[example]]
-name = "esp_now_peripheral_exper_cpu"
-path = "experiments/esp_now_peripheral_exper_cpu.rs"
-
-[[example]]
-name = "esp_now_peripheral_exper_heap"
-path = "experiments/esp_now_peripheral_exper_heap.rs"
-
-[[example]]
-name = "esp_now_peripheral_min"
-path = "experiments/esp_now_peripheral_min.rs"
-
-[[example]]
-name = "esp_now_peripheral_min_cpu"
-path = "experiments/esp_now_peripheral_min_cpu.rs"
-
-[[example]]
-name = "esp_now_peripheral_min_drop"
-path = "experiments/esp_now_peripheral_min_drop.rs"
-
 [[example]]
 name = "sniffer_wifi_exper"
 path = "experiments/sniffer_wifi_exper.rs"
@@ -353,3 +280,8 @@ path = "experiments/wifi_station_min.rs"
 [[example]]
 name = "wifi_station_power"
 path = "experiments/wifi_station_power.rs"
+
+# The emitter/collector API is not on crates.io yet. Remove this once
+# esp-csi-rs-core 0.2 is published.
+[patch.crates-io]
+esp-csi-rs-core = { git = "https://github.com/csi-rs/esp-csi-rs-core.git", branch = "feat/emitter-collector" }

@@ -28,10 +28,8 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::{LogMode, Role, init_logger, set_csi_tool_emit_cap, set_role};
-use esp_csi_rs::{CSINode, CollectionMode, config::CsiConfig};
-use esp_csi_rs::{
-    CSINodeClient, CSINodeHardware, WifiSnifferConfig, log_ln, set_csi_logging_enabled,
-};
+use esp_csi_rs::{CollectorMode, config::CsiConfig, CSINode};
+use esp_csi_rs::{CSINodeClient, log_ln, NodeHardware, set_csi_logging_enabled, WifiSnifferConfig};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -85,7 +83,7 @@ async fn main(spawner: Spawner) -> ! {
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let mut node_handle = CSINodeClient::new();
-    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
 
     // Match C++ passive sniffer's CSI scope (SHOULD_COLLECT_ONLY_LLTF=y):
     // only legacy LTF, channel filter on, no HT/STBC LTF, no ACK dump.
@@ -99,11 +97,10 @@ async fn main(spawner: Spawner) -> ! {
         csi_config.channel_filter_en = true;
     }
 
-    let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(
+    let mut node = CSINode::new_collector(
+        CollectorMode::Sniffer(
             WifiSnifferConfig::default().with_channel(1),
-        )),
-        CollectionMode::Collector,
+        ),
         Some(csi_config),
         Some(10000),
         csi_hardware,

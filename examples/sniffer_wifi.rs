@@ -6,8 +6,8 @@ use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::LogMode;
-use esp_csi_rs::{CSINode, CollectionMode, config::CsiConfig, logging::logging::init_logger};
-use esp_csi_rs::{CSINodeClient, CSINodeHardware, WifiSnifferConfig, log_ln, set_csi_callback};
+use esp_csi_rs::{CollectorMode, config::CsiConfig, CSINode, logging::logging::init_logger};
+use esp_csi_rs::{CSINodeClient, log_ln, NodeHardware, set_csi_callback, WifiSnifferConfig};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -74,7 +74,7 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting Wi-Fi Sniffer Peripheral Node");
+    log_ln!("Starting Wi-Fi Sniffer Collector Node");
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
     let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
@@ -83,12 +83,11 @@ async fn main(spawner: Spawner) -> ! {
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let mut node_handle = CSINodeClient::new();
-    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
-    let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(
+    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
+    let mut node = CSINode::new_collector(
+        CollectorMode::Sniffer(
             WifiSnifferConfig::default().with_channel(7),
-        )),
-        CollectionMode::Collector,
+        ),
         Some(CsiConfig::default()),
         Some(10000),
         csi_hardware,

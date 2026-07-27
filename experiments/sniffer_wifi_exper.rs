@@ -4,8 +4,8 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
-use esp_csi_rs::{CSINode, CollectionMode, config::CsiConfig, logging::logging::init_logger};
-use esp_csi_rs::{CSINodeHardware, WifiSnifferConfig, log_ln, set_csi_logging_enabled};
+use esp_csi_rs::{CollectorMode, config::CsiConfig, CSINode, logging::logging::init_logger};
+use esp_csi_rs::{log_ln, NodeHardware, set_csi_logging_enabled, WifiSnifferConfig};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -57,7 +57,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
 
     // Match C++ passive sniffer's CSI scope (SHOULD_COLLECT_ONLY_LLTF=y):
     // only legacy LTF, channel filter on, no HT/STBC LTF, no ACK dump.
@@ -71,16 +71,15 @@ async fn main(spawner: Spawner) -> ! {
         csi_config.channel_filter_en = true;
     }
 
-    let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(
+    let mut node = CSINode::new_collector(
+        CollectorMode::Sniffer(
             WifiSnifferConfig::default().with_channel(SNIFFER_CHANNEL),
-        )),
-        CollectionMode::Collector,
+        ),
         Some(csi_config),
         Some(10000),
         csi_hardware,
     );
-    // Do not force N-only here: on C5 the ESP-NOW central broadcast PHY is not
+    // Do not force N-only here: on C5 the broadcast PHY is not
     // forced (by design), so frames can be legacy/11g. Keeping default
     // protocols avoids filtering those out in sniffer mode.
     node.run().await;

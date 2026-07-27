@@ -17,10 +17,7 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
-use esp_csi_rs::{
-    CSINode, CSINodeHardware, CentralOpMode, CollectionMode, Node, WifiApConfig, log_ln,
-    set_csi_callback,
-};
+use esp_csi_rs::{CollectorMode, CSINode, log_ln, NodeHardware, set_csi_callback, WifiApConfig};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::{PowerSaveMode, WifiController};
@@ -90,11 +87,10 @@ async fn main(spawner: Spawner) -> ! {
         .with_channel(CHANNEL);
     let ap_config = WifiApConfig::new(ap_radio_config, CHANNEL, None);
 
-    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
 
-    let mut node = CSINode::new(
-        Node::Central(CentralOpMode::WifiAccessPoint(ap_config)),
-        CollectionMode::Collector,
+    let mut node = CSINode::new_collector(
+        CollectorMode::AccessPoint(ap_config),
         Some(esp_csi_rs::config::CsiConfig::default()),
         Some(PING_RATE_HZ),
         csi_hardware,
