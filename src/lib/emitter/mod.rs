@@ -10,6 +10,24 @@
 //! and no protocol — which is what makes it compose into any topology. One
 //! emitter with many collectors, or several emitters distinguished by their
 //! source MAC, are both just deployment choices.
+//!
+//! # Chip support
+//!
+//! Raw injection is **verified on the ESP32-C5 and ESP32-C6** (~90 CSI reports per
+//! second at a 10 ms period, measured at a paired collector).
+//!
+//! On the **ESP32-S3 it does not work**: `esp_wifi_80211_tx` returns `ESP_OK` for
+//! every frame, the forced TX PHY is accepted, and nothing reaches any collector.
+//! This is not a board fault — the same S3 associates to an access point and
+//! sustains ~290 CSI reports per second as a station — and it is not this crate's
+//! logic, since the identical code path radiates on C5/C6. It appears to be
+//! raw-TX behaviour in esp-radio / ESP-IDF on that part.
+//!
+//! To use an ESP32-S3 as the traffic source in a capture set, pair
+//! [`crate::node::CollectorMode::Station`] on the S3 with
+//! [`crate::node::CollectorMode::AccessPoint`] on the measuring node instead of
+//! running an emitter. That is an associated link rather than blind sounding, but
+//! it puts energy in the channel and yields more reports per second.
 
 pub mod frame;
 pub mod phy;

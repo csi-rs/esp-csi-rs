@@ -224,6 +224,16 @@ let csi_cfg = CsiConfig {
 
 The classic esp32 / C3 / S3 parts expose different controls — `lltf_en` / `htltf_en` / `ltf_merge_en` rather than `acquire_csi_*` — so use `ht_csi_acquisition` if you want one call that works everywhere.
 
+### Emitter chip support
+
+Raw injection is **verified on the ESP32-C5 and ESP32-C6** — roughly 90 CSI reports per second at a 10 ms period, measured at a paired collector.
+
+**On the ESP32-S3 it does not work.** `esp_wifi_80211_tx` returns success for every frame and the forced TX PHY is accepted, but nothing reaches a collector. This is not a board fault (the same S3 associates to an access point and sustains ~290 reports/s as a station) and not a library bug (the identical code path radiates on C5/C6) — it appears to be raw-TX behaviour in esp-radio / ESP-IDF on that part.
+
+To use an ESP32-S3 as the traffic source, pair it as a **station** against a **softAP collector** (`wifi_station` + `wifi_ap`) instead of running an emitter. That is an associated link rather than blind sounding, but it puts energy in the channel and yields more reports per second.
+
+Any chip works fine as a **collector**.
+
 ### Verify HT40 actually engaged
 
 Check the **collector's** captured CSI: a subcarrier count `>= 100` (commonly ~117) confirms HT40; ~53/~56 means it fell back to legacy or HT20. `collector_sniffer` prints a per-source CSI rate, which also tells you whether the emitter is being heard at all.
@@ -232,8 +242,8 @@ Check the **collector's** captured CSI: a subcarrier count `>= 100` (commonly ~1
 
 | Example pair | Chip(s) | Band / channel | Bandwidth |
 |---|---|---|---|
-| `ht20_emitter` / `collector_sniffer` | all supported | 2.4 GHz 7 | HT20 |
-| `ht40_emitter` / `collector_sniffer` | all supported | 2.4 GHz 7+11 (C5 also 5 GHz) | HT40 |
+| `ht20_emitter` / `collector_sniffer` | emitter: **C5 / C6** (see below) | 2.4 GHz 7 | HT20 |
+| `ht40_emitter` / `collector_sniffer` | emitter: **C5 / C6** (see below) | 2.4 GHz 7+11 (C5 also 5 GHz) | HT40 |
 | `wifi_ap` / `wifi_station` | all supported | 2.4 GHz 6 | HT20 |
 | `sniffer_wifi` | all supported | any single channel | follows received frames |
 
