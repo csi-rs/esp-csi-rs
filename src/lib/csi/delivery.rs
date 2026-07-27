@@ -32,8 +32,7 @@ use heapless::LinearMap;
 
 /// Lock-free 32-slot MPMC ring used by the WiFi callback to deliver
 /// captured `CSIDataPacket`s to user code via
-/// [`CSINodeClient::next_csi_packet`]. Mirrors the `esp_now_pool`
-/// pattern (`src/lib/esp_now_pool.rs`): the producer is the WiFi-task
+/// [`CSINodeClient::next_csi_packet`]. The producer is the WiFi-task
 /// callback, the consumer is one async task, and the queue is
 /// **lock-free** — no critical section on enqueue, so the WiFi-task
 /// hot path is never delayed.
@@ -46,17 +45,18 @@ static CSI_QUEUE: heapless::mpmc::Q32<CSIDataPacket> = heapless::mpmc::Q32::new(
 /// after a successful `CSI_QUEUE.enqueue`.
 static CSI_WAKER: AtomicWaker = AtomicWaker::new();
 
-pub(crate) static IS_COLLECTOR: AtomicBool = AtomicBool::new(false);
+/// Whether captured CSI is delivered off-device. See
+/// [`CSINode::set_csi_output_enabled`](crate::CSINode::set_csi_output_enabled).
+pub(crate) static CSI_OUTPUT_ENABLED: AtomicBool = AtomicBool::new(false);
 // CSI publish gate. The WiFi callback checks this in a single relaxed load
 // to decide whether to build and emit a CSIDataPacket.
 //
-// Decoupled from `IS_COLLECTOR` on purpose: `CollectionMode` controls the
-// ESP-NOW responder/initiator behavior (Listener stays passive on TX), but
-// it must NOT block a `CSINodeClient` from reading CSI — that conflation
-// silently breaks sniffer + Listener configurations where the user wants
-// to passively read CSI without participating in any control protocol.
+// Deliberately separate from `CSI_OUTPUT_ENABLED`: that flag is the user's
+// output preference, while this one tracks whether any consumer is actually
+// installed. Conflating them would let an output-disabled node also block a
+// `CSINodeClient` that wants to read CSI directly.
 static CSI_PUBLISH_ENABLED: AtomicBool = AtomicBool::new(false);
-pub(crate) static COLLECTION_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+pub(crate) static CSI_OUTPUT_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// CSI delivery mode — single-atomic dispatch in the WiFi callback.
 ///
@@ -228,19 +228,21 @@ pub fn clear_csi_callback() {
 /// CSI cost is just the callback dispatch, matching the ESP-IDF reference's
 /// self-timing `csi_cb`. Intended for the like-for-like CPU comparison DUT;
 /// the callback receives no CSI data (it cannot, by design — that is the cost
-/// being elided). Pass a `fn()` that does only minimal bookkeeping. Pair with
-/// [`set_raw_listen`](crate::set_raw_listen) to also skip the ESP-NOW
-/// control-packet ingest.
+/// being elided). Pass a `fn()` that does only minimal bookkeeping.
 pub fn set_csi_raw_callback(cb: fn()) {
     CSI_RAW_CALLBACK.store(cb as *mut (), core::sync::atomic::Ordering::Release);
     CSI_PUBLISH_ENABLED.store(true, Ordering::Release);
 }
 
-/// Internal function to change collection mode at runtime (e.g. Central can
-/// signal Peripheral to start/stop collecting CSI).
-pub(crate) fn set_runtime_collection_mode(is_collector: bool) {
-    IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
-    COLLECTION_MODE_CHANGED.signal(());
+/// Toggle CSI output delivery at runtime.
+pub fn set_csi_output_enabled(enabled: bool) {
+    CSI_OUTPUT_ENABLED.store(enabled, Ordering::Relaxed);
+    CSI_OUTPUT_CHANGED.signal(());
+}
+
+/// Whether CSI output delivery is currently enabled.
+pub fn csi_output_enabled() -> bool {
+    CSI_OUTPUT_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Reset the CSI delivery gates. Called by `reset_globals` between runs.
@@ -283,9 +285,8 @@ impl CSINodeClient {
     /// Await the next CSI packet captured by the WiFi callback.
     ///
     /// Drains the lock-free `CSI_QUEUE`. Available in **both** sync and
-    /// `async-print` modes — same API, same delivery path. Mirrors
-    /// `crate::esp_now_pool::receive_async`: dequeue → register waker
-    /// → re-check (closes the lost-wakeup window).
+    /// `async-print` modes — same API, same delivery path. Dequeue →
+    /// register waker → re-check, which closes the lost-wakeup window.
     ///
     /// The first call lazily switches [`CsiDeliveryMode`] to
     /// [`CsiDeliveryMode::Async`] and opens the master publish gate so
@@ -514,8 +515,8 @@ impl CSIDataPacket {
 fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
     // Count every CSI report regardless of mode so `rx_count` / `rx_rate_hz`
     // / `pps_rx` reflect actual radio CSI throughput. This is the only path
-    // that fires for sniffer / STA / ESP-NOW collection — counting here keeps
-    // the metric consistent across all node modes.
+    // that fires for every collector capture path — counting here keeps the
+    // metric consistent across all of them.
     #[cfg(feature = "statistics")]
     STATS.rx_count.fetch_add(1, Ordering::Relaxed);
     // `cur_bb_format()` only exists on the newer MAC (C5/C6). The classic
@@ -535,8 +536,8 @@ fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
         return;
     }
 
-    // Single-atomic fast path: returns immediately in Listener mode and in
-    // Collector mode when no CSINodeClient subscriber exists. Building the
+    // Single-atomic fast path: returns immediately when no consumer is
+    // installed (no logger, callback, or CSINodeClient subscriber). Building the
     // CSIDataPacket and calling publish_immediate acquires CriticalSectionRawMutex
     // and on `riscv32imc` every other atomic op also takes a critical section,
     // so additional gate atomics in the hot ISR path delay the Embassy timer ISR.
@@ -652,7 +653,7 @@ pub async fn run_process_csi_packet() {
     loop {
         match select3(
             STOP_SIGNAL.wait(),
-            COLLECTION_MODE_CHANGED.wait(),
+            CSI_OUTPUT_CHANGED.wait(),
             Timer::after_millis(500),
         )
         .await
@@ -662,7 +663,7 @@ pub async fn run_process_csi_packet() {
                 break;
             }
             Either3::Second(_) => {
-                COLLECTION_MODE_CHANGED.reset();
+                CSI_OUTPUT_CHANGED.reset();
                 // A runtime Collector/Listener switch is not a collection
                 // teardown. Keep CSI delivery gates and callbacks intact; closing
                 // them here disables output mid-run until the next CLI `start`.

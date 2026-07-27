@@ -46,32 +46,49 @@
 //!
 //! ## Using the Crate
 //!
-//! Each ESP device is represented as a node in a collection network. For each node, we need to configure its role in the network, the mode of operation, and the CSI collection behavior. The node role determines how the node participates in the network and interacts with other nodes, while the collection mode determines how the node handles CSI data.
+//! Each ESP device is a node with one job. A CSI measurement needs energy in the channel and
+//! something to measure the channel's response to it, so there are exactly two roles:
 //!
 //! ### Node Roles
-//! 1) **Central Node**: This type of node is one that generates traffic, also can connect to one or more peripheral nodes.
-//! 2) **Peripheral Node**: This type of node does not generate traffic, also can optionally connect to one central node at most.
+//! 1) **Emitter** ([`NodeRole::Emitter`]) — puts known RF energy into the channel and never captures.
+//!    It forces its transmit PHY to a fixed format and loop-injects a raw sounding frame without
+//!    associating to anything. Configured with [`EmitterConfig`].
+//! 2) **Collector** ([`NodeRole::Collector`]) — captures the channel's response and delivers it.
 //!
-//! ### Node Operation Modes
-//! The operation mode determines how the node operates in terms of Wi-Fi features and interactions with other nodes. The supported operation modes are:
-//! 1) **ESP-NOW**
-//! 2) **Wi-Fi Station** (Central only)
-//! 3) **Wi-Fi Sniffer** (Peripheral only)
+//! Because the emitter's frames carry no meaning, it needs no peer, no handshake, and no protocol.
+//! That is what lets the two roles compose into any arrangement you like.
 //!
-//! ### Collection Modes
-//! 1) **Collector**: A collector node collects and provides CSI data output from one or more devices.
-//! 2) **Listener**: A listener is a passive node. It only enables CSI collection and does not provide any CSI output.
+//! ### Collector Capture Paths
+//! *How* a collector gets frames to measure is a separate question from what it is for, so these are
+//! variants of the collector role rather than roles of their own ([`CollectorMode`]):
 //!
-//! A collector node typically is the one that actively processes CSI data. A listener on the other hand typically keeps CSI traffic flowing but does not process CSI data.
+//! 1) **Sniffer** — lock a channel in promiscuous mode and measure every frame overheard. This is the
+//!    path that pairs with an emitter.
+//! 2) **Station** — associate to an access point and measure the frames received from it.
+//! 3) **Access Point** — run a softAP (with a built-in DHCP server) so an associated station
+//!    generates steady uplink traffic to measure.
 //!
-//! ## Collection Network Architechtures
-//! As ahown earlier, `esp-csi-rs` allows you to configure a device to one several operational modes including ESP-NOW, WiFi station, or WiFi sniffer. As such, `esp-csi-rs` supports several network setups allowing for flexibility in collecting CSI data. Some possible setups including the following:
+//! ### CSI Output
+//! A collector delivers its CSI by default. [`CSINode::set_csi_output_enabled`] turns delivery off
+//! while leaving capture running, so the RX path and its timing stay identical but nothing is
+//! decoded, logged, or handed to a callback.
 //!
-//! 1. ***Single Node:*** This is the simplest setup where only one ESP device (CSI Node) is needed. The node is configured to "sniff" packets in surrounding networks and collect CSI data. The WiFi Sniffer Peripheral Collector is the only configuration that supports this topology.
-//! 2. ***Point-to-Point:*** This set up uses two CSI Nodes, a central and a peripheral. One of them can be a collector and the other a listener. Alternatively, both can be collectors as well. Some configuration examples include
-//! - **WiFi Station Central Collector <-> Access Point/Commercial Router**: In this configuration the CSI node can connect to any WiFi Access Point like an ESP AP or a commercial router. The node in turn sends traffic to the Access Point to acquire CSI data.
-//! - **ESP-NOW Central Listener/Collector <-> ESP-NOW Peripheral Listener/Collector**: In this configuration a CSI central node connects to one other ESP-NOW peripheral node. Both ESP-NOW peripheral and central nodes can operate either as listeners or collectors.
-//! 3. ***Star:*** In this architechture a central node connects to several peripheral nodes. The central node triggers traffic and aggregates CSI sent back from peripheral nodes. Alternatively, CSI can be collected by the individual peripherals. Only the ESP-NOW operation mode supports this architechture. The ESP-NOW peripheral and central nodes can also operate either as listeners or collectors.
+//! ## Bandwidth
+//! An emitter transmits HT20 or HT40 ([`HtBandwidth`]) — plain 802.11n, supported on every chip
+//! listed above. 40 MHz needs a secondary channel above or below the primary, and every node in a
+//! capture set must agree on the primary channel.
+//!
+//! ## Collection Setups
+//! Roles compose, so the useful arrangements are just combinations rather than fixed topologies:
+//!
+//! 1. ***Single node:*** one sniffer collector, measuring whatever ambient traffic exists. The only
+//!    setup that needs no second device.
+//! 2. ***Emitter + collector:*** the controlled pairing. The emitter sounds the channel at a known
+//!    rate and bandwidth; one or more sniffer collectors measure it. Adding collectors costs the
+//!    emitter nothing, and several emitters can share one collector — each frame carries its
+//!    transmitter's MAC, so a collector attributes measurements by source.
+//! 3. ***Associated link:*** a station collector against any access point (an ESP softAP collector or
+//!    a commercial router), measuring the CSI of ordinary traffic on that link.
 //!
 //! ## Output Formats & Logging Modes
 //! `esp-csi-rs` is able to print CSI data in several formats. The output format can be configured when initializing the logger. The supported formats include:
@@ -225,16 +242,14 @@ extern crate alloc;
 // and re-exports the public API (and the crate-internal items that submodules
 // reach by crate-root path) from their new homes. The actual implementations
 // live in the modules below.
-pub mod central;
+pub mod collector;
 pub mod config;
 pub mod csi;
-pub mod esp_now_pool;
-pub mod espnow_phy;
+pub mod emitter;
 pub mod logging;
 pub mod node;
-pub mod peripheral;
 pub mod profile;
-pub mod protocol;
+pub(crate) mod radio;
 
 // Re-export `esp-radio` so the open and proprietary consumer crates build the
 // `RadioProfile` trait against the *same* `WifiController` / `Protocol(s)` /
@@ -254,21 +269,18 @@ pub mod cpu_test;
 // ---------------------------------------------------------------------------
 pub use crate::csi::delivery::{
     CSINodeClient, CsiDeliveryMode, clear_csi_callback, csi_delivery_mode, csi_logging_enabled,
-    run_process_csi_packet, set_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled,
-    set_csi_raw_callback,
+    csi_output_enabled, run_process_csi_packet, set_csi_callback, set_csi_delivery_mode,
+    set_csi_logging_enabled, set_csi_output_enabled, set_csi_raw_callback,
 };
-pub use crate::espnow_phy::{
-    apply_peer_espnow_phy, install_static_espnow_recv, set_peer_espnow_phy,
+pub use crate::emitter::frame::{
+    BROADCAST, PROBE_FRAME_LEN, build_probe_frame, inject_probe_once,
 };
+pub use crate::emitter::{EmitterConfig, HtBandwidth};
 pub use crate::node::{
-    CSINode, CSINodeHardware, CentralOpMode, CollectionMode, EspNowConfig, IOTaskConfig, Node,
-    PeripheralOpMode, WifiApConfig, WifiSnifferConfig, WifiStationConfig,
+    CSINode, CollectorMode, IOTaskConfig, NodeHardware, NodeRole, WifiApConfig, WifiSnifferConfig,
+    WifiStationConfig,
 };
 pub use crate::profile::{RadioProfile, StandardProfile};
-pub use crate::protocol::{ControlPacket, PeripheralPacket};
-
-pub use crate::esp_now_pool::set_raw_recv_callback;
-pub use crate::peripheral::esp_now::set_raw_listen;
 
 #[cfg(feature = "statistics")]
 pub use crate::stats::{
@@ -281,18 +293,11 @@ pub use crate::cpu_test::{set_test_tx_paused, set_test_tx_payload_b, set_test_tx
 
 // ---------------------------------------------------------------------------
 // Crate-internal re-exports — these items are referenced by `crate::<Item>`
-// path from the `central` / `peripheral` / `sta` / `csi::delivery` modules. Keeping
-// the flat crate-root paths means those modules need no edits after the split.
+// path from the `collector` / `emitter` / `csi::delivery` modules. Keeping the
+// flat crate-root paths means those modules need no edits after the split.
 // ---------------------------------------------------------------------------
-pub(crate) use crate::csi::delivery::{IS_COLLECTOR, set_csi, set_runtime_collection_mode};
+pub(crate) use crate::csi::delivery::set_csi;
 pub(crate) use crate::node::STOP_SIGNAL;
-pub(crate) use crate::protocol::{
-    CENTRAL_MAGIC_NUMBER, PERIPHERAL_BEACON_SENTINEL, PERIPHERAL_MAGIC_NUMBER, parse_with_magic,
-    serialize_with_magic,
-};
-
-#[cfg(feature = "statistics")]
-pub(crate) use crate::stats::STATS;
 
 #[cfg(feature = "cpu-test-tx")]
 pub(crate) use crate::cpu_test::{TEST_TX_PAUSED, TEST_TX_PAYLOAD_B, TEST_TX_RATE_HZ};

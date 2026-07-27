@@ -17,10 +17,9 @@ use esp_radio::wifi::{
 use embassy_net::udp::{PacketMetadata as UdpPacketMetadata, UdpSocket};
 use smoltcp::wire::{DhcpMessageType, DhcpPacket, DhcpRepr};
 
-use crate::central::sta::{
+use crate::collector::sta::{
     StackResourcesSlot, run_icmp_flood, run_icmp_flood_burst, run_icmp_flood_multi, run_net_task,
 };
-use crate::espnow_phy::with_espnow_recv_suspended;
 use crate::profile::RadioProfile;
 use crate::{IOTaskConfig, STOP_SIGNAL, WifiApConfig, log_ln, set_csi};
 use core::net::Ipv4Addr;
@@ -152,17 +151,15 @@ pub fn ap_init<'a>(
         embassy_net::new(interface, ip_config, AP_STACK_RESOURCES.get_or_init(), seed);
 
     let ap_cfg = Config::AccessPoint(config.ap_config.clone());
-    with_espnow_recv_suspended(|| {
-        // Profile hook fires inside the suspend closure, immediately before
-        // `set_config`, preserving the exact ordering a forced-TX PHY needs.
-        if bringup {
-            profile.before_ap_config();
-        }
-        match controller.set_config(&ap_cfg) {
-            Ok(_) => log_ln!("AP Configuration Set"),
-            Err(_) => log_ln!("AP Configuration Error"),
-        }
-    });
+    // Profile hook fires immediately before `set_config`, preserving the exact
+    // ordering a forced-TX PHY needs.
+    if bringup {
+        profile.before_ap_config();
+    }
+    match controller.set_config(&ap_cfg) {
+        Ok(_) => log_ln!("AP Configuration Set"),
+        Err(_) => log_ln!("AP Configuration Error"),
+    }
 
     (ap_stack, ap_runner)
 }
@@ -192,9 +189,7 @@ pub async fn run_ap(
     // CSI must be registered AFTER the AP-start radio restart (which clears the
     // CSI filter) — this is why the shared run_inner set_csi block skips the AP.
     if io_tasks.rx_enabled {
-        with_espnow_recv_suspended(|| {
-            set_csi(controller, csi_config.clone());
-        });
+        set_csi(controller, csi_config.clone());
     }
     log_ln!(
         "AP started on channel {} — collecting CSI from associated stations",
@@ -264,9 +259,7 @@ async fn ap_station_monitor(
                     info.mac[5],
                 );
                 if io_tasks.rx_enabled {
-                    with_espnow_recv_suspended(|| {
-                        set_csi(controller, csi_config.clone());
-                    });
+                    set_csi(controller, csi_config.clone());
                 }
             }
             Either::Second(Ok(AccessPointStationEventInfo::Disconnected(info))) => {
