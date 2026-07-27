@@ -29,6 +29,8 @@
 //! running an emitter. That is an associated link rather than blind sounding, but
 //! it puts energy in the channel and yields more reports per second.
 
+#[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
+pub mod espnow;
 pub mod frame;
 pub mod phy;
 
@@ -42,7 +44,9 @@ use esp_radio::wifi::{Config, Interfaces, SecondaryChannel, WifiController};
 use crate::radio::apply_band_for_channel;
 use crate::{STOP_SIGNAL, log_ln};
 
-use frame::{BROADCAST, PROBE_FRAME_LEN, build_probe_frame, inject_probe_once};
+use frame::{BROADCAST, PROBE_FRAME_LEN, build_probe_frame};
+#[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+use frame::inject_probe_once;
 
 /// Largest frame the CPU-utilization harness can pad up to. Sized to the 802.11
 /// MTU rather than the minimum sounding frame so the experiment can sweep
@@ -228,7 +232,22 @@ pub async fn run_emitter(
     interfaces: &mut Interfaces<'static>,
     cfg: &EmitterConfig,
 ) {
+    // ESP-NOW is the transport for the open HT emitter on every chip. Raw injection is kept for
+    // HE20 only (proprietary, C5/C6): it works there, and ESP-NOW cannot carry an HE PPDU. The
+    // classic MACs accept raw injection and never radiate it, so a single transport that works
+    // everywhere is preferable to a per-chip split whose classic half was silently dead.
     bringup(controller, cfg);
+    // Transport is per PHY generation: the C5/C6 inject raw frames (measured working, and the
+    // same path HE20 uses), while the classic MACs accept raw injection and never radiate it, so
+    // they transmit over ESP-NOW instead.
+    #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
+    espnow::bringup(
+        controller,
+        &interfaces.esp_now,
+        &cfg.dst_mac,
+        cfg.channel,
+        cfg.bandwidth.is_forty(),
+    );
 
     // Source address is the interface the frames actually leave from, so a
     // collector can attribute each frame to this emitter.
@@ -294,8 +313,13 @@ pub async fn run_emitter(
         let (period, len, paused) = (cfg.period, len, false);
 
         if !paused {
-            match inject_probe_once(&mut interfaces.sniffer, cfg.use_sta_if, &frame[..len]) {
-                Ok(()) => {
+            #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
+            let sent = espnow::send_once(&mut interfaces.esp_now, &cfg.dst_mac, &frame[..len]);
+            #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+            let sent =
+                inject_probe_once(&mut interfaces.sniffer, cfg.use_sta_if, &frame[..len]).is_ok();
+            match sent {
+                true => {
                     // Count accepted frames so `get_pps_tx` / `get_total_tx_packets`
                     // report an emitter's offered rate. Without this an emitter looks
                     // idle in `show-stats`, which is exactly the wrong signal when
@@ -303,10 +327,10 @@ pub async fn run_emitter(
                     #[cfg(feature = "statistics")]
                     crate::stats::record_tx();
                 }
-                Err(e) => {
+                false => {
                     if !reported_failure {
                         reported_failure = true;
-                        log_ln!("Emitter: raw injection rejected by the driver: {:?}", e);
+                        log_ln!("Emitter: ESP-NOW send rejected by the driver");
                     }
                 }
             }
