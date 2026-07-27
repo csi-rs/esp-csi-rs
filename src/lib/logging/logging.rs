@@ -469,6 +469,21 @@ mod logging_impl {
     }
 }
 
+/// Log a pre-formatted line through this crate's configured backend.
+///
+/// [`log_ln!`] resolves its `#[cfg(feature = ...)]` gates against the **calling**
+/// crate, so an out-of-tree consumer that does not happen to replicate this
+/// crate's feature names gets an empty expansion and silently logs nothing. That
+/// is a trap: the call compiles, the message never appears, and the only symptom
+/// is missing diagnostics exactly when they are needed.
+///
+/// This function resolves those gates here instead, so out-of-tree code (an
+/// emitter that owns the radio directly, for instance) can reach the same
+/// backend. Callers format their own message.
+pub fn log_line(msg: &str) {
+    crate::log_ln!("{}", msg);
+}
+
 /// Logging macro that routes to `println!`/`defmt` based on features.
 ///
 /// Uses async logging when active (`async-print` or auto-selected JTAG).

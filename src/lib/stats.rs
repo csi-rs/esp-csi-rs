@@ -141,6 +141,18 @@ pub(crate) fn record_tx() {
     STATS.tx_count.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Record one transmitted frame from an **out-of-tree emitter**.
+///
+/// An emitter that owns the radio directly (rather than running through
+/// [`crate::emitter::run_emitter`]) has no other way to reach the TX counters, so
+/// its frames would be invisible to `get_total_tx_packets` / `get_pps_tx` — the
+/// exact counters someone reaches for when a collector reports nothing. Call this
+/// once per frame the driver accepted.
+#[cfg(feature = "statistics")]
+pub fn record_emitter_tx() {
+    record_tx();
+}
+
 /// Packets per second transmitted since capture start (statistics feature).
 #[cfg(feature = "statistics")]
 pub fn get_pps_tx() -> u64 {
