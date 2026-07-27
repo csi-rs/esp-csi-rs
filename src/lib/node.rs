@@ -41,7 +41,7 @@ use crate::csi::delivery::{
 use crate::log_ln;
 use crate::radio::{apply_ht40_channel, suppress_espnow_rx};
 #[cfg(feature = "esp32c5")]
-use crate::radio::apply_band_for_channel;
+use crate::radio::{apply_band_auto, apply_band_for_channel};
 use crate::stats::set_seq_drop_detection;
 
 // Signals
@@ -674,18 +674,30 @@ impl<'a> CSINode<'a> {
         // Tasks necessary for a station collector.
         let sta_interface =
             if let NodeRole::Collector(CollectorMode::Station(config)) = &self.role {
-                #[cfg(feature = "esp32c5")]
-                if let Some(channel) = config.channel_hint {
-                    apply_band_for_channel(controller, channel);
-                    c5_radio_settle().await;
-                }
-                Some(sta_init(
+                let ifaces = sta_init(
                     &mut interfaces.station,
                     config,
                     controller,
                     profile,
                     bringup,
-                ))
+                );
+                // Band selection comes *after* `sta_init`, which is what configures and
+                // starts the interface: `esp_wifi_set_band_mode` requires a started
+                // controller, so doing this first failed silently and left the station on
+                // whatever band a previous run had selected.
+                //
+                // With a channel hint, pin the band it implies. Without one, select both
+                // bands — pinning a single band would make an access point on the other
+                // one invisible, which presents as a bare "no access point found".
+                #[cfg(feature = "esp32c5")]
+                {
+                    match config.channel_hint {
+                        Some(channel) => apply_band_for_channel(controller, channel),
+                        None => apply_band_auto(controller),
+                    }
+                    c5_radio_settle().await;
+                }
+                Some(ifaces)
             } else {
                 None
             };

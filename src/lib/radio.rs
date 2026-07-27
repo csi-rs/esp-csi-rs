@@ -40,6 +40,9 @@ pub(crate) fn suppress_espnow_rx() {
 /// Only the dual-band ESP32-C5 has a band to choose; a no-op elsewhere. Without
 /// this, a run on a 2.4 GHz channel can stay pinned to 5 GHz from a previous
 /// application's radio state.
+///
+/// **The controller must already be configured and started** — `esp_wifi_set_band_mode`
+/// requires it, and calling this earlier fails silently apart from the log line.
 pub(crate) fn apply_band_for_channel(controller: &mut WifiController, primary: u8) {
     #[cfg(feature = "esp32c5")]
     {
@@ -56,6 +59,24 @@ pub(crate) fn apply_band_for_channel(controller: &mut WifiController, primary: u
     #[cfg(not(feature = "esp32c5"))]
     {
         let _ = (controller, primary);
+    }
+}
+
+/// Select both bands (dual-band scan) on a 5 GHz-capable part.
+///
+/// For a station with no channel hint this is the only correct choice: pinning a
+/// single band means an access point on the other one is simply invisible, and
+/// leaving the band alone inherits whatever a previous run selected. `Auto` is the
+/// platform default on these parts, so this restores it explicitly rather than
+/// trusting that nothing has changed it.
+///
+/// Only exists on the dual-band part; single-band chips have no band to choose and
+/// no caller, so the whole function is gated rather than left as a no-op stub.
+#[cfg(feature = "esp32c5")]
+pub(crate) fn apply_band_auto(controller: &mut WifiController) {
+    use esp_radio::wifi::BandMode;
+    if controller.set_band_mode(BandMode::Auto).is_err() {
+        log_ln!("radio: set_band_mode(Auto) failed");
     }
 }
 
