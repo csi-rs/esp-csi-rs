@@ -131,6 +131,16 @@ pub fn get_pps_rx() -> u64 {
     total_packets / elapsed_secs
 }
 
+/// Record one transmitted frame.
+///
+/// Called by the emitter's inject loop for each frame the driver accepted, so
+/// TX counters reflect frames actually handed to the radio rather than loop
+/// iterations.
+#[cfg(feature = "statistics")]
+pub(crate) fn record_tx() {
+    STATS.tx_count.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Packets per second transmitted since capture start (statistics feature).
 #[cfg(feature = "statistics")]
 pub fn get_pps_tx() -> u64 {

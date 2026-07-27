@@ -232,8 +232,14 @@ pub async fn run_emitter(
         #[cfg(not(feature = "cpu-test-tx"))]
         let (period, len, paused) = (cfg.period, len, false);
 
-        if !paused {
-            let _ = inject_probe_once(&mut interfaces.sniffer, cfg.use_sta_if, &frame[..len]);
+        if !paused && inject_probe_once(&mut interfaces.sniffer, cfg.use_sta_if, &frame[..len]).is_ok()
+        {
+            // Count accepted frames so `get_pps_tx` / `get_total_tx_packets`
+            // report an emitter's offered rate. Without this an emitter looks
+            // idle in `show-stats`, which is exactly the wrong signal when
+            // diagnosing "the collector sees nothing".
+            #[cfg(feature = "statistics")]
+            crate::stats::record_tx();
         }
         match select(STOP_SIGNAL.wait(), Timer::after(period)).await {
             Either::First(_) => {
