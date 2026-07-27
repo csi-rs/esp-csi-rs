@@ -652,13 +652,13 @@ impl<'a> CSINode<'a> {
         let profile = self.profile;
         let bringup = profile.wants_bringup(&self.role, self.protocol);
 
-        // Apply protocol before STA bring-up / CSI. Generic chip-level tuning
+        // Apply protocol ladder before STA bring-up / CSI. Generic chip-level tuning
         // lives in the radio profile; specialised back-ends may rebuild the set
         // entirely. Skipped for an emitter, which pins its own protocol set during
         // bring-up to match its forced TX PHY.
         if let Some(protocol) = self.protocol.take() {
             if !is_emitter {
-                let base = Protocols::default().with_2_4(EnumSet::only(protocol));
+                let base = Protocols::default().with_2_4(protocol_ladder_2_4(protocol));
                 let protocols = profile.tune_protocols(&self.role, protocol, base);
                 controller.set_protocols(protocols).unwrap();
                 c5_radio_settle().await;
@@ -916,6 +916,91 @@ async fn drive_main(
         }
         (None, false) => {
             join(main_task, wait_for_stop()).await;
+        }
+    }
+}
+
+/// Expand a single requested 2.4 GHz protocol into the cumulative set the radio needs.
+///
+/// 802.11 protocol sets on 2.4 GHz are a **ladder**, not a choice: 11n is an extension of
+/// 11b/11g and 11ax extends all three, so a station must advertise the rungs beneath the one
+/// it wants. Advertising a lone bit (the previous `EnumSet::only(protocol)`) produces a set
+/// no real link can use.
+///
+/// This was measured, not theorised. With an N-only set, an ESP32-C6 `sniffer` collected
+/// **zero** HT20 frames from a working emitter — reproduced on both C6 boards, in both role
+/// assignments — while ESP32-S3 collectors on the same link and the same config collected
+/// normally (their driver tolerates the degenerate set). The emitter never hit this because
+/// `emitter::phy` builds `B | G | N` for itself; only the collector path used `only()`.
+///
+/// `LR` is Espressif's proprietary long-range PHY rather than a rung on the ladder, so it
+/// stays on its own. The 5 GHz-only rungs keep the previous one-bit behaviour instead of
+/// being given an invented 2.4 GHz meaning — [`RadioProfile::tune_protocols`] owns the
+/// 5 GHz set.
+fn protocol_ladder_2_4(protocol: Protocol) -> EnumSet<Protocol> {
+    match protocol {
+        Protocol::B => EnumSet::only(Protocol::B),
+        Protocol::G => Protocol::B | Protocol::G,
+        Protocol::N => Protocol::B | Protocol::G | Protocol::N,
+        Protocol::AX => Protocol::B | Protocol::G | Protocol::N | Protocol::AX,
+        // Proprietary long-range, and the 5 GHz-only rungs: not part of the 2.4 GHz ladder.
+        other => EnumSet::only(other),
+    }
+}
+
+#[cfg(test)]
+mod protocol_ladder_tests {
+    use super::*;
+
+    /// The rung under test must always be present, and every lower rung with it.
+    #[test]
+    fn each_rung_carries_the_ones_beneath_it() {
+        assert_eq!(protocol_ladder_2_4(Protocol::B), EnumSet::only(Protocol::B));
+        assert_eq!(protocol_ladder_2_4(Protocol::G), Protocol::B | Protocol::G);
+        assert_eq!(
+            protocol_ladder_2_4(Protocol::N),
+            Protocol::B | Protocol::G | Protocol::N
+        );
+        assert_eq!(
+            protocol_ladder_2_4(Protocol::AX),
+            Protocol::B | Protocol::G | Protocol::N | Protocol::AX
+        );
+    }
+
+    /// Regression for the measured failure: an N-only 2.4 GHz set made an ESP32-C6
+    /// collector capture zero HT20 frames. `N` must never be advertised alone.
+    #[test]
+    fn n_is_never_advertised_alone() {
+        let set = protocol_ladder_2_4(Protocol::N);
+        assert!(set.contains(Protocol::N));
+        assert!(set.contains(Protocol::G), "11n needs 11g beneath it");
+        assert!(set.contains(Protocol::B), "11n needs 11b beneath it");
+        assert_ne!(set, EnumSet::only(Protocol::N));
+    }
+
+    /// The collector ladder must match what the emitter already builds for itself in
+    /// `emitter::phy` (`B | G | N`) — the two ends of an HT link have to agree, and the
+    /// mismatch between them is exactly what this bug was.
+    #[test]
+    fn the_ht_rung_matches_the_emitters_own_set() {
+        assert_eq!(
+            protocol_ladder_2_4(Protocol::N),
+            Protocol::B | Protocol::G | Protocol::N
+        );
+    }
+
+    /// `LR` is Espressif's proprietary long-range PHY, not a rung: it must stay alone,
+    /// or enabling it would silently also advertise b/g/n.
+    #[test]
+    fn lr_stays_on_its_own() {
+        assert_eq!(protocol_ladder_2_4(Protocol::LR), EnumSet::only(Protocol::LR));
+    }
+
+    /// 5 GHz-only rungs keep the previous single-bit behaviour; the profile owns that band.
+    #[test]
+    fn five_ghz_rungs_are_untouched() {
+        for p in [Protocol::A, Protocol::AC] {
+            assert_eq!(protocol_ladder_2_4(p), EnumSet::only(p));
         }
     }
 }
