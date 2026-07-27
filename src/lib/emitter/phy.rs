@@ -33,33 +33,37 @@ unsafe extern "C" {
 }
 
 /// Force an HT (802.11n) TX PHY mode at MCS0 / long GI on interface `ifx`.
-fn force_ht_tx(ifx: u32, phymode: u32) {
+///
+/// Returns the driver's status code; non-zero means the rate was not applied and
+/// frames will go out in whatever format the interface defaults to. Callers should
+/// surface that rather than discard it — a silently unforced PHY looks identical to
+/// a working emitter until you inspect the receiver.
+fn force_ht_tx(ifx: u32, phymode: u32) -> i32 {
     let mut cfg = WifiTxRateConfig {
         phymode,
         rate: WIFI_PHY_RATE_MCS0_LGI,
         ersu: false,
         dcm: false,
     };
-    unsafe {
-        let _ = esp_wifi_config_80211_tx(ifx, &mut cfg);
-    }
+    unsafe { esp_wifi_config_80211_tx(ifx, &mut cfg) }
 }
 
 /// Force a TX PHY mode on the AP interface.
 ///
 /// Forcing AP TX requires `WIFI_MODE_AP` to be set first, so the current mode is
 /// saved, switched, and restored around the call.
-fn force_tx_ap_before_start(phymode: u32) {
+fn force_tx_ap_before_start(phymode: u32) -> i32 {
     let mut prev_mode = 0u32;
     unsafe {
         let _ = esp_wifi_get_mode(&mut prev_mode);
         if prev_mode != WIFI_MODE_AP {
             let _ = esp_wifi_set_mode(WIFI_MODE_AP);
         }
-        force_ht_tx(WIFI_IF_AP, phymode);
+        let rc = force_ht_tx(WIFI_IF_AP, phymode);
         if prev_mode != WIFI_MODE_AP {
             let _ = esp_wifi_set_mode(prev_mode);
         }
+        rc
     }
 }
 
@@ -140,21 +144,21 @@ pub fn ht_csi_acquisition(raw: &mut RadioCsiConfig, forty: bool) {
 }
 
 /// Force HT20 TX on STA; call immediately before `set_config(Station)`.
-pub fn force_ht20_tx_sta_before_start() {
-    force_ht_tx(WIFI_IF_STA, WIFI_PHY_MODE_HT20);
+pub fn force_ht20_tx_sta_before_start() -> i32 {
+    force_ht_tx(WIFI_IF_STA, WIFI_PHY_MODE_HT20)
 }
 
 /// Force HT40 TX on STA; call immediately before `set_config(Station)`.
-pub fn force_ht40_tx_sta_before_start() {
-    force_ht_tx(WIFI_IF_STA, WIFI_PHY_MODE_HT40);
+pub fn force_ht40_tx_sta_before_start() -> i32 {
+    force_ht_tx(WIFI_IF_STA, WIFI_PHY_MODE_HT40)
 }
 
 /// Force HT20 TX on AP; call immediately before `set_config(AccessPoint)`.
-pub fn force_ht20_tx_ap_before_start() {
-    force_tx_ap_before_start(WIFI_PHY_MODE_HT20);
+pub fn force_ht20_tx_ap_before_start() -> i32 {
+    force_tx_ap_before_start(WIFI_PHY_MODE_HT20)
 }
 
 /// Force HT40 TX on AP; call immediately before `set_config(AccessPoint)`.
-pub fn force_ht40_tx_ap_before_start() {
-    force_tx_ap_before_start(WIFI_PHY_MODE_HT40);
+pub fn force_ht40_tx_ap_before_start() -> i32 {
+    force_tx_ap_before_start(WIFI_PHY_MODE_HT40)
 }

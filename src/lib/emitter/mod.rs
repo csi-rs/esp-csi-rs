@@ -139,32 +139,48 @@ impl defmt::Format for EmitterConfig {
 fn bringup(controller: &mut WifiController<'_>, cfg: &EmitterConfig) {
     let forty = cfg.bandwidth.is_forty();
 
-    if cfg.use_sta_if {
-        if forty {
-            phy::force_ht40_tx_sta_before_start();
+    // `set_config` only calls `esp_wifi_start()` when the *mode* changes, so the
+    // forced rate has to be applied before it — hence the `_before_start` names.
+    // The driver's status code is reported rather than discarded: a rate that was
+    // never applied produces an emitter that looks healthy while transmitting in
+    // the wrong format, or not at all.
+    let rc = if cfg.use_sta_if {
+        let rc = if forty {
+            phy::force_ht40_tx_sta_before_start()
         } else {
-            phy::force_ht20_tx_sta_before_start();
-        }
+            phy::force_ht20_tx_sta_before_start()
+        };
         if controller
             .set_config(&Config::Station(StationConfig::default()))
             .is_err()
         {
             log_ln!("emitter: set_config(Station) failed");
         }
+        rc
     } else {
-        if forty {
-            phy::force_ht40_tx_ap_before_start();
+        let rc = if forty {
+            phy::force_ht40_tx_ap_before_start()
         } else {
-            phy::force_ht20_tx_ap_before_start();
-        }
+            phy::force_ht20_tx_ap_before_start()
+        };
         if controller
             .set_config(&Config::AccessPoint(AccessPointConfig::default()))
             .is_err()
         {
             log_ln!("emitter: set_config(AccessPoint) failed");
         }
+        rc
+    };
+    if rc != 0 {
+        log_ln!(
+            "Emitter: forced TX PHY rejected (rc={}); frames will not use the requested format",
+            rc
+        );
     }
 
+    // Re-apply after `set_config`, which embeds its own defaults, then re-force the
+    // rate: `set_config` may stop/start the interface, and a restart drops a rate
+    // that was configured before it.
     apply_band_for_channel(controller, cfg.channel);
     phy::apply_ht_bandwidth(controller, forty);
     phy::apply_ht_protocols(controller);
@@ -174,6 +190,18 @@ fn bringup(controller: &mut WifiController<'_>, cfg: &EmitterConfig) {
     {
         log_ln!("emitter: set_channel failed");
     }
+    let rc_post = if cfg.use_sta_if {
+        if forty {
+            phy::force_ht40_tx_sta_before_start()
+        } else {
+            phy::force_ht20_tx_sta_before_start()
+        }
+    } else if forty {
+        phy::force_ht40_tx_ap_before_start()
+    } else {
+        phy::force_ht20_tx_ap_before_start()
+    };
+    log_ln!("Emitter: forced TX PHY rc pre-start={} post-start={}", rc, rc_post);
 }
 
 /// Run the emitter: bring up the radio, then loop-inject until stopped.
