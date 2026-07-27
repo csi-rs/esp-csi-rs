@@ -423,6 +423,93 @@ pub(crate) fn set_csi(controller: &mut WifiController, config: CsiConfig) {
         .unwrap();
 }
 
+impl CSIDataPacket {
+    /// Build a `CSIDataPacket` from a raw `WifiCsiInfo`, copying the CSI byte
+    /// buffer and classifying the format via [`Self::csi_fmt_from_params`].
+    ///
+    /// Returns `None` if the CSI payload exceeds the fixed 612-byte capacity;
+    /// the caller does its own drop accounting. This is the single source of
+    /// truth for the `WifiCsiInfo` → `CSIDataPacket` mapping, shared by the
+    /// normal CSI callback ([`capture_csi_info`]) and any out-of-tree collector
+    /// that owns the radio directly, so both emit byte-identical frames.
+    pub fn from_wifi_csi_info(info: &esp_radio::wifi::csi::WifiCsiInfo<'_>) -> Option<Self> {
+        let mut csi_data = Vec::<i8, 612>::new();
+        let csi_slice = info.buf();
+        let csi_buf_len = csi_slice.len() as u16;
+        csi_data.extend_from_slice(csi_slice).ok()?;
+
+        let mac_arr = *info.mac();
+        let timestamp_us = info.timestamp().duration_since_epoch().as_micros() as u32;
+
+        #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
+        let mut csi_packet = CSIDataPacket {
+            sequence_number: info.rx_sequence(),
+            data_format: RxCSIFmt::Undefined,
+            date_time: None,
+            mac: mac_arr,
+            rssi: info.rssi() as i32,
+            bandwidth: info.cwb() as u32,
+            antenna: info.antenna() as u32,
+            rate: info.rate() as u32,
+            sig_mode: info.packet_mode() as u32,
+            mcs: info.modulation_coding_scheme() as u32,
+            smoothing: info.smoothing() as u32,
+            not_sounding: info.not_sounding() as u32,
+            aggregation: info.aggregation() as u32,
+            stbc: info.space_time_block_code() as u32,
+            fec_coding: info.forward_error_correction_coding() as u32,
+            sgi: info.short_guide_interval() as u32,
+            noise_floor: info.noise_floor() as i32,
+            ampdu_cnt: info.ampdu_count() as u32,
+            channel: info.channel() as u32,
+            secondary_channel: info.secondary_channel() as u32,
+            timestamp: timestamp_us,
+            rx_state: info.rx_state() as u32,
+            sig_len: info.signal_length() as u32,
+            csi_data_len: csi_buf_len,
+            csi_data,
+        };
+
+        #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+        let mut csi_packet = CSIDataPacket {
+            mac: mac_arr,
+            rssi: info.rssi() as i32,
+            timestamp: timestamp_us,
+            rate: info.rate() as u32,
+            noise_floor: info.noise_floor() as i32,
+            sig_len: info.signal_length() as u32,
+            rx_state: info.rx_state() as u32,
+            dump_len: info.dump_length(),
+            #[cfg(feature = "esp32c6")]
+            sigb_len: info.he_sigb_length() as u32,
+            #[cfg(feature = "esp32c6")]
+            cur_single_mpdu: info.cur_single_mpdu() as u32,
+            cur_bb_format: info.cur_bb_format() as u32,
+            rx_channel_estimate_info_vld: info.rx_channel_estimate_info_valid() as u32,
+            rx_channel_estimate_len: info.rx_channel_estimate_length(),
+            second: info.secondary_channel() as u32,
+            channel: info.channel() as u32,
+            is_group: info.is_group() as u32,
+            rxend_state: info.rx_end_state() as u32,
+            rxmatch3: info.rx_match3() as u32,
+            rxmatch2: info.rx_match2() as u32,
+            rxmatch1: info.rx_match1() as u32,
+            #[cfg(feature = "esp32c6")]
+            rxmatch0: info.rx_match0() as u32,
+            date_time: None,
+            sequence_number: info.rx_sequence(),
+            data_format: RxCSIFmt::Undefined,
+            csi_data_len: csi_buf_len,
+            csi_data,
+        };
+
+        // Classify the frame format from captured metadata so consumers can tell
+        // a high-resolution capture from a fallback frame.
+        csi_packet.csi_fmt_from_params();
+        Some(csi_packet)
+    }
+}
+
 // Function to capture CSI info from callback and publish to channel
 fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
     // Count every CSI report regardless of mode so `rx_count` / `rx_rate_hz`
@@ -463,88 +550,16 @@ fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
     // to run unconditionally — there's no cheaper way to know if the
     // packet is interesting until it's parsed.
 
-    let rssi = info.rssi();
-
-    let mut csi_data = Vec::<i8, 612>::new();
-    let csi_slice = info.buf();
-    let csi_buf_len = csi_slice.len() as u16;
-    match csi_data.extend_from_slice(csi_slice) {
-        Ok(_) => {}
-        Err(_) => {
+    // Build the packet (copies the CSI buffer, classifies the format). `None`
+    // means the payload overflowed the 612-byte cap — do drop accounting here.
+    let csi_packet = match CSIDataPacket::from_wifi_csi_info(&info) {
+        Some(p) => p,
+        None => {
             #[cfg(feature = "statistics")]
             STATS.rx_drop_count.fetch_add(1, Ordering::Relaxed);
             return;
         }
-    }
-
-    let mac_arr = *info.mac();
-    let timestamp_us = info.timestamp().duration_since_epoch().as_micros() as u32;
-
-    #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
-    let mut csi_packet = CSIDataPacket {
-        sequence_number: info.rx_sequence(),
-        data_format: RxCSIFmt::Undefined,
-        date_time: None,
-        mac: mac_arr,
-        rssi: rssi as i32,
-        bandwidth: info.cwb() as u32,
-        antenna: info.antenna() as u32,
-        rate: info.rate() as u32,
-        sig_mode: info.packet_mode() as u32,
-        mcs: info.modulation_coding_scheme() as u32,
-        smoothing: info.smoothing() as u32,
-        not_sounding: info.not_sounding() as u32,
-        aggregation: info.aggregation() as u32,
-        stbc: info.space_time_block_code() as u32,
-        fec_coding: info.forward_error_correction_coding() as u32,
-        sgi: info.short_guide_interval() as u32,
-        noise_floor: info.noise_floor() as i32,
-        ampdu_cnt: info.ampdu_count() as u32,
-        channel: info.channel() as u32,
-        secondary_channel: info.secondary_channel() as u32,
-        timestamp: timestamp_us,
-        rx_state: info.rx_state() as u32,
-        sig_len: info.signal_length() as u32,
-        csi_data_len: csi_buf_len,
-        csi_data,
     };
-
-    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
-    let mut csi_packet = CSIDataPacket {
-        mac: mac_arr,
-        rssi: rssi as i32,
-        timestamp: timestamp_us,
-        rate: info.rate() as u32,
-        noise_floor: info.noise_floor() as i32,
-        sig_len: info.signal_length() as u32,
-        rx_state: info.rx_state() as u32,
-        dump_len: info.dump_length(),
-        #[cfg(feature = "esp32c6")]
-        sigb_len: info.he_sigb_length() as u32,
-        #[cfg(feature = "esp32c6")]
-        cur_single_mpdu: info.cur_single_mpdu() as u32,
-        cur_bb_format: info.cur_bb_format() as u32,
-        rx_channel_estimate_info_vld: info.rx_channel_estimate_info_valid() as u32,
-        rx_channel_estimate_len: info.rx_channel_estimate_length(),
-        second: info.secondary_channel() as u32,
-        channel: info.channel() as u32,
-        is_group: info.is_group() as u32,
-        rxend_state: info.rx_end_state() as u32,
-        rxmatch3: info.rx_match3() as u32,
-        rxmatch2: info.rx_match2() as u32,
-        rxmatch1: info.rx_match1() as u32,
-        #[cfg(feature = "esp32c6")]
-        rxmatch0: info.rx_match0() as u32,
-        date_time: None,
-        sequence_number: info.rx_sequence(),
-        data_format: RxCSIFmt::Undefined,
-        csi_data_len: csi_buf_len,
-        csi_data,
-    };
-
-    // Classify the frame format from captured metadata so consumers can tell a
-    // high-resolution capture from a fallback frame.
-    csi_packet.csi_fmt_from_params();
 
     #[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
     #[allow(static_mut_refs)] // single writer (WiFi callback) by construction
