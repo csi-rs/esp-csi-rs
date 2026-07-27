@@ -125,9 +125,13 @@ pub fn ht_csi_acquisition(raw: &mut RadioCsiConfig, forty: bool) {
         // This PHY reports whatever training field the received PPDU carried, so
         // there is no HT20/HT40 switch to set.
         let _ = forty;
-        // HT-LTF only: legacy off so 802.11b/g frames contribute nothing, and
-        // merging off so the HT estimate is not averaged with an L-LTF one.
-        raw.lltf_en = false;
+        // HT-LTF is what we want, but `lltf_en` must stay ON: measured on an
+        // ESP32-S3, clearing it silences CSI reporting altogether rather than
+        // just dropping the legacy field, so an HT-only filter here produces a
+        // collector that captures nothing. Turning `ltf_merge_en` off is what
+        // keeps the HT estimate from being averaged with the L-LTF one, which is
+        // the part that actually mattered.
+        raw.lltf_en = true;
         raw.htltf_en = true;
         raw.stbc_htltf2_en = true;
         raw.ltf_merge_en = false;
