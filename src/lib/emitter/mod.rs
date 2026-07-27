@@ -229,6 +229,15 @@ pub async fn run_emitter(
 
     let len = build_probe_frame(&src, &cfg.dst_mac, &mut frame);
 
+    // Raw injection goes through the sniffer handle, and on some parts the MAC will
+    // only radiate an injected frame while promiscuous mode is enabled. It costs an
+    // emitter nothing to enable it -- no CSI is armed and no RX callback is
+    // registered on this role -- so enable it unconditionally rather than making
+    // callers discover a chip-specific precondition.
+    if interfaces.sniffer.set_promiscuous_mode(true).is_err() {
+        log_ln!("emitter: enabling promiscuous mode failed; raw TX may not radiate");
+    }
+
     log_ln!(
         "Emitter running: ch {}, {} MHz, {} ms period, src {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         cfg.channel,
