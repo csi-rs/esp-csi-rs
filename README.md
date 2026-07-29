@@ -69,7 +69,7 @@ Traffic carrying collected CSI data are tagged with sequence numbers that trigge
 5. **WiFi Access Point** — self-contained softAP collector with built-in DHCP; a `WifiStation` peer associates and generates uplink traffic captured as CSI on the AP.
 
 
-## Network Architechtures
+## Network Architectures
 `esp-csi-rs` allows you to configure a device to one several operational modes including ESP-NOW, wifi station, or sniffer. As such, `esp-csi-rs` supports several network setups allowing for flexibility in collecting of CSI. Some possible setups including the following:
 
 1. ***Single Node:***  This is the simplest setup where only one ESP device (CSI Node) is needed. The node is configured to "sniff" packets in surrounding networks and collect CSI data. The WiFi Sniffer Peripheral Collector is the only possible configuration that supports this topology. 
@@ -78,11 +78,11 @@ Traffic carrying collected CSI data are tagged with sequence numbers that trigge
     - **WiFi Access Point Central Collector <-> WiFi Station Peripheral Collector**: A self-contained softAP node (`WifiAccessPoint`) runs DHCP and ICMP flood to a paired `WifiStation` node — no external router required. See `wifi_ap` / `wifi_station`.
     - **ESP-NOW Central Listener/Collector <-> ESP-NOW Peripheral Listener/Collector**: In this configuration a CSI central node connects to one other ESP-NOW peripheral node. Both ESP-NOW peripheral and central nodes can operate either as listeners or collectors.
     - **ESP-NOW Fast Collector <-> ESP-NOW Fast Source**: Asymmetric simplex — the source owns all TX airtime while the collector goes RX-only after discovery. See `esp_now_fast_collector` / `esp_now_fast_source`.
-3. ***Star:*** In this architechture a central node connects to several peripheral nodes. The central node triggers traffic and aggregates CSI sent back from peripheral nodes. Alternatively, CSI can be collected by the individual peripherals. Only the ESP-NOW operation mode supports this architechture. The ESP-NOW peripheral and central nodes can also operate either as listeners or collectors. 
+3. ***Star:*** In this architecture a central node connects to several peripheral nodes. The central node triggers traffic and aggregates CSI sent back from peripheral nodes. Alternatively, CSI can be collected by the individual peripherals. Only the ESP-NOW operation mode supports this architecture. The ESP-NOW peripheral and central nodes can also operate either as listeners or collectors. 
 
 <div align="center">
 
-![Network Architechtures](/assets/net-arch.png)
+![Network Architectures](/assets/net-arch.png)
 
 </div>
 
