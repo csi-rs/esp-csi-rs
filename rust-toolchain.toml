@@ -1,11 +1,7 @@
 [toolchain]
-channel = "esp"
+## Keep dependency-resolution tools such as Dependabot on a toolchain they
+## provide. ESP builds select the `esp` toolchain after `espup install` by
+## sourcing `$HOME/export-esp.sh` (as the CI workflow already does).
+channel = "stable"
 components = ["rust-src"]
 targets = ["riscv32imac-unknown-none-elf"]
-
-# channel = "stable"
-# components = ["rust-src"]
-# targets = [
-#     "riscv32imc-unknown-none-elf",  # ESP32-C3
-#     "riscv32imac-unknown-none-elf", # ESP32-C6, ESP32-H2
-# ]
