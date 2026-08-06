@@ -6,6 +6,6 @@
 version: 2
 updates:
   - package-ecosystem: "cargo" # See documentation for possible values
-    directory: "/.github/dependabot-rust"
+    directory: "/"
     schedule:
       interval: "weekly"

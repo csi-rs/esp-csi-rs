@@ -155,14 +155,14 @@ jobs:
           fi
 
           if [[ "${mode}" == "each-feature" ]]; then
-            cargo hack check \
+            cargo +esp hack check \
               --target "${target}" \
               --features "${base_features}" \
               --exclude-features "${excluded_each_feature}" \
               --each-feature \
               --no-dev-deps
           else
-            cargo hack check \
+            cargo +esp hack check \
               --target "${target}" \
               --features "${base_features}" \
               --exclude-features "${excluded_depth2}" \
@@ -216,7 +216,7 @@ jobs:
           target="${{ matrix.target }}"
 
           # Mirror the `cargo <chip>-build-defmt` alias from .cargo/config.toml.
-          cargo build \
+          cargo +esp build \
             --release \
             --no-default-features \
             --features "${chip},no-std,auto,defmt,statistics" \
