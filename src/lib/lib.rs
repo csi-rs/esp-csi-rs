@@ -280,13 +280,16 @@ pub use crate::node::{
     CSINode, CollectorMode, IOTaskConfig, NodeHardware, NodeRole, WifiApConfig, WifiSnifferConfig,
     WifiStationConfig,
 };
-pub use crate::logging::logging::log_line;
+pub use crate::logging::logging::{
+    get_log_packet_drops, is_async_logging_active, log_line,
+};
 pub use crate::profile::{RadioProfile, StandardProfile};
 
 #[cfg(feature = "statistics")]
 pub use crate::stats::{
     get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_rx_rate_hz, get_total_rx_packets,
-    get_total_tx_packets, get_tx_rate_hz, record_emitter_tx, snapshot_bb_format_histogram,
+    get_total_tx_packets, get_tx_rate_hz, record_collector_rx, record_collector_rx_drop,
+    record_emitter_tx, snapshot_bb_format_histogram, stats_begin_run,
 };
 
 #[cfg(feature = "cpu-test-tx")]

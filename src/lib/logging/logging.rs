@@ -677,6 +677,20 @@ pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
     };
     ASYNC_LOG_ACTIVE.store(async_active, Ordering::Relaxed);
 
+    // Name the branch ONCE at boot. Which side of this `auto` selection a board lands on is
+    // decided by a one-shot USB-SOF register read whose outcome depends on enumeration timing —
+    // and the two sides have opposite overflow behavior (async = drop-newest on a 32-slot
+    // channel; sync = a blocking serial write INSIDE the radio CSI callback). Two identical
+    // boards booting into opposite modes was invisible until this line existed.
+    esp_println::println!(
+        "log backend: {}",
+        if async_active {
+            "async (drop-newest on overflow)"
+        } else {
+            "sync (blocking writes in the CSI callback)"
+        }
+    );
+
     #[cfg(any(feature = "async-print", feature = "auto"))]
     if async_active {
         #[cfg(feature = "println")]

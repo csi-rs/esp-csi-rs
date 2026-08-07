@@ -153,6 +153,37 @@ pub fn record_emitter_tx() {
     record_tx();
 }
 
+/// Record one received CSI report from an **out-of-tree collector**.
+///
+/// The HE20 path registers its own CSI callback and never enters
+/// `capture_csi_info`, so until this existed an HE20 collector's `show-stats`
+/// reported `RX Total Packets: 0` however many frames it forwarded — the
+/// firmware's receive accounting was simply dead on the path production runs.
+#[cfg(feature = "statistics")]
+pub fn record_collector_rx() {
+    STATS.rx_count.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record one CSI report an out-of-tree collector DROPPED (payload over the
+/// wire cap, filtered, or otherwise not forwarded). Sibling of
+/// [`record_collector_rx`], same reasoning.
+#[cfg(feature = "statistics")]
+pub fn record_collector_rx_drop() {
+    STATS.rx_drop_count.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Reset every counter and stamp the capture start — for an out-of-tree run
+/// loop. The in-tree loops do this via `reset_globals` + `run_process_csi_packet`,
+/// neither of which the HE20 path enters, so its counters were never reset and
+/// `pps` had no start time to divide by.
+#[cfg(feature = "statistics")]
+pub fn stats_begin_run() {
+    reset();
+    STATS
+        .capture_start_time
+        .store(Instant::now().as_ticks(), Ordering::Relaxed);
+}
+
 /// Packets per second transmitted since capture start (statistics feature).
 #[cfg(feature = "statistics")]
 pub fn get_pps_tx() -> u64 {
