@@ -45,6 +45,22 @@ static CSI_QUEUE: heapless::mpmc::Q32<CSIDataPacket> = heapless::mpmc::Q32::new(
 /// after a successful `CSI_QUEUE.enqueue`.
 static CSI_WAKER: AtomicWaker = AtomicWaker::new();
 
+/// Whether this node is currently acting as a CSI collector.
+///
+/// Restored with the central/peripheral roles: the ESP-NOW exchange lets a central tell a peripheral
+/// to start or stop collecting mid-run, which the emitter/collector roles have no equivalent for —
+/// there, the role is fixed when the node starts.
+///
+/// Deliberately NOT the same gate as `CSI_PUBLISH_ENABLED`. That one decides whether the WiFi
+/// callback builds a packet at all; this one drives the ESP-NOW responder/initiator behaviour.
+/// Conflating them silently breaks sniffer + Listener setups, where the user wants a passive node
+/// that still reads CSI.
+pub(crate) static IS_COLLECTOR: AtomicBool = AtomicBool::new(false);
+
+/// Signalled whenever [`set_runtime_collection_mode`] changes the gate, so an ESP-NOW task waiting
+/// on a mode change wakes immediately instead of polling.
+pub(crate) static COLLECTION_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
 /// Whether captured CSI is delivered off-device. See
 /// [`CSINode::set_csi_output_enabled`](crate::CSINode::set_csi_output_enabled).
 pub(crate) static CSI_OUTPUT_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -243,6 +259,12 @@ pub fn set_csi_output_enabled(enabled: bool) {
 /// Whether CSI output delivery is currently enabled.
 pub fn csi_output_enabled() -> bool {
     CSI_OUTPUT_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Change collection mode at runtime — e.g. a central signalling a peripheral to start or stop.
+pub(crate) fn set_runtime_collection_mode(is_collector: bool) {
+    IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
+    COLLECTION_MODE_CHANGED.signal(());
 }
 
 /// Reset the CSI delivery gates. Called by `reset_globals` between runs.

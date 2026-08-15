@@ -242,13 +242,20 @@ extern crate alloc;
 // and re-exports the public API (and the crate-internal items that submodules
 // reach by crate-root path) from their new homes. The actual implementations
 // live in the modules below.
+// Restored alongside `collector` / `emitter`, not instead of them — see `central_peripheral`.
+pub mod central;
+pub mod central_peripheral;
 pub mod collector;
 pub mod config;
 pub mod csi;
 pub mod emitter;
 pub mod logging;
+pub mod esp_now_pool;
+pub mod espnow_phy;
 pub mod node;
+pub mod peripheral;
 pub mod profile;
+pub mod protocol;
 pub(crate) mod radio;
 
 // Re-export `esp-radio` so the open and proprietary consumer crates build the
@@ -279,6 +286,32 @@ pub use crate::emitter::{EmitterConfig, HtBandwidth};
 pub use crate::node::{
     CSINode, CollectorMode, IOTaskConfig, NodeHardware, NodeRole, WifiApConfig, WifiSnifferConfig,
     WifiStationConfig,
+};
+/// The restored central/peripheral taxonomy. Re-exported at the crate root because that is where
+/// every existing caller and every ESP-NOW driver in this crate expects to find it.
+pub use crate::central_peripheral::{
+    CentralOpMode, CollectionMode, EspNowConfig, Node, PeripheralOpMode,
+};
+/// Pre-refactor name for [`NodeHardware`]. It served only the central/peripheral pair before the
+/// emitter/collector split gave it a second caller, and the rename was the whole change — so this is
+/// an alias, not a second type to keep in step.
+pub type CSINodeHardware<'a> = crate::node::NodeHardware<'a>;
+pub use crate::esp_now_pool::set_raw_recv_callback;
+pub use crate::espnow_phy::{
+    apply_peer_espnow_phy, install_static_espnow_recv, set_peer_espnow_phy,
+};
+pub use crate::peripheral::esp_now::set_raw_listen;
+pub use crate::protocol::{ControlPacket, PeripheralPacket};
+// The wire constants and codec are crate-private: they are an implementation detail of the ESP-NOW
+// exchange, and `pub use` on a `pub(crate)` item is an error rather than a widening.
+pub(crate) use crate::csi::delivery::{IS_COLLECTOR, set_runtime_collection_mode};
+/// Feature-gated exactly as before: the ESP-NOW drivers only touch the counters when `statistics`
+/// is on, so re-exporting unconditionally would make the symbol dead in every other build.
+#[cfg(feature = "statistics")]
+pub(crate) use crate::stats::STATS;
+pub(crate) use crate::protocol::{
+    CENTRAL_MAGIC_NUMBER, PERIPHERAL_BEACON_SENTINEL, PERIPHERAL_MAGIC_NUMBER, parse_with_magic,
+    serialize_with_magic,
 };
 pub use crate::logging::logging::{
     get_log_packet_drops, is_async_logging_active, log_line,
