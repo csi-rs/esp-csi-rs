@@ -265,9 +265,29 @@ mod log_impl {
     }
 }
 
+/// The defmt `#[global_logger]`, registered whenever defmt is on and SOME transport exists.
+///
+/// The condition used to be `any(async-print, auto)`, which silently excluded the one transport
+/// defmt is most worth having on: **`uart`**. A `defmt` + `uart` build compiled and then failed to
+/// link with `undefined symbol: _defmt_acquire` / `_defmt_release` / `_defmt_write` — the three
+/// symbols a `#[global_logger]` provides — because no logger was registered at all.
+///
+/// That combination is not exotic. It is the ONLY one available on ESP32 and ESP32-S2, which have
+/// no USB-Serial-JTAG peripheral, so their console is UART0 and their log transport is UART0. defmt
+/// exists to make a slow link carry more, and a slow link is exactly what those parts have; gating
+/// its logger on the fast transports inverted that.
+///
+/// Note the body did not need changing: `do_write` already has a `uart` arm for the async path and
+/// falls back to `esp_println::Printer::write_bytes` for the blocking one. Only the gate around it
+/// was narrower than the code inside it.
 #[cfg(all(
     feature = "defmt",
-    any(feature = "async-print", feature = "auto"),
+    any(
+        feature = "async-print",
+        feature = "auto",
+        feature = "uart",
+        feature = "jtag-serial"
+    ),
     not(feature = "external-defmt-logger")
 ))]
 mod defmt_impl {
