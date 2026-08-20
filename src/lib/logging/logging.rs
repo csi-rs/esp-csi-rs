@@ -1013,7 +1013,23 @@ fn format_array_list_into(packet: &CSIDataPacket, buf: &mut [u8]) -> usize {
             let _ = write!(&mut w, "{}", val);
         }
     }
-    let _ = w.write_str("]]\r\n");
+    // The transmission's IDENTITY, appended after the payload rather than woven into the header.
+    //
+    // Without it an array-list capture cannot be joined across receivers on the packet — the pool
+    // pairs on `(mac, frame_seq)`, and `frame_seq` is already the leading `sequence_number` field, so
+    // `mac` was the only thing missing. A capture lacking it falls back to pairing by arrival time,
+    // which on a measured capture put "simultaneous" pairs 482 ms apart.
+    //
+    // A TAIL, deliberately: the header's field positions differ per chip and a host parses the parts
+    // it needs from both ends (the leading eight are common, `csi_data_len` is last before the
+    // payload). Inserting identity into the header would shift one of those anchors on every part.
+    // Appending leaves both intact and leaves a reader of the old format still able to read the new
+    // one, which matters while a fleet runs mixed builds.
+    let _ = w.write_str("],");
+    for (i, b) in packet.mac.iter().enumerate() {
+        let _ = write!(&mut w, "{}{:02x}", if i == 0 { "" } else { ":" }, b);
+    }
+    let _ = w.write_str("]\r\n");
     w.pos
 }
 
