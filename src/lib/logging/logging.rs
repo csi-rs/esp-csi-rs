@@ -923,7 +923,14 @@ impl core::fmt::Write for SliceWriter<'_> {
 /// trailing `\n` (and an optional preceding `\r`) is trimmed because
 /// `defmt::println!` appends its own line terminator — otherwise every decoded
 /// line would be followed by a blank one.
-#[cfg(all(not(feature = "async-print"), feature = "defmt"))]
+// Gated to match its CALLERS, which are `#[cfg(feature = "defmt")]`.
+//
+// This was `all(not(async-print), defmt)` while every call site was `defmt` alone, so a build with
+// both features referenced a function that did not exist — `defmt` + `async-print` has never
+// compiled, which is the whole reason there was "no way to flash defmt firmware". A definition whose
+// gate is narrower than its callers' is not a configuration to choose between; it is a build that
+// cannot exist.
+#[cfg(feature = "defmt")]
 fn defmt_emit_line(bytes: &[u8]) {
     let mut end = bytes.len();
     if end > 0 && bytes[end - 1] == b'\n' {
