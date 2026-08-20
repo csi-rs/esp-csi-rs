@@ -217,8 +217,40 @@ fn auto_usb_sof_seen() -> bool {
         feature = "esp32s3"
     ))]
     {
+        // CLEAR the latch, then watch for a FRESH frame — the same probe the CLI console uses
+        // (`cli::serial::usb_sof_seen`), for the reason documented there: `INT_RAW` latches and is
+        // only cleared by writing `INT_CLR`, so reading it directly answers "has this board EVER
+        // seen a host" rather than "is a host attached now". That made this a coin flip in both
+        // directions — false when it ran before the first SOF arrived (a USB board logging to its
+        // UART pins, which is how a whole fleet went silent on 2026-08-20 while attaching,
+        // verifying and reporting its rate) and sticky-true long after a host went away.
+        //
+        // A budget rather than a single sample, because SOF is a 1 ms heartbeat: an attached host
+        // answers almost immediately, and only a genuinely UART-only rig spends the whole window.
+        // 300 ms matches the CLI's, so the console and the logger cannot reach opposite conclusions
+        // about the same board — which was the actual defect, not the choice itself.
         const SOF_INT_MASK: u32 = 0b10;
-        unsafe { (USB_DEVICE_INT_RAW.read_volatile() & SOF_INT_MASK) != 0 }
+        const INT_CLR_OFFSET: usize = 0x0c;
+        const BUDGET_MS: u32 = 300;
+
+        let int_raw = USB_DEVICE_INT_RAW as *mut u32;
+        unsafe {
+            int_raw
+                .byte_add(INT_CLR_OFFSET)
+                .write_volatile(SOF_INT_MASK)
+        };
+        let delay = esp_hal::delay::Delay::new();
+        let mut waited = 0u32;
+        loop {
+            if unsafe { USB_DEVICE_INT_RAW.read_volatile() & SOF_INT_MASK } != 0 {
+                break true;
+            }
+            if waited >= BUDGET_MS {
+                break false;
+            }
+            delay.delay_millis(1);
+            waited += 1;
+        }
     }
 }
 
@@ -634,7 +666,7 @@ pub fn log_csi(packet: CSIDataPacket) {
             return;
         }
     }
-    #[cfg(not(feature = "async-print"))]
+    #[cfg(any(not(feature = "async-print"), feature = "auto"))]
     {
         #[cfg(any(feature = "uart", feature = "jtag-serial", feature = "auto"))]
         {
@@ -678,18 +710,39 @@ pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
     // writes inline). Enable the publish gate up front so it starts running.
     crate::set_csi_logging_enabled(true);
 
+    // Under `auto` this follows the TRANSPORT, never the feature flag.
+    //
+    // `async-print` used to force this true, which is the bug: `auto` decides the console at boot
+    // from a one-shot USB-SOF read, and a board that lands on UART was then run through the ASYNC
+    // backend — a 32-slot drop-newest channel against ~11 KB/s of UART, versus the ~48 KB/s a
+    // collector produces. Measured on the bench 2026-08-20 with an emitter running: `RX Total
+    // Packets: 897`, `Log Dropped Pkts: 801`, and **zero bytes** on the port in both `serialized`
+    // and `array-list`. The board attached, verified, answered every command and reported its rate,
+    // because the CLI console is on USB either way — it simply never delivered CSI. Four boards
+    // re-plugged at once all landed there, and a whole fleet went silent while looking healthy.
+    //
+    // The pairing this restores is the one this function's own doc comment already described: async
+    // on USB-Serial-JTAG, where the link is fast and drop-newest is a sane overflow rule; sync on
+    // UART, where writes block and a slow capture beats a silent one. `async-print` now means "async
+    // where the transport suits it", not "async regardless".
+    //
+    // `auto` deliberately stays a runtime choice — a board may be reached over either console, and
+    // pinning the transport at build time would take that away.
     let async_active = {
-        #[cfg(feature = "async-print")]
-        {
-            true
-        }
-        #[cfg(all(not(feature = "async-print"), feature = "auto", not(feature = "esp32")))]
+        #[cfg(all(feature = "auto", not(feature = "esp32")))]
         {
             auto_usb_sof_seen()
         }
-        #[cfg(any(
-            all(not(feature = "async-print"), feature = "auto", feature = "esp32"),
-            all(not(feature = "async-print"), not(feature = "auto"))
+        #[cfg(all(
+            any(not(feature = "auto"), feature = "esp32"),
+            feature = "async-print"
+        ))]
+        {
+            true
+        }
+        #[cfg(all(
+            any(not(feature = "auto"), feature = "esp32"),
+            not(feature = "async-print")
         ))]
         {
             false
@@ -800,7 +853,7 @@ async fn write_serialized_packet_async(
     }
 }
 
-#[cfg(not(feature = "async-print"))]
+#[cfg(any(not(feature = "async-print"), feature = "auto"))]
 fn write_serialized_packet_sync(packet: CSIDataPacket) {
     const PACKET_MAX_SIZE: usize = CSIDataPacket::POSTCARD_MAX_SIZE;
     const PACKET_BUF_SIZE: usize = PACKET_MAX_SIZE + (PACKET_MAX_SIZE / 254) + 1;
@@ -957,7 +1010,7 @@ fn format_array_list_into(packet: &CSIDataPacket, buf: &mut [u8]) -> usize {
     w.pos
 }
 
-#[cfg(not(feature = "async-print"))]
+#[cfg(any(not(feature = "async-print"), feature = "auto"))]
 fn write_text_array_packet_sync(packet: CSIDataPacket) {
     // Single-consumer scratch: the sync write path runs only from the WiFi
     // callback (`node_task`), one packet at a time. A static avoids putting a
@@ -1340,18 +1393,18 @@ fn uart0_write_bytes_fast(bytes: &[u8]) {
 
 /// Cumulative microseconds spent formatting CSI packets on the sync write
 /// path. Read by examples to compute the format vs UART-write split.
-#[cfg(not(feature = "async-print"))]
+#[cfg(any(not(feature = "async-print"), feature = "auto"))]
 pub static SYNC_FORMAT_US: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
 /// Cumulative microseconds spent writing formatted CSI bytes to the
 /// transport on the sync write path.
-#[cfg(not(feature = "async-print"))]
+#[cfg(any(not(feature = "async-print"), feature = "auto"))]
 pub static SYNC_WRITE_US: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
 /// Number of CSI packets emitted on the sync write path; the divisor used
 /// with [`SYNC_FORMAT_US`] / [`SYNC_WRITE_US`] for per-packet averages.
-#[cfg(not(feature = "async-print"))]
+#[cfg(any(not(feature = "async-print"), feature = "auto"))]
 pub static SYNC_PKT_COUNT: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
 
-#[cfg(not(feature = "async-print"))]
+#[cfg(any(not(feature = "async-print"), feature = "auto"))]
 fn write_csi_tool_packet_sync(packet: CSIDataPacket) {
     // Format + spin UART0 directly in the WiFi callback context. This is the
     // hot path that achieves baud-bound PPS — moving the spin out to a
@@ -1540,7 +1593,7 @@ async fn write_text_packet_async(packet: CSIDataPacket, driver: &mut LogOutput) 
     Ok(())
 }
 
-#[cfg(not(feature = "async-print"))]
+#[cfg(any(not(feature = "async-print"), feature = "auto"))]
 fn write_text_packet_sync(packet: CSIDataPacket) {
     if let Some(dt) = &packet.date_time {
         log_ln!(
