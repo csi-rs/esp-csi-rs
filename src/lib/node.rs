@@ -445,13 +445,24 @@ impl<'a> NodeHardware<'a> {
 
 pub(crate) fn reset_globals() {
     // Close all CSI delivery gates so any late-firing WiFi callback runs
-    // are no-ops, then clear the statistics counters. The CSI callback stays
-    // registered with esp-radio after stop (the radio itself is still up),
-    // but with the gates closed the callback short-circuits before it touches
-    // the log channel or the user's callback. Without this, a collector keeps
-    // emitting CSI lines on the serial port well after `send_stop()`.
+    // are no-ops. The CSI callback stays registered with esp-radio after stop
+    // (the radio itself is still up), but with the gates closed the callback
+    // short-circuits before it touches the log channel or the user's callback.
+    // Without this, a collector keeps emitting CSI lines on the serial port
+    // well after `send_stop()`.
+    //
+    // The statistics counters are deliberately NOT cleared here. This runs at the END of
+    // `run_inner`, so clearing them destroyed the run's numbers at the moment the run finished —
+    // every post-collection `show-stats` on the classic AP/STA path reported `RX Total Packets: 0`
+    // however many frames the callback had counted, which reads as "the radio received nothing"
+    // when the truth was "the radio received plenty and the log path could not keep up". The
+    // counters are the only evidence a user has that captured CSI was dropped rather than never
+    // captured, and this was throwing that evidence away.
+    //
+    // `stats::reset` now runs at the START of a run instead (see `run_inner`), which is both what
+    // the README already documents ("counters reset on the start of each new `start` collection")
+    // and what the HE20 path already did via `stats_begin_run`.
     crate::csi::delivery::reset();
-    crate::stats::reset();
 }
 
 /// Primary orchestration object for a CSI node.
@@ -691,6 +702,13 @@ impl<'a> CSINode<'a> {
     /// logger via `client`). When `None` the node runs until externally
     /// stopped via [`CSINodeClient::send_stop`].
     async fn run_inner(&mut self, duration: Option<u64>, client: Option<&mut CSINodeClient>) {
+        // Zero the counters and stamp the capture start so `show-stats` describes THIS run, and
+        // still describes it after the run ends. Deliberately here rather than in `reset_globals`,
+        // which runs at stop — see the note there. Mirrors what the HE20 collector path already
+        // does with `stats_begin_run`.
+        #[cfg(feature = "statistics")]
+        crate::stats::stats_begin_run();
+
         let interfaces = &mut self.hardware.interfaces;
         let controller = &mut self.hardware.controller;
 

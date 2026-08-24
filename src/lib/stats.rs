@@ -79,7 +79,12 @@ pub(crate) fn seq_drop_detection_enabled() -> bool {
     SEQ_DROP_DETECTION_ENABLED.load(Ordering::Relaxed)
 }
 
-/// Reset the statistics counters. Called by `reset_globals` between runs.
+/// Reset the statistics counters. Called only by `stats_begin_run`, at the start of a run.
+///
+/// Gated on `statistics` because its sole caller is: moving the reset out of `reset_globals` (which
+/// is unconditional) left this with zero callers when the feature is off, and `cargo hack
+/// --each-feature` builds exactly that combination.
+#[cfg(feature = "statistics")]
 pub(crate) fn reset() {
     #[cfg(feature = "statistics")]
     {
@@ -172,10 +177,14 @@ pub fn record_collector_rx_drop() {
     STATS.rx_drop_count.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Reset every counter and stamp the capture start — for an out-of-tree run
-/// loop. The in-tree loops do this via `reset_globals` + `run_process_csi_packet`,
-/// neither of which the HE20 path enters, so its counters were never reset and
-/// `pps` had no start time to divide by.
+/// Reset every counter and stamp the capture start, at the START of a run.
+///
+/// Called by `CSINode::run_inner` for the in-tree roles and directly by the out-of-tree HE20 run
+/// loop, which enters neither `run_inner` nor `run_process_csi_packet` and so had no counter reset
+/// and no start time to divide `pps` by.
+///
+/// This is the ONLY place counters are cleared. `reset_globals` used to also clear them, but it runs
+/// at the end of a run, so it wiped the numbers a user was about to read — see the note there.
 #[cfg(feature = "statistics")]
 pub fn stats_begin_run() {
     reset();
