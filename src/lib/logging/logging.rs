@@ -108,6 +108,14 @@ pub fn auto_log_backend_label() -> &'static str {
 /// Capping to 128 keeps every line at ~475B and lets sniffer hit the
 /// same PPS as a peripheral seeing only one PHY type.
 ///
+/// Scope is deliberately EspCsiTool-ONLY, and this is NOT a general throughput knob. Truncating a
+/// payload discards subcarriers the radio already spent airtime capturing, and an arbitrary cap cuts
+/// mid-LTF-field. The right way to shorten a CSI line is to stop ACQUIRING the fields you do not
+/// want — `CsiConfig`'s per-LTF flags, driven from a CLI as `set-csi --htltf=off --stbc-htltf=off`.
+/// Measured on an ESP32 at 115200, that beat truncating to the same 128 bytes: 23.9 vs 21.0 CSI/s
+/// delivered, and 506 vs 446 frames captured, because the radio does less work per frame. This cap
+/// exists only to reproduce ESP32-CSI-Tool's column-25/26 semantics for collectors expecting them.
+///
 /// Default 0 = no cap (emit full `csi_data`).
 static CSI_TOOL_EMIT_CAP: portable_atomic::AtomicU16 = portable_atomic::AtomicU16::new(0);
 
@@ -115,8 +123,8 @@ static CSI_TOOL_EMIT_CAP: portable_atomic::AtomicU16 = portable_atomic::AtomicU1
 ///
 /// Pass `0` to disable the cap (emit all captured samples — the default).
 /// Pass `128` to match ESP32-CSI-Tool's `CONFIG_SHOULD_COLLECT_ONLY_LLTF`
-/// behavior, which produces uniform ~475B lines in sniffer mode and keeps
-/// PPS at the UART ceiling regardless of the captured PHY type.
+/// behavior. See [`CSI_TOOL_EMIT_CAP`] for why this is not the knob to reach
+/// for when the goal is throughput.
 pub fn set_csi_tool_emit_cap(cap: u16) {
     CSI_TOOL_EMIT_CAP.store(cap, Ordering::Relaxed);
 }
@@ -890,6 +898,13 @@ async fn write_text_array_packet_async(
     // identical across transports and modes.
     let scratch = unsafe { &mut *core::ptr::addr_of_mut!(ASYNC_LOG_SCRATCH) };
     let n = format_array_list_into(&packet, scratch);
+    // `0` means the formatter refused the line rather than truncate it (see
+    // `format_array_list_into`). Count it as a log drop and emit nothing — a partial row is worse
+    // than a missing one, because a host cannot tell it from real data.
+    if n == 0 {
+        record_log_drop();
+        return Ok(());
+    }
     driver.write(&scratch[..n]).await.map_err(|_| ())?;
     Ok(())
 }
@@ -1003,14 +1018,48 @@ fn format_array_list_into(packet: &CSIDataPacket, buf: &mut [u8]) -> usize {
     }
     field!(packet.sig_len);
     field!(packet.csi_data_len);
+    // Every captured sample is emitted. There is deliberately no truncation knob here: discarding
+    // subcarriers the radio already spent airtime capturing is the wrong trade, and an arbitrary cap
+    // would cut mid-LTF-field, which is not a meaningful measurement. To shorten a line, stop
+    // ACQUIRING the fields you do not want — `set-csi --htltf=off --stbc-htltf=off`. See
+    // `CSI_TOOL_EMIT_CAP`.
+    let emit_len = packet.csi_data.len();
 
     let _ = w.write_str("[");
-    let data_len = packet.csi_data.len();
-    for (i, val) in packet.csi_data.iter().enumerate() {
-        if i + 1 < data_len {
-            let _ = write!(&mut w, "{},", val);
+    // Direct decimal encoding rather than `write!("{},")` per value, using the same `write_i8_sep`
+    // the EspCsiTool formatter already used.
+    //
+    // This is throughput-NEUTRAL and is not here for speed. A/B measured on an ESP32 at 400 Hz
+    // offered, three 20 s trials each, delivered CSI/s: 8.98 (core::fmt) vs 8.86 (this) at 115200,
+    // and 63.00 vs 63.79 at 921600 — inside run-to-run noise at both bauds. The formatting cost is
+    // a few ms against a ~100 ms blocking UART write per line, so it was never the bottleneck; an
+    // earlier claim in this file that it was the 921600 ceiling was wrong, and the 35%-of-line-rate
+    // figure behind it was capture-rate variance, not formatting.
+    //
+    // Kept for two reasons that do hold: it keeps `core::fmt` — whose integer path leans on
+    // software division on the LX6, inside the Wi-Fi RX callback — off this path, and it makes the
+    // output length predictable enough to bounds-check ONCE up front, which is what lets the
+    // formatter refuse an over-long line instead of emitting a truncated one (see below).
+    //
+    // Bounds are checked ONCE for the whole body instead of per value: `write_i8_sep` writes up to
+    // 5 bytes and indexes `buf` directly, so a per-value check is the only thing standing between a
+    // long payload and a panic. Reserve the closing `],` + MAC + `]\r\n` too.
+    const TAIL_RESERVE: usize = 2 + 17 + 3;
+    if w.pos + emit_len * 5 + TAIL_RESERVE > w.buf.len() {
+        // Refuse to emit rather than emit a prefix. `SliceWriter` returns `Err` on overflow and
+        // every `write!` here discards it, so an over-long line used to be written up to the byte
+        // the buffer ran out at and shipped headerless-tail — no `]`, no MAC, no `\r\n`. A host
+        // parser sees that as a corrupt row of real data, which is far worse than a counted drop.
+        return 0;
+    }
+    for (i, &val) in packet.csi_data.iter().take(emit_len).enumerate() {
+        let sep = if i + 1 < emit_len { b',' } else { 0 };
+        if sep == 0 {
+            // Last value: no trailing separator. Write with a placeholder and rewind over it.
+            write_i8_sep(w.buf, &mut w.pos, val, b',');
+            w.pos -= 1;
         } else {
-            let _ = write!(&mut w, "{}", val);
+            write_i8_sep(w.buf, &mut w.pos, val, sep);
         }
     }
     // The transmission's IDENTITY, appended after the payload rather than woven into the header.
@@ -1041,6 +1090,11 @@ fn write_text_array_packet_sync(packet: CSIDataPacket) {
     static mut SCRATCH: [u8; 3328] = [0u8; 3328];
     let scratch = unsafe { &mut *core::ptr::addr_of_mut!(SCRATCH) };
     let _n = format_array_list_into(&packet, scratch);
+    // See the async path: `0` is a refused line, not an empty one.
+    if _n == 0 {
+        record_log_drop();
+        return;
+    }
 
     // Emit the formatted line in one bulk write, mirroring the sync
     // `write_csi_tool_packet` path. On ESP32/UART the direct FIFO writer
@@ -1076,6 +1130,15 @@ const ESP_CSI_TOOL_HEADER: &str = "type,role,mac,rssi,rate,sig_mode,mcs,bandwidt
 /// Caller must ensure at least 5 bytes free (worst case `-128 ` = 5 bytes).
 #[inline(always)]
 fn write_i8_space(buf: &mut [u8], offset: &mut usize, val: i8) {
+    write_i8_sep(buf, offset, val, b' ');
+}
+
+/// As [`write_i8_space`], but with a caller-chosen separator byte, so the
+/// `ArrayList` formatter can share the same encoder with a `,`.
+///
+/// Caller must ensure at least 5 bytes free (worst case `-128,` = 5 bytes).
+#[inline(always)]
+fn write_i8_sep(buf: &mut [u8], offset: &mut usize, val: i8, sep: u8) {
     let mut o = *offset;
     let mut n: i16 = val as i16;
     if n < 0 {
@@ -1097,7 +1160,7 @@ fn write_i8_space(buf: &mut [u8], offset: &mut usize, val: i8) {
         buf[o] = b'0' + n as u8;
         o += 1;
     }
-    buf[o] = b' ';
+    buf[o] = sep;
     *offset = o + 1;
 }
 
@@ -1774,6 +1837,21 @@ pub async fn logger_backend(mut driver: LogOutput) {
             }
         }
     }
+}
+
+/// Record one CSI line the log path refused to emit.
+///
+/// Mirrors the cfg shape of [`get_log_packet_drops`] / [`reset_global_log_drops`] so a build without
+/// the async channel (where `LOG_DROPPED_PACKETS` does not exist) still compiles — the drop is then
+/// simply not counted, same as every other statistic in such a build.
+#[allow(unused)]
+pub(crate) fn record_log_drop() {
+    #[cfg(all(
+        any(feature = "uart", feature = "jtag-serial", feature = "auto"),
+        any(feature = "async-print", feature = "auto"),
+        feature = "statistics"
+    ))]
+    LOG_DROPPED_PACKETS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Reset the global dropped-log counter (statistics feature only).
