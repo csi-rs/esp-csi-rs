@@ -285,3 +285,75 @@ path = "experiments/wifi_station_power.rs"
 # esp-csi-rs-core 0.2 is published.
 [patch.crates-io]
 esp-csi-rs-core = { git = "https://github.com/csi-rs/esp-csi-rs-core.git", branch = "feat/emitter-collector" }
+
+[[example]]
+name = "esp_now_central_bw_tx"
+path = "experiments/esp_now_central_bw_tx.rs"
+
+[[example]]
+name = "esp_now_central_drop"
+path = "experiments/esp_now_central_drop.rs"
+
+[[example]]
+name = "esp_now_central_exper"
+path = "experiments/esp_now_central_exper.rs"
+
+[[example]]
+name = "esp_now_central_exper_cpu_tx"
+path = "experiments/esp_now_central_exper_cpu_tx.rs"
+
+[[example]]
+name = "esp_now_central_exper_heap"
+path = "experiments/esp_now_central_exper_heap.rs"
+
+[[example]]
+name = "esp_now_central_min"
+path = "experiments/esp_now_central_min.rs"
+
+[[example]]
+name = "esp_now_central_min_cpu_tx"
+path = "experiments/esp_now_central_min_cpu_tx.rs"
+
+[[example]]
+name = "esp_now_central_min_drop"
+path = "experiments/esp_now_central_min_drop.rs"
+
+[[example]]
+name = "esp_now_central_min_power"
+path = "experiments/esp_now_central_min_power.rs"
+
+[[example]]
+name = "esp_now_central_power"
+path = "experiments/esp_now_central_power.rs"
+
+[[example]]
+name = "esp_now_peripheral_bw_check"
+path = "experiments/esp_now_peripheral_bw_check.rs"
+
+[[example]]
+name = "esp_now_peripheral_drop"
+path = "experiments/esp_now_peripheral_drop.rs"
+
+[[example]]
+name = "esp_now_peripheral_exper"
+path = "experiments/esp_now_peripheral_exper.rs"
+
+[[example]]
+name = "esp_now_peripheral_exper_cpu"
+path = "experiments/esp_now_peripheral_exper_cpu.rs"
+
+[[example]]
+name = "esp_now_peripheral_exper_heap"
+path = "experiments/esp_now_peripheral_exper_heap.rs"
+
+[[example]]
+name = "esp_now_peripheral_min"
+path = "experiments/esp_now_peripheral_min.rs"
+
+[[example]]
+name = "esp_now_peripheral_min_cpu"
+path = "experiments/esp_now_peripheral_min_cpu.rs"
+
+[[example]]
+name = "esp_now_peripheral_min_drop"
+path = "experiments/esp_now_peripheral_min_drop.rs"
