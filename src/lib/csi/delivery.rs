@@ -261,6 +261,107 @@ pub fn csi_output_enabled() -> bool {
     CSI_OUTPUT_ENABLED.load(Ordering::Relaxed)
 }
 
+/// Source-MAC allowlist for captured CSI. All-zero (the default) means "accept any source".
+///
+/// A collector is promiscuous by nature: it reports CSI for every frame its radio decodes, which on
+/// a busy channel means the AP's own beacons and ACKs, the association exchange, and any THIRD-PARTY
+/// device on the channel. That is correct behaviour and the reports are real, but it is not what
+/// someone measuring their own link asked for, and it reads as corrupt data — the leading field of a
+/// row is the frame's own 802.11 sequence number, which is per-transmitter and per-TID, so foreign
+/// rows carry arbitrary sequence numbers and a legacy-rate PHY's shorter CSI length.
+///
+/// Filtering on the device rather than on the host is not just convenience. On a console-bound
+/// collector every rejected frame is console bandwidth handed back to the traffic the user actually
+/// configured, and the rejection happens before the 612-byte packet copy and before any formatting.
+/// Held as a packed `u64` (big-endian in the low 48 bits) rather than a mutex-wrapped `[u8; 6]`,
+/// because this is read from inside the Wi-Fi CSI callback. On `riscv32imc` every atomic op takes a
+/// critical section, and this file's own dispatch comments note that extra gate atomics in that ISR
+/// path delay the Embassy timer ISR — a `CriticalSectionRawMutex` per captured frame is exactly the
+/// cost the fast path is written to avoid. One relaxed 64-bit load has no such problem.
+static CSI_PEER_FILTER: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
+
+/// Minimum `sig_mode` (PHY class) to accept: `0` accepts everything, `1` accepts HT (802.11n) and
+/// better, dropping the legacy-rate mgmt/control frames that produce the short L-LTF-only rows.
+static CSI_MIN_SIG_MODE: portable_atomic::AtomicU8 = portable_atomic::AtomicU8::new(0);
+
+/// Single gate so the DEFAULT (unfiltered) path costs one relaxed bool load rather than a 64-bit
+/// load plus a `u8` load on every captured frame.
+static CSI_FILTER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[inline(always)]
+fn pack_mac(mac: [u8; 6]) -> u64 {
+    let mut v = 0u64;
+    let mut i = 0;
+    while i < 6 {
+        v = (v << 8) | mac[i] as u64;
+        i += 1;
+    }
+    v
+}
+
+fn refresh_filter_active() {
+    let active = CSI_PEER_FILTER.load(Ordering::Relaxed) != 0
+        || CSI_MIN_SIG_MODE.load(Ordering::Relaxed) != 0;
+    CSI_FILTER_ACTIVE.store(active, Ordering::Relaxed);
+}
+
+/// Restrict captured CSI to one source MAC. All-zero clears the filter.
+pub fn set_csi_peer_filter(mac: [u8; 6]) {
+    CSI_PEER_FILTER.store(pack_mac(mac), Ordering::Relaxed);
+    refresh_filter_active();
+}
+
+/// The current source-MAC filter (all-zero = no filter).
+pub fn csi_peer_filter() -> [u8; 6] {
+    let v = CSI_PEER_FILTER.load(Ordering::Relaxed);
+    let mut mac = [0u8; 6];
+    let mut i = 0;
+    while i < 6 {
+        mac[i] = (v >> (8 * (5 - i))) as u8;
+        i += 1;
+    }
+    mac
+}
+
+/// Restrict captured CSI to frames whose `sig_mode` is at least `min`.
+///
+/// `0` accepts every PHY (default); `1` keeps HT and better.
+pub fn set_csi_min_sig_mode(min: u8) {
+    CSI_MIN_SIG_MODE.store(min, Ordering::Relaxed);
+    refresh_filter_active();
+}
+
+/// The current minimum-`sig_mode` filter.
+pub fn csi_min_sig_mode() -> u8 {
+    CSI_MIN_SIG_MODE.load(Ordering::Relaxed)
+}
+
+/// Whether a frame passes the attribution filters, judged from the raw `WifiCsiInfo`.
+///
+/// Deliberately reads `info` rather than a built `CSIDataPacket`: both fields are available on the
+/// raw callback argument, so a rejected frame costs one MAC compare instead of a 612-byte copy plus
+/// a format pass. On the classic MACs `packet_mode()` is the `sig_mode` field; on C5/C6 there is no
+/// such field, so the PHY half of the filter is a no-op there and only the MAC filter applies.
+#[inline(always)]
+fn csi_passes_filter(info: &esp_radio::wifi::csi::WifiCsiInfo<'_>) -> bool {
+    // One relaxed load on the unfiltered default, which is what almost every run uses.
+    if !CSI_FILTER_ACTIVE.load(Ordering::Relaxed) {
+        return true;
+    }
+    let want = CSI_PEER_FILTER.load(Ordering::Relaxed);
+    if want != 0 && pack_mac(*info.mac()) != want {
+        return false;
+    }
+    #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
+    {
+        let min = CSI_MIN_SIG_MODE.load(Ordering::Relaxed);
+        if min != 0 && (info.packet_mode() as u8) < min {
+            return false;
+        }
+    }
+    true
+}
+
 /// Change collection mode at runtime — e.g. a central signalling a peripheral to start or stop.
 pub(crate) fn set_runtime_collection_mode(is_collector: bool) {
     IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
@@ -279,6 +380,9 @@ pub(crate) fn reset() {
     CSI_PUBLISH_ENABLED.store(false, Ordering::Release);
     CSI_DELIVERY_MODE.store(CsiDeliveryMode::Off as u8, Ordering::Release);
     CSI_CALLBACK.store(core::ptr::null_mut(), core::sync::atomic::Ordering::Release);
+    // The attribution filters are deliberately NOT cleared: they are user configuration set from
+    // the CLI before `start`, exactly like the log mode, not per-run state. Clearing them here
+    // would silently un-filter the next run.
 }
 
 /// Handle for controlling a running [`CSINode`](crate::CSINode) from user code.
@@ -564,6 +668,16 @@ fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
     // and on `riscv32imc` every other atomic op also takes a critical section,
     // so additional gate atomics in the hot ISR path delay the Embassy timer ISR.
     if !CSI_PUBLISH_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    // Attribution filter, applied BEFORE the 612-byte packet build and before any formatting, so a
+    // rejected frame costs one relaxed load (see `csi_passes_filter`). Counted as an rx drop: the
+    // radio did capture it, we chose not to deliver it, and a user comparing `RX Total Packets`
+    // against delivered rows needs that difference to be visible rather than unexplained.
+    if !csi_passes_filter(&info) {
+        #[cfg(feature = "statistics")]
+        STATS.rx_drop_count.fetch_add(1, Ordering::Relaxed);
         return;
     }
 

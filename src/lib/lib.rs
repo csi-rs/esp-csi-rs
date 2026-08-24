@@ -276,8 +276,9 @@ pub mod cpu_test;
 // ---------------------------------------------------------------------------
 pub use crate::csi::delivery::{
     CSINodeClient, CsiDeliveryMode, clear_csi_callback, csi_delivery_mode, csi_logging_enabled,
-    csi_output_enabled, run_process_csi_packet, set_csi_callback, set_csi_delivery_mode,
-    set_csi_logging_enabled, set_csi_output_enabled, set_csi_raw_callback,
+    csi_min_sig_mode, csi_output_enabled, csi_peer_filter, run_process_csi_packet,
+    set_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled, set_csi_min_sig_mode,
+    set_csi_output_enabled, set_csi_peer_filter, set_csi_raw_callback,
 };
 pub use crate::emitter::frame::{
     BROADCAST, PROBE_FRAME_LEN, build_probe_frame, inject_probe_once,
