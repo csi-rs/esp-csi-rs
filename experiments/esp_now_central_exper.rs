@@ -35,14 +35,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 
-macro_rules! mk_static {
-    ($t:ty,$val:expr) => {{
-        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-        #[deny(unused_attributes)]
-        let x = STATIC_CELL.uninit().write(($val));
-        x
-    }};
-}
 
 async fn node_task(_client: &mut CSINodeClient) {
     // Diagnostic counters: TX rate, TX-fail delta (WiFi-driver OOM / SendFailed

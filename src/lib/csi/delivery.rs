@@ -1,11 +1,11 @@
 //! CSI delivery state machine.
 //!
-//! The WiFi-task callback ([`capture_csi_info`]) dispatches each captured CSI
+//! The WiFi-task callback (`capture_csi_info`) dispatches each captured CSI
 //! report down exactly one user-facing path — inline callback, async queue, or
 //! inline logging — selected by a single relaxed atomic load. This module owns
 //! that dispatch state, the public registration functions, the lock-free CSI
-//! queue + waker, the [`CSINodeClient`] consumer handle, and the
-//! `WifiController` CSI wiring (`set_csi` / [`build_csi_config`]).
+//! queue + waker, the [`crate::CSINodeClient`] consumer handle, and the
+//! `WifiController` CSI wiring (`set_csi` / `build_csi_config`).
 
 use embassy_futures::select::{Either3, select3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -84,7 +84,7 @@ pub(crate) static CSI_OUTPUT_CHANGED: Signal<CriticalSectionRawMutex, ()> = Sign
 ///   `&CSIDataPacket` borrow. Lowest latency, runs on the WiFi-task
 ///   hot path. **Picked by [`set_csi_callback`].**
 /// - `Async`: move the packet into the lock-free `CSI_QUEUE` and wake
-///   the consumer registered via [`CSI_WAKER`]. Doesn't block the WiFi
+///   the consumer registered via `CSI_WAKER`. Doesn't block the WiFi
 ///   task. **Picked lazily by the first
 ///   [`CSINodeClient::next_csi_packet`].`**
 ///
@@ -557,7 +557,7 @@ impl CSIDataPacket {
     /// Returns `None` if the CSI payload exceeds the fixed 612-byte capacity;
     /// the caller does its own drop accounting. This is the single source of
     /// truth for the `WifiCsiInfo` → `CSIDataPacket` mapping, shared by the
-    /// normal CSI callback ([`capture_csi_info`]) and any out-of-tree collector
+    /// normal CSI callback (`capture_csi_info`) and any out-of-tree collector
     /// that owns the radio directly, so both emit byte-identical frames.
     pub fn from_wifi_csi_info(info: &esp_radio::wifi::csi::WifiCsiInfo<'_>) -> Option<Self> {
         let mut csi_data = Vec::<i8, 612>::new();

@@ -2,9 +2,9 @@
 //!
 //! A *central* node is the active driver of CSI collection. It either
 //! orchestrates an ESP-NOW exchange with a peripheral
-//! ([`esp_now`](self::esp_now)) or associates as a Wi-Fi station
-//! ([`sta`](self::sta)) to extract CSI from regular 802.11 traffic. The
-//! [`sniffer`](self::sniffer) module is a placeholder for future
+//! ([`esp_now`]) or associates as a Wi-Fi station
+//! ([`sta`]) to extract CSI from regular 802.11 traffic. The
+//! [`sniffer`] module is a placeholder for future
 //! central-side sniffer logic.
 
 // `ap` and `sta` are RE-EXPORTED from `collector`, not duplicated here.

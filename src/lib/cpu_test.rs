@@ -17,12 +17,12 @@ pub(crate) static TEST_TX_PAYLOAD_B: AtomicU32 = AtomicU32::new(0);
 /// When true, the CPU-test emitter TX loop sends nothing (baseline phases).
 pub(crate) static TEST_TX_PAUSED: AtomicBool = AtomicBool::new(true);
 
-/// Set the CPU-test emitter injection rate (Hz). See [`TEST_TX_RATE_HZ`].
+/// Set the CPU-test emitter injection rate (Hz). See `TEST_TX_RATE_HZ`.
 pub fn set_test_tx_rate_hz(rate_hz: u16) {
     TEST_TX_RATE_HZ.store(rate_hz.max(1) as u32, Ordering::Relaxed);
 }
 
-/// Set the CPU-test emitter on-air frame size (bytes). See [`TEST_TX_PAYLOAD_B`].
+/// Set the CPU-test emitter on-air frame size (bytes). See `TEST_TX_PAYLOAD_B`.
 pub fn set_test_tx_payload_b(payload_b: u16) {
     TEST_TX_PAYLOAD_B.store(payload_b as u32, Ordering::Relaxed);
 }

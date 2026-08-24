@@ -108,7 +108,7 @@ static WAKER: AtomicWaker = AtomicWaker::new();
 /// Driven by [`crate::set_raw_listen`] (which also enables raw CSI delivery).
 static RAW_DROP: AtomicBool = AtomicBool::new(false);
 
-/// Enable/disable raw-drop mode — see [`RAW_DROP`]. Set before the node starts.
+/// Enable/disable raw-drop mode — see `RAW_DROP`. Set before the node starts.
 pub fn set_raw_drop(enabled: bool) {
     RAW_DROP.store(enabled, Ordering::Relaxed);
 }
@@ -120,7 +120,7 @@ pub fn set_raw_drop(enabled: bool) {
 /// ESP-IDF reference's inline `recv_cb`. Stored as an erased `fn(&[u8])`.
 static RAW_RECV_CALLBACK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
-/// Register a raw-recv callback — see [`RAW_RECV_CALLBACK`]. Pair with
+/// Register a raw-recv callback — see `RAW_RECV_CALLBACK`. Pair with
 /// [`crate::set_raw_listen`]`(true)`. The callback runs in the WiFi task's
 /// C-FFI context, so it must return quickly and do only lock-free bookkeeping.
 pub fn set_raw_recv_callback(cb: fn(&[u8])) {

@@ -242,6 +242,13 @@ panic = "abort"
 # Dependencies (HAL, radio, graphics, etc.) are performance critical.
 opt-level = 3
 
+# `rust_analyzer` is a custom cfg the HT40 examples set so rust-analyzer picks one
+# arm of their chip-gated `const CHANNEL` instead of reporting every arm as
+# inactive. It is never set by a real build, so declare it here — otherwise every
+# such example emits an `unexpected_cfgs` warning that cannot be silenced locally.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(rust_analyzer)'] }
+
 [package.metadata.docs.rs]
 # docs.rs configuration: build docs for a single embedded target with
 # a representative feature set. Adjust if you want different chips in docs.

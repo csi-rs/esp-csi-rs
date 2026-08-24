@@ -1,6 +1,6 @@
 //! Logging backends and CSI-line emission for the crate.
 //!
-//! See [`logging`](self::logging) for the runtime-selectable transports
+//! See [`logging`] for the runtime-selectable transports
 //! (`println!`, `defmt`, JTAG, UART, no-op) and the sync/async CSI write
 //! paths.
 

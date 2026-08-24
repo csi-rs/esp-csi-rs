@@ -1,7 +1,7 @@
 //! Global statistics counters and sequence-drop detection state.
 //!
 //! Everything here is gated behind the `statistics` feature except
-//! [`set_seq_drop_detection`], which is always compiled (the run loops call it
+//! `set_seq_drop_detection`, which is always compiled (the run loops call it
 //! unconditionally) and simply no-ops without the feature.
 
 #[cfg(feature = "statistics")]

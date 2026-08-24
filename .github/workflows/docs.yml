@@ -5,10 +5,10 @@ name: Docs
 # documentation or compiled a single example since. That is how the crate reached
 # 23 broken intra-doc links and a four-sentence front page without anyone noticing.
 #
-# Deliberately NOT `-D warnings` yet: there is a known backlog of 23 inherited
-# warnings (18 broken/private intra-doc links, 5 redundant link targets). This job
-# reports them and fails only on a hard rustdoc error, so it can land now; flip on
-# `-D warnings` once the backlog is cleared.
+# `-D warnings` is on: the inherited backlog (18 broken/private intra-doc links,
+# 5 redundant link targets, and 3 more that only appeared under `statistics` and
+# `cpu-test-tx`) is cleared, so any new broken link fails the build rather than
+# accumulating unnoticed the way those did.
 
 on:
   workflow_dispatch:
@@ -38,6 +38,8 @@ jobs:
           targets: riscv32imc-unknown-none-elf
 
       - name: cargo doc
+        env:
+          RUSTDOCFLAGS: -D warnings
         run: |
           cargo doc --no-deps --locked \
             --no-default-features --features esp32c3,no-std,println,auto \

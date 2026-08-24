@@ -2,8 +2,8 @@
 //!
 //! The central transmits [`ControlPacket`]s and the peripheral replies with
 //! [`PeripheralPacket`] presence beacons. In auto-pairing mode each frame is
-//! prefixed with a 4-byte little-endian magic (see [`serialize_with_magic`] /
-//! [`parse_with_magic`]); in manual-pairing mode no magic is sent and the
+//! prefixed with a 4-byte little-endian magic (see `serialize_with_magic` /
+//! `parse_with_magic`); in manual-pairing mode no magic is sent and the
 //! source-MAC filter is the discriminator.
 
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ pub(crate) static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
 /// Control packet sent from Central to Peripheral.
 ///
 /// In auto-pairing mode the serialized frame is prefixed with a 4-byte
-/// little-endian magic (see [`serialize_with_magic`] / [`parse_with_magic`]);
+/// little-endian magic (see `serialize_with_magic` / `parse_with_magic`);
 /// in manual-pairing mode no magic is sent and the source-MAC filter is the
 /// discriminator. Both nodes must agree on the pairing mode (and on the
 /// `statistics` feature, which gates `sequence_number`) for frames to parse.

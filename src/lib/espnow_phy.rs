@@ -1,42 +1,19 @@
-//! ESP-NOW PHY forcing (per-peer rate / HT40) and radio bring-up helpers.
+//! ESP-NOW PHY forcing: per-peer rate and HT bandwidth.
 //!
 //! esp-radio doesn't expose `esp_now_set_peer_rate_config`, the only API that
-//! actually forces the ESP-NOW frame PHY (rate + HT bandwidth), so we bind it
-//! directly here alongside the startup helpers that get the radio into the
-//! state that binding requires.
+//! actually forces the ESP-NOW frame PHY (rate + HT bandwidth), so it is bound
+//! directly here.
+//!
+//! This used to also carry controller-level bring-up helpers that forced the PHY
+//! by restarting the STA interface and setting band/channel/bandwidth on the
+//! controller. Those were superseded by the per-peer rate config below — which
+//! carries the HT40 secondary channel too — and were removed once nothing called
+//! them on any chip.
 
 use esp_radio::esp_now::WifiPhyRate;
-use esp_radio::wifi::sta::StationConfig;
-use esp_radio::wifi::{Config, SecondaryChannel, WifiController};
+use esp_radio::wifi::SecondaryChannel;
 
 use crate::log_ln;
-
-/// Take over esp-radio's ESP-NOW receive dispatcher as early as possible.
-///
-/// `esp_radio::wifi::new` eagerly builds `EspNow` (via `EspNow::new_internal`),
-/// which calls `esp_now_init()`, registers esp-radio's heap-allocating
-/// `rcv_cb`, and adds a broadcast peer. From that instant — and `esp_rtos`
-/// is already running — every overheard ESP-NOW vendor action frame is
-/// `Box`ed and `push_back`ed into a heap-backed `VecDeque<ReceivedData>`
-/// that nothing in this crate drains (our consumers read the static
-/// [`crate::esp_now_pool`] queue instead). Any blocking Wi-Fi call during
-/// startup (`set_protocols`, `set_csi`) gives that callback time to fire and
-/// grow the VecDeque; on the small ESP32-S3 heap the next grow allocation
-/// can't be satisfied → `handle_alloc_error` panic *inside esp-radio's
-/// `rcv_cb`*, before our pool was ever installed.
-///
-/// Calling this *first* in `run`/`run_duration`, before any other Wi-Fi
-/// reconfiguration, closes that startup window:
-/// - non-sniffer modes get our static-pool `rcv_cb` (no heap, ever);
-/// - sniffer mode drops the callback entirely so overheard frames are
-///   discarded at the C layer with zero allocation (sniffers never consume
-///   ESP-NOW data).
-pub(crate) fn takeover_esp_now_recv(is_sniffer: bool) {
-    install_static_espnow_recv();
-    if is_sniffer {
-        suspend_esp_now_recv();
-    }
-}
 
 /// Install this crate's static-pool ESP-NOW receive callback.
 ///
@@ -54,6 +31,10 @@ pub fn install_static_espnow_recv() {
 ///
 /// Dual-band bring-up (band switch, channel, bandwidth, STA restart) on
 /// ESP32-C5 must not deliver ESP-NOW frames into callbacks mid-transition.
+///
+/// C5-only, because that is the only chip whose `with_espnow_recv_suspended`
+/// arm calls it — the other chips need no such window.
+#[cfg(feature = "esp32c5")]
 pub(crate) fn suspend_esp_now_recv() {
     unsafe extern "C" {
         fn esp_now_unregister_recv_cb() -> i32;
@@ -78,110 +59,6 @@ pub(crate) fn with_espnow_recv_suspended<F: FnOnce()>(f: F) {
 #[cfg(not(feature = "esp32c5"))]
 pub(crate) fn with_espnow_recv_suspended<F: FnOnce()>(f: F) {
     f();
-}
-
-/// Bring the radio up in **started STA mode** for the ESP-NOW forced-PHY path.
-///
-/// ESP-NOW PHY configuration only takes effect on a started STA interface.
-/// Best-effort: on error we log and continue. `set_config` restarts the radio;
-/// reinstall the static recv callback afterward when `resume_recv` is true.
-pub(crate) fn bring_up_espnow_sta(controller: &mut WifiController, resume_recv: bool) {
-    if controller
-        .set_config(&Config::Station(StationConfig::default()))
-        .is_err()
-    {
-        log_ln!("ESP-NOW: STA bring-up failed; PHY may stay legacy/20 MHz");
-    }
-    if resume_recv {
-        install_static_espnow_recv();
-    }
-}
-
-/// HT40 ESP-NOW bring-up: on C5, switch from AP bootstrap to started STA
-/// (avoids `InterfaceMismatch` on Station-interface peers), then apply band,
-/// channel, and 40 MHz bandwidth.
-pub(crate) fn apply_espnow_ht40_mode(
-    controller: &mut WifiController,
-    primary: u8,
-    secondary: SecondaryChannel,
-) {
-    #[cfg(feature = "esp32c5")]
-    bring_up_espnow_sta(controller, false);
-    apply_espnow_ht40(controller, primary, secondary);
-}
-
-/// Select 2.4 / 5 GHz band from the primary channel (ESP32-C5 dual-band only).
-pub(crate) fn apply_espnow_band_for_channel(controller: &mut WifiController, primary: u8) {
-    #[cfg(feature = "esp32c5")]
-    {
-        use esp_radio::wifi::BandMode;
-        let band = if primary >= 36 {
-            BandMode::_5G
-        } else {
-            BandMode::_2_4G
-        };
-        if controller.set_band_mode(band).is_err() {
-            log_ln!("ESP-NOW: set_band_mode failed for ch {}", primary);
-        }
-    }
-    #[cfg(not(feature = "esp32c5"))]
-    {
-        let _ = (controller, primary);
-    }
-}
-
-/// Put the radio on an HT40-capable channel (primary + secondary). On C5 this
-/// also switches band, caps 5 GHz protocols to A/N (higher-throughput modes
-/// break peer rate config), and sets interface bandwidth to 40 MHz before
-/// per-peer HT40 applies.
-pub(crate) fn apply_espnow_ht40(
-    controller: &mut WifiController,
-    primary: u8,
-    secondary: SecondaryChannel,
-) {
-    apply_espnow_band_for_channel(controller, primary);
-
-    #[cfg(feature = "esp32c5")]
-    {
-        use esp_radio::wifi::{Protocol, Protocols};
-        if primary >= 36 {
-            let protocols = Protocols::default().with_5(Protocol::A | Protocol::N);
-            if controller.set_protocols(protocols).is_err() {
-                log_ln!("HT40: set_protocols (A/N on 5G) failed");
-            }
-        }
-    }
-
-    if controller.set_channel(primary, secondary).is_err() {
-        log_ln!("HT40: set_channel failed");
-    }
-
-    // Raise the interface bandwidth to 40 MHz. `set_channel` only configures the
-    // secondary-channel offset; without this the radio keeps a 20 MHz RX/TX path
-    // and HT40 frames can't be decoded. Required on every chip, not just C5 —
-    // single-band 2.4 GHz parts (C6/C3/S3/ESP32) were previously left at 20 MHz,
-    // so a central could never receive the peripheral's 40 MHz unicast replies.
-    {
-        use esp_radio::wifi::Bandwidth;
-        match controller.bandwidths() {
-            Ok(bw) => {
-                // 5 GHz (ch >= 36) only exists on the dual-band C5; `with_5` is
-                // not present in the single-band HAL, so gate that branch.
-                #[cfg(feature = "esp32c5")]
-                let bw = if primary >= 36 {
-                    bw.with_5(Bandwidth::_40MHz)
-                } else {
-                    bw.with_2_4(Bandwidth::_40MHz)
-                };
-                #[cfg(not(feature = "esp32c5"))]
-                let bw = bw.with_2_4(Bandwidth::_40MHz);
-                if let Err(e) = controller.set_bandwidths(bw) {
-                    log_ln!("HT40: set_bandwidths failed: {:?}", e);
-                }
-            }
-            Err(_) => log_ln!("HT40: read bandwidths failed"),
-        }
-    }
 }
 
 // ESP-NOW per-peer TX rate config (ESP-IDF `esp_now_set_peer_rate_config`).

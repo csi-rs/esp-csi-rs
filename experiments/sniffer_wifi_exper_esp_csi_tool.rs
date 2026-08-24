@@ -82,7 +82,11 @@ async fn main(spawner: Spawner) -> ! {
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    let mut node_handle = CSINodeClient::new();
+    // Constructed for the API's sake; this harness drives the node by duration
+
+    // rather than through the client handle.
+
+    let _node_handle = CSINodeClient::new();
     let csi_hardware = NodeHardware::new(&mut interfaces, controller);
 
     // Match C++ passive sniffer's CSI scope (SHOULD_COLLECT_ONLY_LLTF=y):

@@ -34,7 +34,7 @@ use esp_csi_rs::peripheral::esp_now::{
     get_rx_control_packets, get_rx_magic_drop_packets, get_rx_parse_fail_packets,
 };
 use esp_csi_rs::{
-    CSINode, CSINodeClient, CSINodeHardware, EspNowConfig, IOTaskConfig,
+    CSINode, CSINodeClient, CSINodeHardware, EspNowConfig,
     config::CsiConfig, install_static_espnow_recv, log_ln, logging::logging::init_logger,
     set_csi_logging_enabled,
 };

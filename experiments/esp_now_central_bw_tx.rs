@@ -26,7 +26,7 @@ use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
     CSINode, CSINodeClient, CSINodeHardware, CentralOpMode, EspNowConfig,
-    IOTaskConfig, NodeRole, install_static_espnow_recv, log_ln, logging::logging::init_logger,
+    NodeRole, install_static_espnow_recv, log_ln, logging::logging::init_logger,
 };
 #[cfg(feature = "statistics")]
 use esp_csi_rs::{get_pps_tx, get_total_tx_packets};

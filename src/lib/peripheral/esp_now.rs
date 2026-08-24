@@ -83,7 +83,7 @@ static RX_TX_GUARD_BREAK_COUNT: AtomicU64 = AtomicU64::new(0);
 /// [`set_raw_listen`].
 static RAW_LISTEN: AtomicBool = AtomicBool::new(false);
 
-/// Enable/disable raw-listen mode — see [`RAW_LISTEN`]. Set this before the
+/// Enable/disable raw-listen mode — see `RAW_LISTEN`. Set this before the
 /// node starts so no control packets are ingested during the run.
 ///
 /// Also enables pool raw-drop ([`crate::esp_now_pool::set_raw_drop`]) so the
@@ -115,7 +115,7 @@ pub fn get_rx_parse_fail_packets() -> u64 {
 }
 
 /// Returns the number of received frames dropped because the magic
-/// number did not match [`crate::CENTRAL_MAGIC_NUMBER`].
+/// number did not match `CENTRAL_MAGIC_NUMBER`.
 #[cfg(feature = "statistics")]
 pub fn get_rx_magic_drop_packets() -> u64 {
     RX_MAGIC_DROP_COUNT.load(Ordering::Relaxed)

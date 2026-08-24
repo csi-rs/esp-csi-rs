@@ -98,7 +98,7 @@
 //! ```
 //! [3916,-93,11,157,1,1815804,256,0,260,2,0,1,1,128,0,1,1,0,1,0,0,0,256,128,[...]]
 //! ```
-//! The array fields map to the [`CSIDataPacket`] struct fields in the following order:
+//! The array fields map to the [`csi::CSIDataPacket`] struct fields in the following order:
 //!
 //! | Index | Field | Description |
 //! |-------|-------|-------------|

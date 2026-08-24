@@ -1,9 +1,9 @@
 //! Peripheral-node operating modes.
 //!
 //! A *peripheral* node is the responder in a CSI session. It either replies
-//! to a central's ESP-NOW control frames ([`esp_now`](self::esp_now)) or
+//! to a central's ESP-NOW control frames ([`esp_now`]) or
 //! runs in promiscuous sniffer mode (handled directly in
-//! [`crate::run_node`] via the Wi-Fi sniffer API rather than as a submodule
+//! [`crate::CSINode::run`] via the Wi-Fi sniffer API rather than as a submodule
 //! here).
 
 /// Peripheral-side ESP-NOW driver: receives control packets from the

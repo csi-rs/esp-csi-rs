@@ -123,7 +123,7 @@ static CSI_TOOL_EMIT_CAP: portable_atomic::AtomicU16 = portable_atomic::AtomicU1
 ///
 /// Pass `0` to disable the cap (emit all captured samples — the default).
 /// Pass `128` to match ESP32-CSI-Tool's `CONFIG_SHOULD_COLLECT_ONLY_LLTF`
-/// behavior. See [`CSI_TOOL_EMIT_CAP`] for why this is not the knob to reach
+/// behavior. See `CSI_TOOL_EMIT_CAP` for why this is not the knob to reach
 /// for when the goal is throughput.
 pub fn set_csi_tool_emit_cap(cap: u16) {
     CSI_TOOL_EMIT_CAP.store(cap, Ordering::Relaxed);
@@ -531,7 +531,7 @@ mod logging_impl {
 
 /// Log a pre-formatted line through this crate's configured backend.
 ///
-/// [`log_ln!`] resolves its `#[cfg(feature = ...)]` gates against the **calling**
+/// [`crate::log_ln!`] resolves its `#[cfg(feature = ...)]` gates against the **calling**
 /// crate, so an out-of-tree consumer that does not happen to replicate this
 /// crate's feature names gets an empty expansion and silently logs nothing. That
 /// is a trap: the call compiles, the message never appears, and the only symptom
