@@ -129,7 +129,7 @@
 //! - **LogMode::Text**: This output prints CSI data in a more verbose, human-readable format. This includes additional metadata and explanations alongside the raw CSI values, making it easier to understand the context of each packet's CSI data.
 //!
 //! Example output:
-//! ```rust
+//! ```rust,ignore
 //! mac: 56:6C:EB:6F:BC:3D
 //! sequence number: 426
 //! rssi: -82
@@ -185,15 +185,15 @@
 //! There are more examples in the repository. The example below demonstrates how to collect CSI data with an ESP configured in WIFI Station mode.
 //!
 //! #### Step 1: Initialize Logger
-//! ```rust
+//! ```rust,ignore
 //! init_logger(spawner, LogMode::ArrayList);
 //! ```
 //! #### Step 2: Create a Hardware Instance for the CSI Node
-//! ```rust
+//! ```rust,ignore
 //! let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
 //! ```
 //! #### Step 3: Create a Station Configuration
-//! ```rust
+//! ```rust,ignore
 //! use esp_radio::wifi::sta::StationConfig;
 //! use esp_radio::wifi::AuthenticationMethod;
 //!
@@ -209,30 +209,80 @@
 //!
 //! `StationConfig` was renamed from `ClientConfig`, and `AuthMethod` was renamed to `AuthenticationMethod` in `esp-radio` 0.18. `with_ssid` now takes `impl Into<Ssid>`, so a `&str` literal works directly without `.to_string()`.
 //! #### Step 4: Create a CSI Collection Node Instance with the Desired Configuration
-//! ```rust
+//! ```rust,ignore
 //! let mut node = CSINode::new(
-//! esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::WifiStation(station_config)),
-//! CollectionMode::Collector,
-//! Some(CsiConfig::default()),
-//! Some(100),
-//! csi_hardware,
+//!     esp_csi_rs::NodeRole::Central(esp_csi_rs::CentralOpMode::WifiStation(station_config)),
+//!     Some(CsiConfig::default()),
+//!     Some(100),
+//!     csi_hardware,
 //! );
+//! // A node delivers its CSI by default. `CollectionMode::Listener` used to be the
+//! // way to keep the radio capturing without delivering; that is now:
+//! // node.set_csi_output_enabled(false);
 //! ```
+//!
+//! Changed in 0.10: `CSINode::new` takes a [`NodeRole`] and no longer takes a
+//! `CollectionMode`. `NodeRole` is the four-variant role — `Emitter`, `Collector`,
+//! `Central`, `Peripheral` — where the ESP-NOW pair keeps the central/peripheral
+//! spelling it always had. There are also `CSINode::new_collector` and
+//! `CSINode::new_emitter` shorthands for the two most common cases.
 //! #### Step 5: (Optional) Register an On-Device CSI Callback
-//! ```rust
+//! ```rust,ignore
 //! set_csi_callback(|packet| {
 //! // process `packet` inline — keep it fast
 //! });
 //! ```
 //! #### Step 6: Create a CSI Node Client to Control the Node
-//! ```rust
+//! ```rust,ignore
 //! let mut node_handle = CSINodeClient::new();
 //! ```
 //! #### Step 7: Run the Node for a Fixed Duration
-//! ```rust
+//! ```rust,ignore
 //! node.run_duration(1000, &mut node_handle).await;
 //! ```
 //!
+//! ## Examples
+//!
+//! The repository ships runnable firmware for every supported topology in the
+//! [examples directory](https://github.com/csi-rs/esp-csi-rs/tree/main/examples).
+//! Build one with the per-chip cargo aliases, e.g.
+//! `cargo esp32c6 --example esp_now_central`:
+//!
+//! | Example | What it does |
+//! |---|---|
+//! | `sniffer_wifi` | Promiscuous collector — locks a channel and measures every frame overheard |
+//! | `wifi_station` / `wifi_ap` | Associated collector, station side / self-contained softAP collector |
+//! | `ht20_emitter` / `ht40_emitter` | Raw 802.11n injection at 20 or 40 MHz; pair with a sniffer |
+//! | `collector_sniffer` | The collector half of the emitter/collector pairing |
+//! | `esp_now_central` / `esp_now_peripheral` | Connectionless ESP-NOW pair; both sides capture |
+//! | `esp_now_fast_collector` / `esp_now_fast_source` | Asymmetric simplex ESP-NOW — the highest CSI rate of any pairing |
+//! | `esp_now_*_ht40` | The ESP-NOW pair with a forced HT40 per-peer TX PHY |
+//! | `csi_callback_test` | The two CSI delivery paths — inline callback vs. queued |
+//! | `runtime_config` | Changing collection settings between runs without reflashing |
+//!
+//! Measurement and characterization harnesses live separately under
+//! `experiments/`, documented in `experiments/README.md`.
+//!
+//! ## Architecture
+//!
+//! Everything is in this crate. Between 0.9.0 and 0.10.0 the engine lived in a
+//! separate `esp-csi-rs-core` crate that this one re-exported wholesale; that split
+//! has been undone, because it moved the implementation and the documentation away
+//! from the name people actually depend on while buying nothing a module boundary
+//! does not already give.
+//!
+//! `esp-csi-rs-core` 0.1.x stays published and is **not** yanked: `esp-csi-rs`
+//! 0.9.0 depends on it, so removing it would retroactively break that release. It
+//! receives no further versions. Anything written against
+//! `esp_csi_rs_core::` should move to `esp_csi_rs::` — the paths are otherwise
+//! unchanged.
+//!
+//! One seam is deliberate and worth knowing about if you extend this crate:
+//! [`RadioProfile`] is the hook for driving a PHY this crate does not implement
+//! itself, and [`esp_radio`] is re-exported so an out-of-tree profile is built
+//! against the same `WifiController` / `CsiConfig` types the engine uses. Resolving
+//! a different `esp-radio` would otherwise make `impl RadioProfile` silently fail
+//! to satisfy the trait.
 
 #![no_std]
 
