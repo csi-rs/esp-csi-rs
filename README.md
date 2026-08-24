@@ -6,7 +6,7 @@ A Rust crate for collecting **Channel State Information (CSI)** on **ESP32** ser
 [![docs.rs](https://docs.rs/esp-csi-rs/badge.svg)](https://docs.rs/esp-csi-rs)
 
 
-> ‼️ **Command Line Interface (CLI) Option**: If you'd like to extract CSI without having to code your own application, there is the CLI wrapper that was created for that purpose. The CLI also gives access to all the features available in this crate. Check out the [`esp-csi-cli-rs`](https://github.com/theembeddedrustacean/esp-csi-cli-rs) repository where you can flash a pre-built binary. This allows you to interact with your board/device immediately wihtout the need to code your own application.
+> ‼️ **Command Line Interface (CLI) Option**: If you'd like to extract CSI without having to code your own application, there is the CLI wrapper that was created for that purpose. The CLI also gives access to all the features available in this crate. Check out the [`esp-csi-cli-rs`](https://github.com/csi-rs/esp-csi-cli-rs) repository where you can flash a pre-built binary. This allows you to interact with your board/device immediately wihtout the need to code your own application.
 
 
 ## Overview
@@ -79,7 +79,7 @@ Roles compose, so the useful arrangements are combinations rather than fixed top
 
 <div align="center">
 
-![Network Architechtures](/assets/net-arch.png)
+![Network Architectures](https://raw.githubusercontent.com/csi-rs/esp-csi-rs/main/assets/net-arch.png)
 
 </div>
 
@@ -96,7 +96,7 @@ Add the crate to your `Cargo.toml`. At a minimum, you would need to specify the 
 
 ```toml
 [dependencies]
-esp-csi-rs = { version = "0.8.1", features = ["esp32c3", "println"] }
+esp-csi-rs = { version = "0.10", features = ["esp32c3", "println"] }
 ```
 
 The crate uses Rust **edition 2024** and tracks the latest Espressif Rust ecosystem (`esp-hal` 1.1, `esp-radio` 0.18, `esp-rtos` 0.3).
@@ -117,7 +117,7 @@ When enabling the `defmt` feature, the user app needs three additional things on
 
 ```toml
 [dependencies]
-esp-csi-rs = { version = "0.8.1", features = ["esp32c3", "defmt"] }
+esp-csi-rs = { version = "0.10", features = ["esp32c3", "defmt"] }
 defmt = "1.0"
 ```
 

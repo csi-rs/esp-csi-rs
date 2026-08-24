@@ -171,6 +171,18 @@ jobs:
               --no-dev-deps
           fi
 
+          # The feature sweeps above pass --no-dev-deps, which is right (a powerset
+          # that also builds 26 examples would be enormous) but means CI has never
+          # compiled a single example. That is how an engine-side rename could break
+          # all 26 targets invisibly. One check per chip, at the baseline feature set,
+          # closes that gap cheaply. `cpu-trace`/`cpu-test-tx` are required because
+          # four experiments are gated on them.
+          cargo check \
+            --target "${target}" \
+            --examples \
+            --no-default-features \
+            --features "${chip},no-std,println,auto,statistics,cpu-trace,cpu-test-tx"
+
   cargo-build-defmt:
     name: build (defmt, ${{ matrix.chip }})
     runs-on: ubuntu-latest
