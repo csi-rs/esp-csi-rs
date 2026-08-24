@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-rs"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 authors = ["theembeddedrustacean", "stacks-of-data", "Abdullah-Alawad", "modatt"]
 description = "ESP CSI Driver for Rust"
@@ -8,6 +8,7 @@ keywords = ["embedded", "esp32", "wifi", "csi"]
 categories = ["embedded"]
 readme = "README.md"
 homepage = "https://blog.theembeddedrustacean.com/"
+documentation = "https://docs.rs/esp-csi-rs"
 repository = "https://github.com/csi-rs/esp-csi-rs"
 license = "MIT OR Apache-2.0"
 exclude = ["target/debug/*", "assets/*"]
@@ -18,15 +19,22 @@ path = "src/lib/lib.rs"
 [features]
 #! ⚠️ At minimum you are required to choose only ONE of the device options. For the most efficient (and fastest) logging, you should combine defmt with the jtag-serial features.
 
-## Logging/functional features forward to `esp-csi-rs-core` (which owns the
-## engine) and additionally enable the example-level backtrace/println transports.
 default = ["no-std", "println", "auto"]
 ## Build without the standard library.
-no-std = ["esp-csi-rs-core/no-std"]
+no-std = []
 ## Enable logging via `println!()`.
-println = ["dep:log", "esp-backtrace/println", "esp-csi-rs-core/println"]
+println = ["dep:log", "esp-backtrace/println"]
 ## Automatically select the logging backend at runtime.
-auto = ["esp-println/auto", "esp-csi-rs-core/auto"]
+##
+## Runtime behavior (when `async-print` is NOT enabled):
+## - USB SOF detected (USB-Serial-JTAG/JTAG path) -> async logging backend
+## - no USB SOF (UART path) -> sync inline logging
+##
+## Precedence:
+## - `async-print` overrides `auto` and forces async logging.
+## - `jtag-serial` / `uart` force transport selection; `auto` is for runtime
+##   transport selection.
+auto = ["esp-println/auto"]
 ## Enable logging via defmt.
 defmt = [
     "dep:defmt",
@@ -34,33 +42,37 @@ defmt = [
     "esp-radio/defmt",
     "esp-backtrace/defmt",
     "embassy-executor/defmt",
-    "esp-csi-rs-core/defmt",
 ]
 ## Force the JTAG backend for logging.
-jtag-serial = ["esp-println/jtag-serial", "esp-csi-rs-core/jtag-serial"]
-## Force the UART backend for logging.
-uart = ["esp-println/uart", "esp-csi-rs-core/uart"]
+##
+## With `auto` (and without explicit `async-print`), runtime selection enables
+## async drain when USB SOF indicates JTAG/USB-Serial-JTAG is active.
+jtag-serial = ["esp-println/jtag-serial"]
+## Force the UART backend for logging (not recommended, much slower than JTAG backend).
+## Do NOT combine with `async-print`: UART is already blocking and slow, and the async
+## logging path provides no benefit while adding overhead and risk of unexpected behavior.
+uart = ["esp-println/uart"]
 ## Disable all logging.
-no-print = ["esp-println/no-op", "esp-csi-rs-core/no-print"]
+no-print = ["esp-println/no-op"]
 ## Enable collection of runtime statistics (e.g., latency, dropped packets).
-statistics = ["esp-csi-rs-core/statistics"]
+statistics = []
 ## Non-blocking async logging override.
-async-print = ["esp-csi-rs-core/async-print"]
+## When enabled explicitly, async logging is forced regardless of runtime backend detection.
+async-print = []
 ## Use an external defmt global logger instead of registering one from this crate.
-external-defmt-logger = ["esp-csi-rs-core/external-defmt-logger"]
-## Enable esp-rtos scheduler tracing so the CPU-utilization DUT can measure
-## absolute idle *time* from `system_idle`/`task_exec_begin` switch hooks
-## (spec v2 §2.2). Only the CPU experiment needs this; it adds a hook call to
-## every context switch.
-cpu-trace = ["dep:rtos-trace", "esp-rtos/rtos-trace", "esp-csi-rs-core/cpu-trace"]
-## Expose runtime TX controls (rate / frame size / pause) that let a CPU-test
-## TX experiment steer the real emitter inject loop from its schedule. Only that
-## experiment needs it.
-cpu-test-tx = ["esp-csi-rs-core/cpu-test-tx"]
+external-defmt-logger = []
+## Enable esp-rtos scheduler tracing so the CPU-utilization DUT
+## (`esp_now_peripheral_exper_cpu`) can measure absolute idle *time* from
+## `system_idle`/`task_exec_begin` switch hooks (spec v2 §2.2). Only the CPU
+## experiment needs this; it adds a hook call to every context switch.
+cpu-trace = ["dep:rtos-trace", "esp-rtos/rtos-trace"]
+## Expose runtime TX controls (rate / payload / pause) that let the CPU-test
+## TX example (`esp_now_central_exper_cpu_tx`) steer the real `run_esp_now_central`
+## loop from the experiment schedule. Only that example needs it.
+cpu-test-tx = []
 
 ## Support for the ESP32
 esp32 = [
-    "esp-csi-rs-core/esp32",
     "esp-backtrace/esp32",
     "esp-hal/esp32",
     "esp-hal/rt",
@@ -70,12 +82,12 @@ esp32 = [
     "esp-radio/esp32",
     "esp-radio/csi",
     "esp-radio/sniffer",
+    "esp-radio/esp-now",
     "esp-rtos/esp32",
 ]
 
 ## Support for the ESP32-C3
 esp32c3 = [
-    "esp-csi-rs-core/esp32c3",
     "esp-hal/esp32c3",
     "esp-hal/rt",
     "esp-backtrace/esp32c3",
@@ -83,13 +95,13 @@ esp32c3 = [
     "esp-bootloader-esp-idf/esp32c3",
     "esp-radio/csi",
     "esp-radio/sniffer",
+    "esp-radio/esp-now",
     "esp-println/esp32c3",
     "esp-rtos/esp32c3",
 ]
 
 ## Support for the ESP32-C6
 esp32c6 = [
-    "esp-csi-rs-core/esp32c6",
     "esp-hal/esp32c6",
     "esp-hal/rt",
     "esp-backtrace/esp32c6",
@@ -97,6 +109,7 @@ esp32c6 = [
     "esp-bootloader-esp-idf/esp32c6",
     "esp-radio/csi",
     "esp-radio/sniffer",
+    "esp-radio/esp-now",
     "esp-println/esp32c6",
     "esp-println/critical-section",
     "esp-rtos/esp32c6",
@@ -104,7 +117,6 @@ esp32c6 = [
 
 ## Support for the ESP32-S3 (AIoT)
 esp32s3 = [
-    "esp-csi-rs-core/esp32s3",
     "esp-hal/esp32s3",
     "esp-hal/rt",
     "esp-backtrace/esp32s3",
@@ -112,13 +124,13 @@ esp32s3 = [
     "esp-bootloader-esp-idf/esp32s3",
     "esp-radio/csi",
     "esp-radio/sniffer",
+    "esp-radio/esp-now",
     "esp-println/esp32s3",
     "esp-println/critical-section",
     "esp-rtos/esp32s3",
 ]
 
 esp32c5 = [
-    "esp-csi-rs-core/esp32c5",
     "esp-hal/esp32c5",
     "esp-hal/rt",
     "esp-backtrace/esp32c5",
@@ -126,6 +138,7 @@ esp32c5 = [
     "esp-bootloader-esp-idf/esp32c5",
     "esp-radio/csi",
     "esp-radio/sniffer",
+    "esp-radio/esp-now",
     "esp-println/esp32c5",
     "esp-println/critical-section",
     "esp-rtos/esp32c5",
@@ -133,9 +146,6 @@ esp32c5 = [
 
 
 [dependencies]
-# Shared engine. This crate is a thin facade that re-exports it in full.
-esp-csi-rs-core = { version = "0.1", default-features = false }
-
 # Core dependencies required for ESP HAL/RTOS, radio, and networking.
 esp-hal = { version = "~1.1", default-features = false, optional = false, features = [
     "unstable",
@@ -249,42 +259,7 @@ features = ["esp32c3", "println"]
 # The shared `experiments/cpu_test_schedule.rs` module is included by the
 # CPU-test examples via `#[path]` and is intentionally not a target itself.
 # ---------------------------------------------------------------------------
-[[example]]
-name = "sniffer_wifi_exper"
-path = "experiments/sniffer_wifi_exper.rs"
 
-[[example]]
-name = "sniffer_wifi_exper_esp_csi_tool"
-path = "experiments/sniffer_wifi_exper_esp_csi_tool.rs"
-
-[[example]]
-name = "sniffer_wifi_exper_heap"
-path = "experiments/sniffer_wifi_exper_heap.rs"
-
-[[example]]
-name = "sniffer_wifi_exper_logmode_cycle"
-path = "experiments/sniffer_wifi_exper_logmode_cycle.rs"
-
-[[example]]
-name = "sniffer_wifi_min"
-path = "experiments/sniffer_wifi_min.rs"
-
-[[example]]
-name = "wifi_station_heap"
-path = "experiments/wifi_station_heap.rs"
-
-[[example]]
-name = "wifi_station_min"
-path = "experiments/wifi_station_min.rs"
-
-[[example]]
-name = "wifi_station_power"
-path = "experiments/wifi_station_power.rs"
-
-# The emitter/collector API is not on crates.io yet. Remove this once
-# esp-csi-rs-core 0.2 is published.
-[patch.crates-io]
-esp-csi-rs-core = { git = "https://github.com/csi-rs/esp-csi-rs-core.git", branch = "feat/emitter-collector" }
 
 [[example]]
 name = "esp_now_central_bw_tx"
@@ -357,3 +332,35 @@ path = "experiments/esp_now_peripheral_min_cpu.rs"
 [[example]]
 name = "esp_now_peripheral_min_drop"
 path = "experiments/esp_now_peripheral_min_drop.rs"
+
+[[example]]
+name = "sniffer_wifi_exper"
+path = "experiments/sniffer_wifi_exper.rs"
+
+[[example]]
+name = "sniffer_wifi_exper_esp_csi_tool"
+path = "experiments/sniffer_wifi_exper_esp_csi_tool.rs"
+
+[[example]]
+name = "sniffer_wifi_exper_heap"
+path = "experiments/sniffer_wifi_exper_heap.rs"
+
+[[example]]
+name = "sniffer_wifi_exper_logmode_cycle"
+path = "experiments/sniffer_wifi_exper_logmode_cycle.rs"
+
+[[example]]
+name = "sniffer_wifi_min"
+path = "experiments/sniffer_wifi_min.rs"
+
+[[example]]
+name = "wifi_station_heap"
+path = "experiments/wifi_station_heap.rs"
+
+[[example]]
+name = "wifi_station_min"
+path = "experiments/wifi_station_min.rs"
+
+[[example]]
+name = "wifi_station_power"
+path = "experiments/wifi_station_power.rs"

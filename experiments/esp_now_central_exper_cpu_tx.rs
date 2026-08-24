@@ -40,7 +40,7 @@ use embassy_time::{Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
     CSINode, CSINodeClient, CSINodeHardware, CentralOpMode, EspNowConfig,
-    IOTaskConfig, Node,
+    IOTaskConfig, NodeRole,
     central::esp_now::{get_tx_failed_packets, get_tx_queued_packets},
     config::CsiConfig,
     log_ln,
