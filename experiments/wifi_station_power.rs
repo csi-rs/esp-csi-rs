@@ -24,10 +24,7 @@ use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
-use esp_csi_rs::{
-    CSINode, CSINodeClient, CSINodeHardware, CollectionMode, IOTaskConfig, WifiStationConfig,
-    config::CsiConfig, log_ln, set_csi_logging_enabled,
-};
+use esp_csi_rs::{CollectorMode, config::CsiConfig, CSINode, CSINodeClient, IOTaskConfig, log_ln, NodeHardware, set_csi_logging_enabled, WifiStationConfig};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -95,10 +92,9 @@ async fn main(spawner: Spawner) -> ! {
     let station_config = WifiStationConfig::new(client_config);
 
     let mut node_handle = CSINodeClient::new();
-    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
-    let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::WifiStation(station_config)),
-        CollectionMode::Collector,
+    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
+    let mut node = CSINode::new_collector(
+        CollectorMode::Station(station_config),
         Some(CsiConfig::default()),
         Some(PACKET_RATE_HZ),
         csi_hardware,

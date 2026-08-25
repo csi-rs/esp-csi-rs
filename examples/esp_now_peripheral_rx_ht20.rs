@@ -31,7 +31,7 @@ use embassy_time::{Duration, Timer};
 use esp_csi_rs::config::CsiConfig;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeHardware, CollectionMode, EspNowConfig, IOTaskConfig, install_static_espnow_recv,
+    CSINode, CSINodeHardware, EspNowConfig, IOTaskConfig, install_static_espnow_recv,
     log_ln,
 };
 use esp_hal::clock::CpuClock;
@@ -86,9 +86,8 @@ async fn main(spawner: Spawner) -> ! {
     let espnow_cfg = EspNowConfig::default().with_channel(CHANNEL);
 
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(espnow_cfg)),
+        esp_csi_rs::NodeRole::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(espnow_cfg)),
         // Collector: this node provides the CSI output (serialized).
-        CollectionMode::Collector,
         Some(CsiConfig::default()),
         None,
         csi_hardware,

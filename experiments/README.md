@@ -5,9 +5,9 @@ characterization harnesses kept out of `examples/` so the canonical examples
 stay uncluttered.
 
 These are **not** usage examples. For learning the API, start with the
-canonical set in [`../examples/`](../examples) (`esp_now_central`,
-`esp_now_peripheral`, `sniffer_wifi`, `wifi_station`, `runtime_config`,
-`csi_callback_test`).
+canonical set in [`../examples/`](../examples) (`ht20_emitter`,
+`collector_sniffer`, `sniffer_wifi`, `wifi_station`, `wifi_ap`,
+`runtime_config`, `csi_callback_test`).
 
 ## Running
 
@@ -16,8 +16,8 @@ an explicit `path`, so it builds and runs through the same per-chip aliases as
 anything in `examples/` (defined in `.cargo/config.toml`):
 
 ```bash
-cargo esp32c3        --example esp_now_central_min          # flash + monitor
-cargo esp32c3-build  --example esp_now_central_min          # build only
+cargo esp32c3        --example sniffer_wifi_min             # flash + monitor
+cargo esp32c3-build  --example sniffer_wifi_min             # build only
 cargo esp32s3        --example wifi_station_power            # other chips: esp32, esp32c3, esp32c5, esp32c6, esp32s3
 cargo esp32c3-defmt  --example sniffer_wifi_exper_heap       # defmt logging variant
 ```
@@ -25,9 +25,8 @@ cargo esp32c3-defmt  --example sniffer_wifi_exper_heap       # defmt logging var
 Some experiments need extra cargo features (see the table below):
 
 ```bash
-cargo esp32c3 --example esp_now_central_exper        --features statistics
-cargo esp32c3 --example esp_now_central_exper_cpu_tx --features cpu-test-tx,statistics
-cargo esp32c3 --example esp_now_peripheral_exper_cpu --features cpu-trace,async-print
+cargo esp32c3 --example sniffer_wifi_exper       --features statistics
+cargo esp32c3 --example wifi_station_heap        --features statistics
 ```
 
 `cpu_test_schedule.rs` is a **shared module**, not a runnable example — the
@@ -36,39 +35,29 @@ so it is intentionally not registered as a Cargo target.
 
 ## What's here
 
+The ESP-NOW harnesses that used to live here went away with the ESP-NOW transport
+(see the emitter/collector migration). What remains is the transport-agnostic set;
+the emitter-side equivalents still need rebuilding against `NodeRole::Emitter`.
+
 ### Footprint floor (`*_min`)
 Platform-floor builds that bring up the radio path **without** `CSINode`, to
-measure baseline flash/RAM cost: `esp_now_central_min`,
-`esp_now_peripheral_min`, `sniffer_wifi_min`, `wifi_station_min`.
+measure baseline flash/RAM cost: `sniffer_wifi_min`, `wifi_station_min`.
 
 ### Power
-- `esp_now_central_power` — power DUT via the full `CSINode` state machine.
-- `esp_now_central_min_power` — power DUT via the raw `EspNow` path (no `CSINode`).
 - `wifi_station_power` — STA→AP power DUT (`staap_active` scenario).
 
 ### Heap usage
-`esp_now_central_exper_heap`, `esp_now_peripheral_exper_heap`,
 `sniffer_wifi_exper_heap`, `wifi_station_heap` — track allocator high-water marks.
 
-### Packet drop
-- `esp_now_central_drop` / `esp_now_peripheral_drop` — TX / RX sides, full `CSINode`.
-- `esp_now_central_min_drop` / `esp_now_peripheral_min_drop` — TX / RX sides, raw ESP-NOW.
-
-### Bandwidth / PHY
-- `esp_now_central_bw_tx` — continuous MCS0-LGI / HT40 broadcaster (companion TX).
-- `esp_now_peripheral_bw_check` — bandwidth / PHY diagnostic for the ESP-NOW CSI path.
-
 ### CPU utilization (spec v2)
-- `esp_now_peripheral_exper_cpu` — DUT, full-library variant.
-- `esp_now_peripheral_min_cpu` — DUT, minimal like-for-like variant.
-- `esp_now_central_exper_cpu_tx` — companion TX, full-library (steers the real
-  `run_esp_now_central` loop via the `cpu-test-tx` hooks).
-- `esp_now_central_min_cpu_tx` — companion TX, minimal raw-ESP-NOW variant.
 - `cpu_test_schedule.rs` — shared phase schedule (module include, not a target).
+- The `cpu-test-tx` hooks now steer the emitter inject loop
+  (`esp_csi_rs::emitter::run_emitter`) rather than the removed ESP-NOW central TX
+  loop, so a companion TX experiment can be rebuilt on top of an emitter node.
 
 ### Experimental / scratch (`*_exper`)
-Full-feature experimentation variants of the canonical examples:
-`esp_now_central_exper`, `esp_now_peripheral_exper`, `sniffer_wifi_exper`.
+Full-feature experimentation variant of the canonical sniffer example:
+`sniffer_wifi_exper`.
 
 Sniffer-specific variants:
 - `sniffer_wifi_exper_esp_csi_tool` — emits CSI in ESP32-CSI-Tool CSV format.
@@ -80,20 +69,16 @@ The aliases pass only the chip feature by default; add these where required:
 
 | Experiment | Extra features |
 |---|---|
-| `esp_now_central_exper` | `statistics` |
-| `esp_now_peripheral_exper` | `statistics` |
-| `esp_now_central_drop` | `cpu-test-tx`, `statistics` |
-| `esp_now_peripheral_drop` | `statistics` |
-| `esp_now_central_exper_cpu_tx` | `cpu-test-tx`, `statistics` |
-| `esp_now_peripheral_exper_cpu` | `cpu-trace` (and `async-print` for the timing path) |
-| `esp_now_peripheral_min_cpu` | `cpu-trace` |
+| `sniffer_wifi_exper` | `statistics` |
+| `sniffer_wifi_exper_heap` | `statistics` |
+| `wifi_station_heap` | `statistics` |
+| `wifi_station_power` | `statistics` |
 
 All other experiments run with just the chip feature. When in doubt, the
 authoritative feature set for an experiment is whatever its header doc comment
 and `use esp_csi_rs::…` imports require (e.g. anything pulling `get_total_*` /
 `get_pps_*` needs `statistics`).
 
-> Note: `esp_now_peripheral_min_cpu` (and the other `cpu-trace` firmware) target
-> chips whose toolchain accepts the `cpu-trace` scheduler-hook asm; building it
-> for `esp32c3` currently fails to assemble. This is a property of the
-> experiment/feature, not of the directory layout.
+> Note: `cpu-trace` firmware only builds for chips whose toolchain accepts the
+> scheduler-hook asm; `esp32c3` currently fails to assemble it. That is a property
+> of the feature, not of the directory layout.

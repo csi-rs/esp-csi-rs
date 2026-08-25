@@ -22,7 +22,7 @@ use embassy_time::Instant;
 use embassy_time::{Duration, Timer, with_timeout};
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, CSINodeHardware, CollectionMode, EspNowConfig, IOTaskConfig,
+    CSINode, CSINodeClient, CSINodeHardware, EspNowConfig, IOTaskConfig,
     install_static_espnow_recv, log_ln,
 };
 #[cfg(feature = "statistics")]
@@ -115,14 +115,16 @@ async fn main(spawner: Spawner) -> ! {
     let espnow_cfg = EspNowConfig::fast_default().with_channel(CHANNEL);
 
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNowFastSource(
+        esp_csi_rs::NodeRole::Peripheral(esp_csi_rs::PeripheralOpMode::EspNowFastSource(
             espnow_cfg,
         )),
-        CollectionMode::Listener,
         None,
         None,
         csi_hardware,
     );
+    // `CollectionMode::Listener` became this: keep the radio capturing, and its
+    // timing intact, but deliver nothing off-device.
+    node.set_csi_output_enabled(false);
     node.set_protocol(esp_radio::wifi::Protocol::N);
     // TX-only flood; CSI is captured on the collector.
     node.set_io_tasks(IOTaskConfig::new(true, false));

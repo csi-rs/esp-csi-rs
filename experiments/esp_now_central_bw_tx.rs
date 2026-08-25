@@ -25,8 +25,8 @@ use esp_csi_rs::config::CsiConfig;
 use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    CSINode, CSINodeClient, CSINodeHardware, CentralOpMode, CollectionMode, EspNowConfig,
-    IOTaskConfig, Node, install_static_espnow_recv, log_ln, logging::logging::init_logger,
+    CSINode, CSINodeClient, CSINodeHardware, CentralOpMode, EspNowConfig,
+    NodeRole, install_static_espnow_recv, log_ln, logging::logging::init_logger,
 };
 #[cfg(feature = "statistics")]
 use esp_csi_rs::{get_pps_tx, get_total_tx_packets};
@@ -198,7 +198,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut _node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        Node::Central(CentralOpMode::EspNow(
+        NodeRole::Central(CentralOpMode::EspNow(
             // HT20: do NOT call with_ht40 — `with_ht40(SecondaryChannel::None)`
             // still flags the node HT40 (`secondary_channel().is_some()`), which
             // on C5 forces the 2.4 GHz interface to 40 MHz and breaks RX.
@@ -206,7 +206,6 @@ async fn main(spawner: Spawner) -> ! {
                 .with_channel(TEST_CHANNEL)
                 .with_phy_rate(REQUESTED_PHY_RATE),
         )),
-        CollectionMode::Collector,
         Some(csi_cfg), // central is TX-only; CSI is collected on the paired peripheral
         Some(1000),
         csi_hardware,

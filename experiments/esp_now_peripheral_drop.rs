@@ -40,7 +40,7 @@ use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::peripheral::esp_now::{get_rx_control_packets, get_rx_sequence_miss_packets};
 use esp_csi_rs::{
-    CSINode, CollectionMode, EspNowConfig, config::CsiConfig, logging::logging::init_logger,
+    CSINode, EspNowConfig, config::CsiConfig, logging::logging::init_logger,
 };
 use esp_csi_rs::{CSINodeHardware, log_ln, set_csi_logging_enabled};
 #[cfg(feature = "statistics")]
@@ -142,14 +142,16 @@ async fn main(spawner: Spawner) -> ! {
 
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
+        esp_csi_rs::NodeRole::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
             EspNowConfig::default().with_channel(CHANNEL),
         )),
-        CollectionMode::Listener,
         Some(CsiConfig::default()),
         Some(10000),
         csi_hardware,
     );
+    // `CollectionMode::Listener` became this: keep the radio capturing, and its
+    // timing intact, but deliver nothing off-device.
+    node.set_csi_output_enabled(false);
     node.set_protocol(esp_radio::wifi::Protocol::N);
     // One-way link: receive and tally only, no replies back to the central.
     node.set_tx_enabled(false);

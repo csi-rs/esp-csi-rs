@@ -1,0 +1,56 @@
+name: Docs
+
+# Restores a rustdoc gate. The previous `docs.yml` was deleted in April 2025, and
+# `cargo-hack.yml` passes `--no-dev-deps`, so between them nothing has checked the
+# documentation or compiled a single example since. That is how the crate reached
+# 23 broken intra-doc links and a four-sentence front page without anyone noticing.
+#
+# `-D warnings` is on: the inherited backlog (18 broken/private intra-doc links,
+# 5 redundant link targets, and 3 more that only appeared under `statistics` and
+# `cpu-test-tx`) is cleared, so any new broken link fails the build rather than
+# accumulating unnoticed the way those did.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ["**/*.rs", "Cargo.toml", "README.md", ".github/workflows/docs.yml"]
+  push:
+    branches: [main]
+    paths: ["**/*.rs", "Cargo.toml", "README.md", ".github/workflows/docs.yml"]
+
+concurrency:
+  group: docs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rustdoc:
+    name: rustdoc (esp32c3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Match the docs.rs recipe exactly: a RISC-V chip on a RISC-V target. Xtensa
+      # (esp32 / esp32s3) is off the table here for the same reason it is on docs.rs
+      # — it needs the forked `esp` toolchain, which neither runner has.
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+          targets: riscv32imc-unknown-none-elf
+
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo doc --no-deps --locked \
+            --no-default-features --features esp32c3,no-std,println,auto \
+            --target riscv32imc-unknown-none-elf
+
+      # A chip feature is mandatory: `CsiConfig` exists only under a chip cfg, so a
+      # featureless doc build produces a broken type set rather than an error.
+      - name: assert the front page is not empty
+        run: |
+          doc=target/riscv32imc-unknown-none-elf/doc/esp_csi_rs/index.html
+          test -f "$doc" || { echo "no index.html generated"; exit 1; }
+          for needle in "Feature Flags" "Architecture" "Examples"; do
+            grep -q "$needle" "$doc" || { echo "front page is missing: $needle"; exit 1; }
+          done

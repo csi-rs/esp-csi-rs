@@ -32,7 +32,7 @@ use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    CSINode, CollectionMode, EspNowConfig, config::CsiConfig, logging::logging::init_logger,
+    CSINode, EspNowConfig, config::CsiConfig, logging::logging::init_logger,
 };
 use esp_csi_rs::{
     CSINodeHardware, log_ln, set_csi_logging_enabled, set_test_tx_paused,
@@ -131,14 +131,16 @@ async fn main(spawner: Spawner) -> ! {
 
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(
+        esp_csi_rs::NodeRole::Central(esp_csi_rs::CentralOpMode::EspNow(
             EspNowConfig::default().with_channel(CHANNEL),
         )),
-        CollectionMode::Listener,
         Some(CsiConfig::default()),
         Some(PACKET_RATE),
         csi_hardware,
     );
+    // `CollectionMode::Listener` became this: keep the radio capturing, and its
+    // timing intact, but deliver nothing off-device.
+    node.set_csi_output_enabled(false);
     node.set_protocol(esp_radio::wifi::Protocol::N);
     // One-way link: no replies expected from the drop-test peripheral, so
     // skip the RX side. The offered rate is driven by the cpu-test-tx ramp.

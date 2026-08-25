@@ -5,10 +5,8 @@ use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::LogMode;
-use esp_csi_rs::{CSINode, CollectionMode, config::CsiConfig, logging::logging::init_logger};
-use esp_csi_rs::{
-    CSINodeClient, CSINodeHardware, WifiSnifferConfig, log_ln, set_csi_logging_enabled,
-};
+use esp_csi_rs::{CollectorMode, config::CsiConfig, CSINode, logging::logging::init_logger};
+use esp_csi_rs::{CSINodeClient, log_ln, NodeHardware, set_csi_logging_enabled, WifiSnifferConfig};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -28,14 +26,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 
-macro_rules! mk_static {
-    ($t:ty,$val:expr) => {{
-        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-        #[deny(unused_attributes)]
-        let x = STATIC_CELL.uninit().write(($val));
-        x
-    }};
-}
 
 async fn node_task(_client: &mut CSINodeClient) {
     // Settle delay so post-init async allocations have landed before the
@@ -100,14 +90,13 @@ async fn main(spawner: Spawner) -> ! {
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let mut node_handle = CSINodeClient::new();
-    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
-    let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(
+    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
+    let mut node = CSINode::new_collector(
+        CollectorMode::Sniffer(
             // Sniffer-class channel = 11 (matched with esp-csi heap_test and the
             // ESP32-CSI-Tool passive heap test).
             WifiSnifferConfig::default().with_channel(11),
-        )),
-        CollectionMode::Collector,
+        ),
         Some(CsiConfig::default()),
         Some(10000),
         csi_hardware,

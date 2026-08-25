@@ -5,7 +5,7 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    CSINode, CollectionMode, EspNowConfig, config::CsiConfig, logging::logging::init_logger,
+    CSINode, EspNowConfig, config::CsiConfig, logging::logging::init_logger,
 };
 use esp_csi_rs::{CSINodeClient, CSINodeHardware, log_ln};
 use esp_hal::clock::CpuClock;
@@ -27,14 +27,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 
-macro_rules! mk_static {
-    ($t:ty,$val:expr) => {{
-        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-        #[deny(unused_attributes)]
-        let x = STATIC_CELL.uninit().write(($val));
-        x
-    }};
-}
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -73,12 +65,14 @@ async fn main(spawner: Spawner) -> ! {
     let _node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(EspNowConfig::default())),
-        CollectionMode::Listener,
+        esp_csi_rs::NodeRole::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(EspNowConfig::default())),
         Some(CsiConfig::default()),
         Some(1500),
         csi_hardware,
     );
+    // `CollectionMode::Listener` became this: keep the radio capturing, and its
+    // timing intact, but deliver nothing off-device.
+    node.set_csi_output_enabled(false);
     node.set_protocol(esp_radio::wifi::Protocol::N);
     node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs3Lgi);
 

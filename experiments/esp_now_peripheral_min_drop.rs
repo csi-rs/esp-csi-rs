@@ -34,7 +34,7 @@ use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    CSINode, CollectionMode, EspNowConfig, IOTaskConfig, config::CsiConfig,
+    CSINode, EspNowConfig, IOTaskConfig, config::CsiConfig,
     logging::logging::init_logger, set_raw_listen, set_raw_recv_callback,
 };
 use esp_csi_rs::{CSINodeHardware, log_ln, set_csi_logging_enabled, set_csi_raw_callback};
@@ -155,12 +155,11 @@ async fn main(spawner: Spawner) -> ! {
 
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
+        esp_csi_rs::NodeRole::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
             EspNowConfig::default()
                 .with_channel(CHANNEL)
                 .with_phy_rate(WifiPhyRate::RateMcs0Lgi),
         )),
-        CollectionMode::Collector,
         Some(CsiConfig::default()),
         Some(10000),
         csi_hardware,

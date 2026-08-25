@@ -9,7 +9,7 @@ use embassy_time::{Duration, Timer, with_timeout};
 use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    CSINode, CollectionMode, EspNowConfig, config::CsiConfig, install_static_espnow_recv,
+    CSINode, EspNowConfig, config::CsiConfig, install_static_espnow_recv,
     logging::logging::init_logger,
 };
 use esp_csi_rs::{CSINodeClient, CSINodeHardware, log_ln, set_csi_callback};
@@ -131,12 +131,14 @@ async fn main(spawner: Spawner) -> ! {
     let mut node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(EspNowConfig::default())),
-        CollectionMode::Listener,
+        esp_csi_rs::NodeRole::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(EspNowConfig::default())),
         Some(CsiConfig::default()),
         Some(1000),
         csi_hardware,
     );
+    // `CollectionMode::Listener` became this: keep the radio capturing, and its
+    // timing intact, but deliver nothing off-device.
+    node.set_csi_output_enabled(false);
     node.set_protocol(esp_radio::wifi::Protocol::N);
     node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs7Lgi);
 

@@ -1,3 +1,12 @@
+//! Reconfiguring a node between runs, and toggling CSI output at runtime.
+//!
+//! Runs a sniffer collector twice over the same hardware. The first run delivers
+//! CSI normally and reports throughput; the second disables CSI *output* while
+//! leaving capture running, which keeps the RX path and its timing identical but
+//! stops anything being decoded, logged, or handed to a callback. That is the
+//! distinction the old `CollectionMode::Listener` was reaching for, expressed as
+//! what it actually controls.
+
 #![no_std]
 #![no_main]
 
@@ -6,11 +15,11 @@ use embassy_futures::join::join;
 use embassy_time::{Duration, Timer, with_timeout};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    CSINode, CollectionMode, EspNowConfig, config::CsiConfig, logging::logging::init_logger,
+    CSINode, CSINodeClient, CollectorMode, NodeHardware, WifiSnifferConfig, config::CsiConfig,
+    log_ln, logging::logging::init_logger,
 };
-use esp_csi_rs::{CSINodeClient, CSINodeHardware, log_ln};
 #[cfg(feature = "statistics")]
-use esp_csi_rs::{get_dropped_packets_rx, get_pps_rx, get_pps_tx};
+use esp_csi_rs::{get_dropped_packets_rx, get_pps_rx, get_total_rx_packets};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -18,36 +27,16 @@ use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
 
+const CHANNEL: u8 = 7;
+
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
     static_cell::StaticCell::new();
 
-// This creates a default app-descriptor required by the esp-idf bootloader.
-// For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
-#[allow(
-    clippy::large_stack_frames,
-    reason = "it's not unusual to allocate larger buffers etc. in main"
-)]
-
-macro_rules! mk_static {
-    ($t:ty,$val:expr) => {{
-        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-        #[deny(unused_attributes)]
-        let x = STATIC_CELL.uninit().write(($val));
-        x
-    }};
-}
-
-async fn node_task_listener(client: &mut CSINodeClient) {
-    log_ln!("Starting Listener Task");
-
-    Timer::after(Duration::from_millis(10)).await;
-    client.send_stop().await;
-}
-
-async fn node_task_collector(client: &mut CSINodeClient) {
-    log_ln!("Starting Collector Task");
+/// First run: CSI output on, report throughput for 10 s.
+async fn run_with_output(client: &mut CSINodeClient) {
+    log_ln!("Phase 1: CSI output enabled");
 
     with_timeout(Duration::from_secs(10), async {
         loop {
@@ -55,16 +44,35 @@ async fn node_task_collector(client: &mut CSINodeClient) {
             #[cfg(feature = "statistics")]
             {
                 log_ln!(
-                    "RX PPS: {}, TX PPS: {}, RX Dropped Packets: {}",
+                    "RX PPS: {}, total RX: {}, dropped: {}",
                     get_pps_rx(),
-                    get_pps_tx(),
+                    get_total_rx_packets(),
                     get_dropped_packets_rx()
                 );
             }
             #[cfg(not(feature = "statistics"))]
             {
-                log_ln!("Collector running...");
+                log_ln!("collecting...");
             }
+        }
+    })
+    .await
+    .unwrap_err();
+    client.send_stop().await;
+}
+
+/// Second run: capture continues, delivery is off. Statistics still climb —
+/// that is the point, and it is how you tell this apart from simply stopping.
+async fn run_without_output(client: &mut CSINodeClient) {
+    log_ln!("Phase 2: CSI output disabled (capture still running)");
+
+    with_timeout(Duration::from_secs(5), async {
+        loop {
+            Timer::after_secs(1).await;
+            #[cfg(feature = "statistics")]
+            log_ln!("captured but not delivered — total RX: {}", get_total_rx_packets());
+            #[cfg(not(feature = "statistics"))]
+            log_ln!("capturing, not delivering...");
         }
     })
     .await
@@ -74,8 +82,6 @@ async fn node_task_collector(client: &mut CSINodeClient) {
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    // generator version: 1.1.0
-
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     init_logger(spawner, LogMode::Text);
@@ -88,34 +94,29 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     log_ln!("Embassy initialized!");
-    log_ln!("Starting Runtime Config Node");
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
     let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
-
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let mut node_handle = CSINodeClient::new();
-    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
-    let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(EspNowConfig::default())),
-        CollectionMode::Collector,
+    let hardware = NodeHardware::new(&mut interfaces, controller);
+    let mut node = CSINode::new_collector(
+        CollectorMode::Sniffer(WifiSnifferConfig::default().with_channel(CHANNEL)),
         Some(CsiConfig::default()),
-        Some(1000),
-        csi_hardware,
+        None,
+        hardware,
     );
-    node.set_protocol(esp_radio::wifi::Protocol::LR);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
+    node.set_protocol(esp_radio::wifi::Protocol::N);
 
-    join(node.run(), node_task_collector(&mut node_handle)).await;
-    node.set_collection_mode(CollectionMode::Listener);
-    join(node.run(), node_task_listener(&mut node_handle)).await;
+    join(node.run(), run_with_output(&mut node_handle)).await;
+
+    node.set_csi_output_enabled(false);
+    join(node.run(), run_without_output(&mut node_handle)).await;
 
     loop {
-        log_ln!("Hello world!");
-        Timer::after(Duration::from_secs(1)).await;
+        log_ln!("Done");
+        Timer::after(Duration::from_secs(5)).await;
     }
-
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v~1.0/examples
 }

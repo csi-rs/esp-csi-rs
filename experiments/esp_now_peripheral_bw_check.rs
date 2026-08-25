@@ -34,7 +34,7 @@ use esp_csi_rs::peripheral::esp_now::{
     get_rx_control_packets, get_rx_magic_drop_packets, get_rx_parse_fail_packets,
 };
 use esp_csi_rs::{
-    CSINode, CSINodeClient, CSINodeHardware, CollectionMode, EspNowConfig, IOTaskConfig,
+    CSINode, CSINodeClient, CSINodeHardware, EspNowConfig,
     config::CsiConfig, install_static_espnow_recv, log_ln, logging::logging::init_logger,
     set_csi_logging_enabled,
 };
@@ -142,7 +142,7 @@ async fn main(spawner: Spawner) -> ! {
         TEST_CHANNEL
     );
     log_ln!(
-        "Peripheral config: io_tasks=RX-only, CollectionMode=Collector, serialized CSI, phy={:?}",
+        "Peripheral config: io_tasks=RX-only=Collector, serialized CSI, phy={:?}",
         WifiPhyRate::RateMcs0Lgi
     );
 
@@ -159,16 +159,18 @@ async fn main(spawner: Spawner) -> ! {
     // `with_phy_rate` brings the radio up in started STA mode (required for CSI
     // on ESP-NOW RX). The peripheral is listen-only — rate matches the central.
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
+        esp_csi_rs::NodeRole::Peripheral(esp_csi_rs::PeripheralOpMode::EspNow(
             EspNowConfig::default()
                 .with_channel(TEST_CHANNEL)
                 .with_phy_rate(WifiPhyRate::RateMcs0Lgi),
         )),
-        CollectionMode::Listener,
         Some(CsiConfig::default()),
         Some(10000),
         csi_hardware,
     );
+    // `CollectionMode::Listener` became this: keep the radio capturing, and its
+    // timing intact, but deliver nothing off-device.
+    node.set_csi_output_enabled(false);
     node.set_rate(WifiPhyRate::RateMcs0Lgi);
     node.set_protocol(esp_radio::wifi::Protocol::N);
     spawner.spawn(stats_task().unwrap());

@@ -23,7 +23,7 @@ use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeHardware, CollectionMode, EspNowConfig, install_static_espnow_recv, log_ln,
+    CSINode, CSINodeHardware, EspNowConfig, install_static_espnow_recv, log_ln,
     set_csi_callback,
 };
 #[cfg(feature = "statistics")]
@@ -129,8 +129,7 @@ async fn main(spawner: Spawner) -> ! {
     let espnow_cfg = EspNowConfig::fast_default().with_channel(CHANNEL);
 
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNowFastCollector(espnow_cfg)),
-        CollectionMode::Collector,
+        esp_csi_rs::NodeRole::Central(esp_csi_rs::CentralOpMode::EspNowFastCollector(espnow_cfg)),
         Some(esp_csi_rs::config::CsiConfig::default()),
         None,
         csi_hardware,

@@ -2,7 +2,7 @@
 //!
 //! Unlike the minimal TX (`esp_now_central_min_cpu_tx`, a raw `esp_now.send`
 //! broadcaster), this TX drives the **real esp-csi-rs library** central path:
-//! it brings up a `CSINode` in `Node::Central(CentralOpMode::EspNow)` and lets
+//! it brings up a `CSINode` in `NodeRole::Central(CentralOpMode::EspNow)` and lets
 //! `run_esp_now_central` do the sending. A schedule-driver task steers that
 //! loop from the shared `cpu_test_schedule` via the `cpu-test-tx` runtime hooks
 //! (`set_test_tx_rate_hz` / `set_test_tx_payload_b` / `set_test_tx_paused`),
@@ -39,8 +39,8 @@ use embassy_futures::join::join3;
 use embassy_time::{Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    CSINode, CSINodeClient, CSINodeHardware, CentralOpMode, CollectionMode, EspNowConfig,
-    IOTaskConfig, Node,
+    CSINode, CSINodeClient, CSINodeHardware, CentralOpMode, EspNowConfig,
+    IOTaskConfig, NodeRole,
     central::esp_now::{get_tx_failed_packets, get_tx_queued_packets},
     config::CsiConfig,
     log_ln,
@@ -181,14 +181,13 @@ async fn main(_spawner: Spawner) -> ! {
     let mut _node_handle = CSINodeClient::new();
     let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
     let mut node = CSINode::new(
-        Node::Central(CentralOpMode::EspNow(
+        NodeRole::Central(CentralOpMode::EspNow(
             EspNowConfig::default()
                 .with_channel(TEST_CHANNEL)
                 .with_phy_rate(WifiPhyRate::RateMcs0Lgi),
         )),
         // Collector → ControlPacket.is_collector = true, so the DUT keeps its
         // configured (collector) mode without mode-switch churn.
-        CollectionMode::Collector,
         Some(CsiConfig::default()),
         Some(500),
         csi_hardware,

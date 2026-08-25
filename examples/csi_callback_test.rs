@@ -39,14 +39,8 @@ use embassy_futures::join::{join, join3};
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::LogMode;
-use esp_csi_rs::{
-    CSINode, CollectionMode, CsiDeliveryMode, WifiSnifferConfig, config::CsiConfig,
-    logging::logging::init_logger,
-};
-use esp_csi_rs::{
-    CSINodeClient, CSINodeHardware, log_ln, set_csi_callback, set_csi_delivery_mode,
-    set_csi_logging_enabled,
-};
+use esp_csi_rs::{CollectorMode, config::CsiConfig, CsiDeliveryMode, CSINode, logging::logging::init_logger, WifiSnifferConfig};
+use esp_csi_rs::{CSINodeClient, log_ln, NodeHardware, set_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled};
 #[cfg(feature = "statistics")]
 use esp_csi_rs::get_dropped_packets_rx;
 use esp_hal::clock::CpuClock;
@@ -67,14 +61,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 
-macro_rules! mk_static {
-    ($t:ty,$val:expr) => {{
-        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-        #[deny(unused_attributes)]
-        let x = STATIC_CELL.uninit().write(($val));
-        x
-    }};
-}
 
 /// Atomics published from the inline CSI callback and read by `stats_task`.
 /// Atomic-only access keeps the callback wait-free relative to the stats
@@ -220,18 +206,16 @@ async fn main(spawner: Spawner) -> ! {
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let mut node_handle = CSINodeClient::new();
-    let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
-    let mut node = CSINode::new(
-        esp_csi_rs::Node::Peripheral(esp_csi_rs::PeripheralOpMode::WifiSniffer(
+    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
+    let mut node = CSINode::new_collector(
+        CollectorMode::Sniffer(
             WifiSnifferConfig::default(),
-        )),
-        CollectionMode::Collector,
+        ),
         Some(CsiConfig::default()),
         Some(1000),
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::LR);
-    node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
 
     // Register the inline CSI processing hook. `set_csi_callback`
     // sets the delivery mode to `Callback` automatically. The

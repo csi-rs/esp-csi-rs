@@ -29,7 +29,7 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeHardware, CollectionMode, EspNowConfig, IOTaskConfig, install_static_espnow_recv,
+    CSINode, CSINodeHardware, EspNowConfig, IOTaskConfig, install_static_espnow_recv,
     log_ln,
 };
 use esp_hal::clock::CpuClock;
@@ -88,13 +88,15 @@ async fn main(spawner: Spawner) -> ! {
         .with_phy_rate(PHY_RATE);
 
     let mut node = CSINode::new(
-        esp_csi_rs::Node::Central(esp_csi_rs::CentralOpMode::EspNow(espnow_cfg)),
+        esp_csi_rs::NodeRole::Central(esp_csi_rs::CentralOpMode::EspNow(espnow_cfg)),
         // Listener: this node doesn't collect CSI; the peripheral does.
-        CollectionMode::Listener,
         None,
         Some(TX_RATE_HZ),
         csi_hardware,
     );
+    // `CollectionMode::Listener` became this: keep the radio capturing, and its
+    // timing intact, but deliver nothing off-device.
+    node.set_csi_output_enabled(false);
     // 802.11n (HT) — required for the forced MCS7 / HT20 PHY.
     node.set_protocol(esp_radio::wifi::Protocol::N);
     node.set_rate(PHY_RATE);
