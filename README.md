@@ -76,6 +76,9 @@ Roles compose, so the useful arrangements are combinations rather than fixed top
 1. ***Single node:*** one sniffer collector, measuring whatever ambient traffic exists. The only setup that needs no second device. See `sniffer_wifi`.
 2. ***Emitter + collector:*** the controlled pairing. The emitter sounds the channel at a known rate and bandwidth; one or more sniffer collectors measure it. Adding collectors costs the emitter nothing, and several emitters can share one collector — each frame carries its transmitter's MAC, so a collector attributes measurements by source. See `ht20_emitter` / `ht40_emitter` / `collector_sniffer`.
 3. ***Associated link:*** a station collector against any access point — an ESP softAP collector or a commercial router — measuring the CSI of ordinary traffic on that link. See `wifi_ap` / `wifi_station`.
+4. ***ESP-NOW pair:*** a central and a peripheral exchanging connectionless frames, with no AP and no association. Either end can collect, or both can. On chips whose MAC will not accept a forced HT rate this is the emitter path that works. See `esp_now_central` / `esp_now_peripheral`.
+5. ***ESP-NOW simplex pair:*** the asymmetric variant — the source owns all TX airtime while the collector goes RX-only after discovery, which is why it sustains a markedly higher sample rate than the symmetric pair. See `esp_now_fast_collector` / `esp_now_fast_source`.
+6. ***ESP-NOW star:*** one central against several peripherals. The central triggers traffic and aggregates what the peripherals send back, or each peripheral collects its own link. ESP-NOW is the only path that supports this.
 
 <div align="center">
 
