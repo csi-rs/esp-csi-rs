@@ -26,6 +26,14 @@ jobs:
   rustdoc:
     name: rustdoc (esp32c3)
     runs-on: ubuntu-latest
+    env:
+      # `rust-toolchain.toml` pins `channel = "esp"` for the Xtensa builds, and rustup
+      # honours that override file in every directory below it — so without this the job
+      # dies before compiling anything with "custom toolchain 'esp' is not installed",
+      # no matter which toolchain the step above installed. `RUSTUP_TOOLCHAIN` takes
+      # precedence over the file, which is also what makes this faithful to docs.rs:
+      # docs.rs ignores `rust-toolchain.toml` and builds on its own nightly.
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@v4
 
