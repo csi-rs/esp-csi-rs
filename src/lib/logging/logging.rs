@@ -1425,7 +1425,12 @@ async fn write_csi_tool_packet_async(
 /// No critical section: there is exactly one writer (the sync log path
 /// runs from `node_task`); no other code in this crate writes to UART0.
 #[cfg(all(
-    not(feature = "async-print"),
+    // Every other item on the sync path is gated `any(not(async-print), auto)`:
+    // under `auto` the backend is picked at runtime, so both the sync and async
+    // writers must be compiled. This definition previously said only
+    // `not(async-print)`, so `auto` + `async-print` compiled the sync callers
+    // without their callee.
+    any(not(feature = "async-print"), feature = "auto"),
     feature = "esp32",
     any(feature = "uart", feature = "auto")
 ))]
@@ -1467,7 +1472,8 @@ fn uart0_write_bytes_fast(bytes: &[u8]) {
 /// Fallback for non-ESP32 sync builds: use `log_raw!` semantics via
 /// `esp_println::Printer::write_bytes` in one batched call.
 #[cfg(all(
-    not(feature = "async-print"),
+    // Mirrors the ESP32 definition above; see the note there.
+    any(not(feature = "async-print"), feature = "auto"),
     feature = "println",
     any(feature = "uart", feature = "jtag-serial", feature = "auto"),
     not(feature = "esp32")
