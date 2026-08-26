@@ -1,0 +1,10 @@
+# Keep the Docker build context to SOURCE only.
+#
+# `csi-deploy/firmware/Dockerfile` consumes this checkout as a named build context (`fwsrc` /
+# `esprs`). BuildKit has no way to filter a named context from the consuming Dockerfile, so the
+# filter has to live here — and without it the context is `target/`: 4.8 GB and 7.6 GB of build
+# artefacts respectively, against ~15 MB and ~1 MB of actual source. The container builds into its
+# own cache-mounted target dir, so nothing here is wanted anyway.
+#
+# Mirrors .gitignore. Same reason, different tool.
+target/
