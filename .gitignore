@@ -23,3 +23,6 @@ specs/
 # LLM Artifacts
 .claude
 .cachebro
+
+# Vale styles
+.github/styles
