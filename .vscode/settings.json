@@ -6,7 +6,6 @@
     "rust-analyzer.cargo.target": "riscv32imac-unknown-none-elf",
     "rust-analyzer.cargo.targetDir": true,
     "rust-analyzer.cargo.allTargets": false,
-    "rust-analyzer.checkOnSave.allTargets": false,
     "rust-analyzer.cargo.noDefaultFeatures": true,
     "rust-analyzer.cargo.features": [
         "no-std",
@@ -58,6 +57,5 @@
         "no-std,println,auto,esp32c5,statistics",
         "--message-format=json"
     ],
-    "rust-analyzer.procMacro.enable": true,
-    "rust-analyzer.server.path": "/home/amsaleh/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rust-analyzer"
+    "rust-analyzer.procMacro.enable": true
 }
