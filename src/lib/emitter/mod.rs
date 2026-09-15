@@ -131,6 +131,22 @@ impl EmitterConfig {
         self.use_sta_if = false;
         self
     }
+
+    /// An emitter is always a [`Central`](crate::NetworkRole::Central): sounding frames are the
+    /// network's traffic, and it originates them. There is no setter for this.
+    pub const fn network_role() -> crate::NetworkRole {
+        crate::NetworkRole::Central
+    }
+
+    /// An emitter is always a [`Listener`](crate::CollectionMode::Listener): it captures nothing,
+    /// so it has nothing to report. There is no setter for this.
+    ///
+    /// This is the case the older two-role vocabulary could not express. "Emitter" was treated as a
+    /// role opposite "collector", which left no name for a node that measures without reporting —
+    /// and no name for the far more common thing an emitter actually is: a central that listens.
+    pub const fn collection_mode() -> crate::CollectionMode {
+        crate::CollectionMode::Listener
+    }
 }
 
 impl Default for EmitterConfig {

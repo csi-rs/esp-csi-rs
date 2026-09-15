@@ -125,6 +125,20 @@ pub struct WifiSnifferConfig {
     channel: u8,
 }
 
+impl WifiSnifferConfig {
+    /// A sniffer is always a [`Peripheral`](crate::NetworkRole::Peripheral): it never transmits, so
+    /// it cannot source the network's traffic. There is no setter for this.
+    pub const fn network_role() -> crate::NetworkRole {
+        crate::NetworkRole::Peripheral
+    }
+
+    /// A sniffer is always a [`Collector`](crate::CollectionMode::Collector): a sniffer that does
+    /// not report observes nothing, so that configuration is not offered.
+    pub const fn collection_mode() -> crate::CollectionMode {
+        crate::CollectionMode::Collector
+    }
+}
+
 impl Default for WifiSnifferConfig {
     fn default() -> Self {
         Self {
@@ -178,6 +192,13 @@ pub struct WifiStationConfig {
     /// Primary channel of the target AP. On dual-band ESP32-C5 this selects
     /// 2.4 vs 5 GHz (`set_band_mode`) before scan/association.
     pub channel_hint: Option<u8>,
+    /// Whether the uplink this station generates is the traffic being measured. A station that
+    /// pings its gateway to keep the link busy is the network's traffic source and so a
+    /// [`Central`](crate::NetworkRole::Central); one that merely measures an already-busy link
+    /// sources nothing and is a [`Peripheral`](crate::NetworkRole::Peripheral).
+    network_role: crate::NetworkRole,
+    /// Whether this node reports the CSI it captures.
+    collection: crate::CollectionMode,
 }
 
 impl WifiStationConfig {
@@ -186,7 +207,33 @@ impl WifiStationConfig {
         Self {
             client_config,
             channel_hint: None,
+            network_role: crate::NetworkRole::Central,
+            collection: crate::CollectionMode::Collector,
         }
+    }
+
+    /// Set whether the uplink this station generates is the network's traffic. Defaults to
+    /// [`Central`](crate::NetworkRole::Central).
+    pub fn with_network_role(mut self, role: crate::NetworkRole) -> Self {
+        self.network_role = role;
+        self
+    }
+
+    /// Set whether this node reports its CSI. Defaults to
+    /// [`Collector`](crate::CollectionMode::Collector).
+    pub fn with_collection_mode(mut self, mode: crate::CollectionMode) -> Self {
+        self.collection = mode;
+        self
+    }
+
+    /// Whether the uplink this station generates is the network's traffic.
+    pub fn network_role(&self) -> crate::NetworkRole {
+        self.network_role
+    }
+
+    /// Whether this node reports the CSI it captures.
+    pub fn collection_mode(&self) -> crate::CollectionMode {
+        self.collection
     }
 
     /// Pin the radio band from the AP's primary channel (C5 dual-band only).
@@ -233,6 +280,10 @@ pub struct WifiApConfig {
     /// Whether to run the built-in DHCP server. When `false`, the AP only starts
     /// + collects CSI (clients must self-assign IPs).
     pub serve_dhcp: bool,
+    /// Whether this node reports the CSI it captures. The access point's *network* role is not
+    /// configurable — beacons and DHCP make it a traffic source by construction — but whether its
+    /// measurements leave it is.
+    collection: crate::CollectionMode,
     /// When `true`, every flood tick fires one unicast frame back-to-back to
     /// **all** active leases instead of advancing one lease per tick (round-robin).
     /// All associated stations then receive their downlink PPDU within tens of
@@ -275,7 +326,26 @@ impl WifiApConfig {
             lease_count: 1,
             serve_dhcp: true,
             sync_burst: false,
+            collection: crate::CollectionMode::Collector,
         }
+    }
+
+    /// An access point is always a [`Central`](crate::NetworkRole::Central): its beacons and DHCP
+    /// make it a traffic source by construction, so there is no setter for this.
+    pub const fn network_role() -> crate::NetworkRole {
+        crate::NetworkRole::Central
+    }
+
+    /// Set whether this node reports its CSI. Defaults to
+    /// [`Collector`](crate::CollectionMode::Collector).
+    pub fn with_collection_mode(mut self, mode: crate::CollectionMode) -> Self {
+        self.collection = mode;
+        self
+    }
+
+    /// Whether this node reports the CSI it captures.
+    pub fn collection_mode(&self) -> crate::CollectionMode {
+        self.collection
     }
 
     /// Override the AP/lease IPv4 addresses (must share a /24).

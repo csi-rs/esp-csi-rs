@@ -291,6 +291,7 @@ pub mod config;
 pub mod csi;
 pub mod emitter;
 pub mod logging;
+pub mod model;
 pub mod esp_now_pool;
 pub mod espnow_phy;
 pub mod node;
@@ -329,11 +330,15 @@ pub use crate::node::{
     CSINode, CollectorMode, IOTaskConfig, NodeHardware, NodeRole, WifiApConfig, WifiSnifferConfig,
     WifiStationConfig,
 };
+/// The node model's four attributes. [`OperationalMode`] is the enum; the other three are read back
+/// from it, because a mode that fixes an attribute has no field for it and therefore no way to
+/// disagree with itself.
+pub use crate::model::{
+    CollectionMode, NetworkRole, NodeView, OperationalMode, SessionRole, SimplexConfig,
+};
 /// The restored central/peripheral taxonomy. Re-exported at the crate root because that is where
 /// every existing caller and every ESP-NOW driver in this crate expects to find it.
-pub use crate::central_peripheral::{
-    CentralOpMode, CollectionMode, EspNowConfig, Node, PeripheralOpMode,
-};
+pub use crate::central_peripheral::{CentralOpMode, EspNowConfig, Node, PeripheralOpMode};
 /// Pre-refactor name for [`NodeHardware`]. It served only the central/peripheral pair before the
 /// emitter/collector split gave it a second caller, and the rename was the whole change — so this is
 /// an alias, not a second type to keep in step.
@@ -347,6 +352,7 @@ pub use crate::protocol::{ControlPacket, PeripheralPacket};
 // The wire constants and codec are crate-private: they are an implementation detail of the ESP-NOW
 // exchange, and `pub use` on a `pub(crate)` item is an error rather than a widening.
 pub(crate) use crate::csi::delivery::{IS_COLLECTOR, set_runtime_collection_mode};
+pub use crate::csi::delivery::runtime_collection_mode;
 /// Feature-gated exactly as before: the ESP-NOW drivers only touch the counters when `statistics`
 /// is on, so re-exporting unconditionally would make the symbol dead in every other build.
 #[cfg(feature = "statistics")]

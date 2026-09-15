@@ -362,6 +362,25 @@ fn csi_passes_filter(info: &esp_radio::wifi::csi::WifiCsiInfo<'_>) -> bool {
     true
 }
 
+/// The collection mode currently **in force**, which is not always the one that was configured.
+///
+/// A peripheral that hears a listening central promotes itself to
+/// [`CollectionMode::Collector`](crate::CollectionMode) mid-run so the pair still produces a
+/// dataset. That promotion moves this value and deliberately does not rewrite the node's
+/// configuration, so [`CSINode::collection_mode`](crate::CSINode::collection_mode) keeps reporting
+/// what you asked for while this reports what is happening.
+///
+/// The gate is process-wide and is reset between runs, so before the first
+/// [`CSINode::run`](crate::CSINode::run) it reads `Listener` regardless of how the node was built.
+/// Ask the node, not this function, if you want the configured value.
+pub fn runtime_collection_mode() -> crate::CollectionMode {
+    if IS_COLLECTOR.load(Ordering::Relaxed) {
+        crate::CollectionMode::Collector
+    } else {
+        crate::CollectionMode::Listener
+    }
+}
+
 /// Change collection mode at runtime — e.g. a central signalling a peripheral to start or stop.
 pub(crate) fn set_runtime_collection_mode(is_collector: bool) {
     IS_COLLECTOR.store(is_collector, Ordering::Relaxed);

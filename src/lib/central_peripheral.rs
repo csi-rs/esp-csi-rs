@@ -52,6 +52,13 @@ pub struct EspNowConfig {
     /// the radio is left in its default state and ESP-NOW frames go out at the
     /// driver's default (legacy) PHY. Set by `with_phy_rate` / `with_ht40`.
     force_phy: bool,
+    /// Which end of the exchange this node is. ESP-NOW is the one mode that admits both, because
+    /// the exchange is symmetric: the central originates the control traffic and the peripheral
+    /// answers it, and either end can measure.
+    network_role: crate::NetworkRole,
+    /// Whether this node reports the CSI it captures. A central announces its value on the wire so
+    /// a peripheral paired with a listening central can promote itself.
+    collection: crate::CollectionMode,
 }
 
 impl Default for EspNowConfig {
@@ -66,6 +73,8 @@ impl Default for EspNowConfig {
             peer_mac: None,
             secondary_channel: None,
             force_phy: false,
+            network_role: crate::NetworkRole::Central,
+            collection: crate::CollectionMode::Collector,
         }
     }
 }
@@ -154,6 +163,30 @@ impl EspNowConfig {
     pub fn force_phy(&self) -> bool {
         self.force_phy
     }
+
+    /// Set which end of the exchange this node is. Defaults to
+    /// [`Central`](crate::NetworkRole::Central).
+    pub fn with_network_role(mut self, role: crate::NetworkRole) -> Self {
+        self.network_role = role;
+        self
+    }
+
+    /// Set whether this node reports its CSI. Defaults to
+    /// [`Collector`](crate::CollectionMode::Collector).
+    pub fn with_collection_mode(mut self, mode: crate::CollectionMode) -> Self {
+        self.collection = mode;
+        self
+    }
+
+    /// Which end of the exchange this node is.
+    pub fn network_role(&self) -> crate::NetworkRole {
+        self.network_role
+    }
+
+    /// Whether this node reports the CSI it captures.
+    pub fn collection_mode(&self) -> crate::CollectionMode {
+        self.collection
+    }
 }
 /// Central node operational modes.
 pub enum CentralOpMode {
@@ -185,19 +218,7 @@ pub enum Node {
     /// Run as the central side of the chosen [`CentralOpMode`].
     Central(CentralOpMode),
 }
-/// CSI collection behaviour for the node.
-///
-/// `Listener` keeps CSI traffic flowing without processing packets; `Collector` actively processes
-/// it. A `Listener` sniffer is effectively useless — traffic arrives and nothing reads it — which is
-/// worth knowing before configuring one.
-///
-/// Restored with the rest of this taxonomy. Distinct from [`crate::CollectorMode`] despite the
-/// similar name: this says *how much* a node does with CSI, that one says *how* a collector obtains
-/// frames to measure.
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub enum CollectionMode {
-    /// Enables CSI collection and processes CSI data.
-    Collector,
-    /// Enables CSI collection but does not process CSI data.
-    Listener,
-}
+// `CollectionMode` moved to `crate::model`, where it sits beside the other three attributes of the
+// node model instead of beside the ESP-NOW transport that happens to put it on the wire. It is
+// re-exported from the crate root, so `esp_csi_rs::CollectionMode` is unchanged for callers.
+pub use crate::model::CollectionMode;
