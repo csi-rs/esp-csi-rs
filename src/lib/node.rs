@@ -422,7 +422,7 @@ impl defmt::Format for WifiApConfig {
 
 /// How a collector obtains the frames it measures.
 ///
-/// **Deprecated in 0.11.** Superseded by [`OperationalMode`](crate::OperationalMode), which names
+/// **Deprecated in 0.11.** Superseded by [`OperationalMode`], which names
 /// the same three capture paths as three of its six variants. Removed in 0.12.
 #[deprecated(
     since = "0.11.0",
@@ -444,7 +444,7 @@ pub enum CollectorMode {
 /// of an ESP-NOW exchange it is. Those are two of the four independent attributes in
 /// [`crate::model`], and keeping them in one enum meant neither could be read without the other.
 ///
-/// Superseded by [`OperationalMode`](crate::OperationalMode) plus
+/// Superseded by [`OperationalMode`] plus
 /// [`NetworkRole`](crate::NetworkRole) and [`CollectionMode`](crate::CollectionMode). Convert with
 /// the [`From`] impl below, which also corrects the simplex role assignment. Removed in 0.12.
 #[deprecated(
@@ -580,7 +580,7 @@ pub(crate) fn reset_globals() {
 /// case), configure optional protocol / traffic frequency, then call `run()`.
 pub struct CSINode<'a> {
     /// How this node reaches the channel. The node's network role and collection mode are read
-    /// back from it rather than stored alongside it — see [`OperationalMode`](crate::OperationalMode).
+    /// back from it rather than stored alongside it — see [`OperationalMode`].
     mode: OperationalMode,
     io_tasks: IOTaskConfig,
     /// CSI Configuration

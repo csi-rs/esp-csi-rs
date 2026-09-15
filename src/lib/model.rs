@@ -1,19 +1,20 @@
 //! The node model: the four attributes that describe a node in a CSI collection network.
 //!
-//! The full model, including the deployment shapes it admits and its relation to IEEE 802.11bf,
-//! is in [`crate::model`]'s companion document, `docs/network-model.md`. This module is that
-//! document's type-level image. Three rules hold it together:
+//! The normative description is `docs/network-model.md`, included below so that the document and
+//! the types it describes cannot drift: there is one copy, and it reaches docs.rs, GitHub and every
+//! README link from the same file. No other document in the ecosystem restates it.
 //!
-//! 1. The four attributes are **independent**. What a node contributes to the network
-//!    ([`NetworkRole`]), whether its measurements leave it ([`CollectionMode`]), how it reaches the
-//!    channel ([`OperationalMode`]) and who starts the measurement ([`SessionRole`]) vary
-//!    separately, and collapsing any two of them loses a configuration somebody deploys.
-//! 2. **Illegal combinations are not offered.** A sniffer never transmits, so it cannot be a
-//!    central; an access point beacons, so it cannot be a peripheral. Rather than document those as
-//!    rules to observe, each [`OperationalMode`] exposes only the attributes it admits — the fixed
-//!    ones are `const` accessors with no setter to call, so an illegal node cannot be built.
-//! 3. The role and the collection mode are **computed from the mode**, never stored beside it.
-//!    A second home for the value is a second place to get it wrong.
+//! The types in this module are that document's image. Three rules connect them:
+//!
+//! 1. The four attributes are **independent** ([`NetworkRole`], [`CollectionMode`],
+//!    [`OperationalMode`], [`SessionRole`]). Collapsing any two loses a configuration somebody
+//!    deploys.
+//! 2. **Illegal combinations are not offered.** Each mode exposes only the attributes it admits;
+//!    the fixed ones are `const` accessors with no setter to call.
+//! 3. The role and the collection mode are **computed from the mode**, never stored beside it. A
+//!    second home for a value is a second place to get it wrong.
+//!
+#![doc = include_str!("../../docs/network-model.md")]
 
 /// What a node contributes to the network: the traffic, or nothing.
 ///

@@ -38,57 +38,45 @@
 //! Per-chip cargo aliases ship in `.cargo/config.toml` for both flavors:
 //!
 //! ```bash
-//! cargo esp32c3 --example sniffer_wifi # println
-//! cargo esp32c3-defmt --example sniffer_wifi # defmt
+//! cargo esp32c3 --example sniffer # println
+//! cargo esp32c3-defmt --example sniffer # defmt
 //! ```
 //!
 //! Replace `esp32c3` with any of: `esp32`, `esp32c3`, `esp32c5`, `esp32c6`, `esp32s3`. `-build` and `-build-defmt` variants compile without flashing.
 //!
 //! ## Using the Crate
 //!
-//! Each ESP device is a node with one job. A CSI measurement needs energy in the channel and
-//! something to measure the channel's response to it, so there are exactly two roles:
+//! Each ESP device is one node in a **CSI collection network**, described by four independent
+//! attributes: what it contributes to the network, whether its measurements leave it, how it
+//! reaches the channel, and what part it plays in the session. [`crate::model`] is the normative
+//! description and the only place it is written down — this page does not restate it.
 //!
-//! ### Node Roles
-//! 1) **Emitter** ([`NodeRole::Emitter`]) — puts known RF energy into the channel and never captures.
-//!    It forces its transmit PHY to a fixed format and loop-injects a raw sounding frame without
-//!    associating to anything. Configured with [`EmitterConfig`].
-//! 2) **Collector** ([`NodeRole::Collector`]) — captures the channel's response and delivers it.
+//! In practice you pick a mode and the rest follows, because each mode offers only the attributes
+//! it admits:
 //!
-//! Because the emitter's frames carry no meaning, it needs no peer, no handshake, and no protocol.
-//! That is what lets the two roles compose into any arrangement you like.
+//! | Constructor | Operational mode | Network role | Collection mode |
+//! |---|---|---|---|
+//! | [`CSINode::sniffer`] | Wi-Fi sniffer | peripheral | collector |
+//! | [`CSINode::station`] | Wi-Fi station | either | either |
+//! | [`CSINode::access_point`] | Wi-Fi access point | central | either |
+//! | [`CSINode::emitter`] | Emitter (raw sounding) | central | listener |
+//! | [`CSINode::esp_now`] | ESP-NOW | either | either |
+//! | [`CSINode::esp_now_simplex_source`] | ESP-NOW simplex | central | listener |
+//! | [`CSINode::esp_now_simplex_peer`] | ESP-NOW simplex | peripheral | collector |
 //!
-//! ### Collector Capture Paths
-//! *How* a collector gets frames to measure is a separate question from what it is for, so these are
-//! variants of the collector role rather than roles of their own ([`CollectorMode`]):
+//! Where an attribute is fixed there is no setter to call, so a central sniffer or a collecting
+//! emitter cannot be built. Where it is free, set it on the mode's config —
+//! [`EspNowConfig::with_network_role`] and `with_collection_mode`.
 //!
-//! 1) **Sniffer** — lock a channel in promiscuous mode and measure every frame overheard. This is the
-//!    path that pairs with an emitter.
-//! 2) **Station** — associate to an access point and measure the frames received from it.
-//! 3) **Access Point** — run a softAP (with a built-in DHCP server) so an associated station
-//!    generates steady uplink traffic to measure.
-//!
-//! ### CSI Output
-//! A collector delivers its CSI by default. [`CSINode::set_csi_output_enabled`] turns delivery off
-//! while leaving capture running, so the RX path and its timing stay identical but nothing is
-//! decoded, logged, or handed to a callback.
+//! Every node here is a session **responder**: the run starts when something calls
+//! [`CSINode::run`] and stops when something calls [`CSINodeClient::send_stop`]. See
+//! [`SessionRole`] for why that is not a field.
 //!
 //! ## Bandwidth
 //! An emitter transmits HT20 or HT40 ([`HtBandwidth`]) — plain 802.11n, supported on every chip
 //! listed above. 40 MHz needs a secondary channel above or below the primary, and every node in a
-//! capture set must agree on the primary channel.
-//!
-//! ## Collection Setups
-//! Roles compose, so the useful arrangements are just combinations rather than fixed topologies:
-//!
-//! 1. ***Single node:*** one sniffer collector, measuring whatever ambient traffic exists. The only
-//!    setup that needs no second device.
-//! 2. ***Emitter + collector:*** the controlled pairing. The emitter sounds the channel at a known
-//!    rate and bandwidth; one or more sniffer collectors measure it. Adding collectors costs the
-//!    emitter nothing, and several emitters can share one collector — each frame carries its
-//!    transmitter's MAC, so a collector attributes measurements by source.
-//! 3. ***Associated link:*** a station collector against any access point (an ESP softAP collector or
-//!    a commercial router), measuring the CSI of ordinary traffic on that link.
+//! capture set must agree on the primary channel. Confirm it engaged at the collector: a subcarrier
+//! count >= 100 (commonly ~117) is HT40, ~53/~56 means it fell back.
 //!
 //! ## Output Formats & Logging Modes
 //! `esp-csi-rs` is able to print CSI data in several formats. The output format can be configured when initializing the logger. The supported formats include:
@@ -169,7 +157,7 @@
 //! hot path so it must be fast and non-blocking — no heap allocation,
 //! no locking, no UART I/O. Heavier work belongs in your own task; copy
 //! what you need out of the borrowed packet and post it via atomics or
-//! a queue. See `examples/csi_callback_test.rs` for a working demo.
+//! a queue. See `examples/csi_callback.rs` for a working demo.
 //!
 //! ```rust,ignore
 //! use esp_csi_rs::{set_csi_callback, csi::CSIDataPacket};
@@ -202,18 +190,19 @@
 //! .with_password("PASS".to_string())
 //! .with_auth_method(AuthenticationMethod::Wpa2Personal);
 //!
-//! let station_config = WifiStationConfig {
-//! client_config, // Pass the config we created above
-//! };
+//! // `WifiStationConfig` carries the two attributes this mode admits; both default as shown.
+//! let station_config = WifiStationConfig::new(client_config)
+//!     .with_network_role(esp_csi_rs::NetworkRole::Central)
+//!     .with_collection_mode(esp_csi_rs::CollectionMode::Collector);
 //! ```
 //!
 //! `StationConfig` was renamed from `ClientConfig`, and `AuthMethod` was renamed to `AuthenticationMethod` in `esp-radio` 0.18. `with_ssid` now takes `impl Into<Ssid>`, so a `&str` literal works directly without `.to_string()`.
 //! #### Step 4: Create a CSI Collection Node Instance with the Desired Configuration
 //! ```rust,ignore
-//! let mut node = CSINode::new_collector(
-//!     esp_csi_rs::CollectorMode::Station(station_config),
+//! let mut node = CSINode::station(
+//!     station_config,
 //!     Some(CsiConfig::default()),
-//!     Some(100),
+//!     Some(100), // gateway ping rate (Hz) — the uplink an AP collector measures
 //!     csi_hardware,
 //! );
 //! ```
@@ -236,23 +225,25 @@
 //!
 //! The repository ships runnable firmware for every supported topology in the
 //! [examples directory](https://github.com/csi-rs/esp-csi-rs/tree/main/examples).
-//! Build one with the per-chip cargo aliases, e.g.
-//! `cargo esp32c6 --example esp_now_central`:
+//! Build one with the per-chip cargo aliases, e.g. `cargo esp32c6 --example esp_now`.
+//!
+//! There is **one example per operational mode**, with the variants that used to be separate files
+//! folded into `const`s at the top of each. Every example opens with its node's four model
+//! attributes.
 //!
 //! | Example | What it does |
 //! |---|---|
-//! | `sniffer_wifi` | Promiscuous collector — locks a channel and measures every frame overheard |
-//! | `wifi_station` / `wifi_ap` | Associated collector, station side / self-contained softAP collector |
-//! | `ht20_emitter` / `ht40_emitter` | Raw 802.11n injection at 20 or 40 MHz; pair with a sniffer |
-//! | `collector_sniffer` | The collector half of the emitter/collector pairing |
-//! | `esp_now_central` / `esp_now_peripheral` | Connectionless ESP-NOW pair; both sides capture |
-//! | `esp_now_fast_collector` / `esp_now_fast_source` | Asymmetric simplex ESP-NOW — the highest CSI rate of any pairing |
-//! | `esp_now_*_ht40` | The ESP-NOW pair with a forced HT40 per-peer TX PHY |
-//! | `csi_callback_test` | The two CSI delivery paths — inline callback vs. queued |
-//! | `runtime_config` | Changing collection settings between runs without reflashing |
+//! | `sniffer` | Peripheral collector — locks a channel and measures every frame overheard |
+//! | `emitter` | Central listener — unassociated sounding at HT20 or HT40; pair with `sniffer` |
+//! | `station` | Associates to an AP or router; central or peripheral |
+//! | `access_point` | Self-contained softAP with DHCP; associated stations generate the uplink |
+//! | `esp_now` | The symmetric pair — both roles, both collection modes, HT20/HT40 |
+//! | `esp_now_simplex` | The asymmetric pair — the highest CSI rate of any pairing |
+//! | `csi_callback` | The two CSI delivery paths — inline callback vs. queued |
+//! | `runtime_config` | Reconfiguring one node between runs without reflashing |
 //!
-//! Measurement and characterization harnesses live separately under
-//! `experiments/`, documented in `experiments/README.md`.
+//! Measurement and characterization harnesses live separately under `experiments/`, documented in
+//! `experiments/README.md`.
 //!
 //! ## Architecture
 //!
