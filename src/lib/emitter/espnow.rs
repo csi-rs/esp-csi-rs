@@ -20,9 +20,9 @@
 //! receive side needs to know ESP-NOW is involved.
 //!
 //! **Scope: classic MACs only.** The C5/C6 keep raw injection — measured working there (480/s) —
-//! and so does HE20, which is C5/C6-only and lives in the proprietary crate. Nothing here touches
-//! [`super::frame`], whose `build_probe_frame` / `inject_probe_once` the HE20 injector imports from
-//! this crate, so the HE20 path is unaffected by this module.
+//! and so does the raw-injection path on the parts that support it. Nothing here touches
+//! [`super::frame`], whose `build_probe_frame` / `inject_probe_once` an out-of-tree radio profile
+//! may also use, so that path is unaffected by this module.
 
 use esp_radio::esp_now::{EspNow, EspNowWifiInterface, PeerInfo};
 use esp_radio::wifi::WifiController;

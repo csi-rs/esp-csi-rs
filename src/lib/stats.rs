@@ -160,8 +160,8 @@ pub fn record_emitter_tx() {
 
 /// Record one received CSI report from an **out-of-tree collector**.
 ///
-/// The HE20 path registers its own CSI callback and never enters
-/// `capture_csi_info`, so until this existed an HE20 collector's `show-stats`
+/// A radio profile that registers its own CSI callback never enters
+/// `capture_csi_info`, so until this existed such a collector's `show-stats`
 /// reported `RX Total Packets: 0` however many frames it forwarded — the
 /// firmware's receive accounting was simply dead on the path production runs.
 #[cfg(feature = "statistics")]
@@ -179,7 +179,7 @@ pub fn record_collector_rx_drop() {
 
 /// Reset every counter and stamp the capture start, at the START of a run.
 ///
-/// Called by `CSINode::run_inner` for the in-tree roles and directly by the out-of-tree HE20 run
+/// Called by `CSINode::run_inner` for the in-tree modes and directly by an out-of-tree run
 /// loop, which enters neither `run_inner` nor `run_process_csi_packet` and so had no counter reset
 /// and no start time to divide `pps` by.
 ///

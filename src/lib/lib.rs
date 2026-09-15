@@ -291,7 +291,7 @@ pub mod profile;
 pub mod protocol;
 pub(crate) mod radio;
 
-// Re-export `esp-radio` so the open and proprietary consumer crates build the
+// Re-export `esp-radio` so this crate and any out-of-tree consumer build the
 // `RadioProfile` trait against the *same* `WifiController` / `Protocol(s)` /
 // `CsiConfig` types. Resolving a different `esp-radio` patch in a consumer would
 // otherwise make `impl RadioProfile` silently fail to satisfy the trait.

@@ -570,7 +570,7 @@ pub(crate) fn reset_globals() {
     //
     // `stats::reset` now runs at the START of a run instead (see `run_inner`), which is both what
     // the README already documents ("counters reset on the start of each new `start` collection")
-    // and what the HE20 path already did via `stats_begin_run`.
+    // and what an out-of-tree run loop does via `stats_begin_run`.
     crate::csi::delivery::reset();
 }
 
@@ -928,7 +928,7 @@ impl<'a> CSINode<'a> {
     async fn run_inner(&mut self, duration: Option<u64>, client: Option<&mut CSINodeClient>) {
         // Zero the counters and stamp the capture start so `show-stats` describes THIS run, and
         // still describes it after the run ends. Deliberately here rather than in `reset_globals`,
-        // which runs at stop — see the note there. Mirrors what the HE20 collector path already
+        // which runs at stop — see the note there. Mirrors what an out-of-tree collector path
         // does with `stats_begin_run`.
         #[cfg(feature = "statistics")]
         crate::stats::stats_begin_run();
