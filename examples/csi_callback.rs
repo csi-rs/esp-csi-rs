@@ -39,7 +39,7 @@ use embassy_futures::join::{join, join3};
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::LogMode;
-use esp_csi_rs::{CollectorMode, config::CsiConfig, CsiDeliveryMode, CSINode, logging::logging::init_logger, WifiSnifferConfig};
+use esp_csi_rs::{config::CsiConfig, CsiDeliveryMode, CSINode, logging::logging::init_logger, WifiSnifferConfig};
 use esp_csi_rs::{CSINodeClient, log_ln, NodeHardware, set_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled};
 #[cfg(feature = "statistics")]
 use esp_csi_rs::get_dropped_packets_rx;
@@ -207,12 +207,9 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut node_handle = CSINodeClient::new();
     let csi_hardware = NodeHardware::new(&mut interfaces, controller);
-    let mut node = CSINode::new_collector(
-        CollectorMode::Sniffer(
-            WifiSnifferConfig::default(),
-        ),
+    let mut node = CSINode::sniffer(
+        WifiSnifferConfig::default(),
         Some(CsiConfig::default()),
-        Some(1000),
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::LR);

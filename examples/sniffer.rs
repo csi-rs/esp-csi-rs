@@ -1,14 +1,27 @@
-//! Sniffer collector — the RX half of an emitter/collector pair.
+//! **Sniffer** — promiscuous capture on a locked channel.
 //!
-//! Locks a channel in promiscuous mode and measures the CSI of every frame it
-//! overhears, including the raw sounding frames from an `ht20_emitter` or
-//! `ht40_emitter` on the same channel. No association or handshake is involved:
-//! the emitter transmits blindly and this node measures what arrives.
+//! | Attribute | Value |
+//! |---|---|
+//! | Operational mode | Wi-Fi sniffer |
+//! | Network role | Peripheral — it never transmits, so it sources no traffic |
+//! | Collection mode | Collector — a sniffer that does not report observes nothing |
+//! | Session role | Responder — the run is started by whatever calls `run()` |
 //!
-//! Each frame carries its transmitter's MAC, so one collector can serve several
-//! emitters and attribute measurements by source. This example reports the CSI
-//! rate per source MAC once a second, which is the quickest way to confirm on
-//! hardware that an emitter is actually being heard.
+//! Neither of the first two is settable, so `CSINode::sniffer` takes no role arguments. See
+//! `docs/network-model.md`.
+//!
+//! This is the only mode that needs no second device: the traffic it measures is whatever is
+//! already on air. Point it at a channel with an `emitter` on it and it becomes the receiving half
+//! of a controlled pairing instead — nothing about the node changes, only what is transmitting.
+//!
+//! Frames are attributed by transmitter MAC, so several emitters can share one sniffer and the
+//! per-source rate below separates them. If a source's rate is lower than the emitter's configured
+//! frame rate, the gap is what the collector missed.
+//!
+//! Build / run:
+//!   cargo esp32c6 --example sniffer
+//!
+//! Replace `esp32c6` with any supported chip — every chip can collect.
 
 #![no_std]
 #![no_main]
@@ -21,10 +34,7 @@ use embassy_time::{Duration, Timer};
 use esp_csi_rs::config::CsiConfig;
 use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
-use esp_csi_rs::{
-    CSINode, CSINodeClient, CollectorMode, NodeHardware, WifiSnifferConfig, log_ln,
-    set_csi_callback,
-};
+use esp_csi_rs::{CSINode, CSINodeClient, NodeHardware, WifiSnifferConfig, log_ln, set_csi_callback};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -32,7 +42,7 @@ use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
 
-/// Must match the emitter's primary channel.
+/// Channel to lock. Must match the emitter's primary channel when pairing with one.
 const CHANNEL: u8 = 7;
 
 /// How many distinct transmitters to track.
@@ -50,12 +60,18 @@ struct SourceTally {
     rssi: i32,
 }
 
-/// Per-transmitter tallies, written from the CSI callback and drained by the
-/// reporting task.
-static SOURCES: Mutex<CriticalSectionRawMutex, core::cell::RefCell<heapless::Vec<SourceTally, MAX_SOURCES>>> =
-    Mutex::new(core::cell::RefCell::new(heapless::Vec::new()));
+/// Per-transmitter tallies, written from the CSI callback and drained by the reporting task.
+static SOURCES: Mutex<
+    CriticalSectionRawMutex,
+    core::cell::RefCell<heapless::Vec<SourceTally, MAX_SOURCES>>,
+> = Mutex::new(core::cell::RefCell::new(heapless::Vec::new()));
 
 fn on_csi(packet: &CSIDataPacket) {
+    // Two `i8` samples per subcarrier, so this is the width of the capture.
+    SUBCARRIERS.store(
+        (packet.csi_data_len / 2) as u32,
+        core::sync::atomic::Ordering::Relaxed,
+    );
     SOURCES.lock(|cell| {
         let mut list = cell.borrow_mut();
         if let Some(entry) = list.iter_mut().find(|e| e.mac == packet.mac) {
@@ -77,7 +93,7 @@ async fn report_task() {
         Timer::after_secs(1).await;
         let snapshot = SOURCES.lock(|cell| cell.borrow().clone());
         if snapshot.is_empty() {
-            log_ln!("No CSI yet — is an emitter running on channel {}?", CHANNEL);
+            log_ln!("No CSI yet — is anything transmitting on channel {}?", CHANNEL);
             continue;
         }
         for entry in snapshot.iter() {
@@ -87,7 +103,7 @@ async fn report_task() {
                 .map(|(_, c)| *c)
                 .unwrap_or(0);
             log_ln!(
-                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  {} CSI/s  total {}  RSSI {}",
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  {} CSI/s  total {}  RSSI {}  subcarriers {}",
                 entry.mac[0],
                 entry.mac[1],
                 entry.mac[2],
@@ -97,6 +113,7 @@ async fn report_task() {
                 entry.count.wrapping_sub(last),
                 entry.count,
                 entry.rssi,
+                SUBCARRIERS.load(core::sync::atomic::Ordering::Relaxed),
             );
         }
         previous.clear();
@@ -105,6 +122,10 @@ async fn report_task() {
         }
     }
 }
+
+/// Last capture's subcarrier count. `>= 100` (commonly ~117) confirms HT40 actually engaged;
+/// ~53 or ~56 means it fell back to legacy or HT20. See `docs/bandwidth.md`.
+static SUBCARRIERS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -124,17 +145,15 @@ async fn main(spawner: Spawner) -> ! {
         .expect("Failed to initialize Wi-Fi controller");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    log_ln!("Starting sniffer collector on channel {}", CHANNEL);
+    log_ln!("Starting sniffer (peripheral collector) on channel {}", CHANNEL);
 
     let mut node_handle = CSINodeClient::new();
     let hardware = NodeHardware::new(&mut interfaces, controller);
-    let mut node = CSINode::new_collector(
-        CollectorMode::Sniffer(WifiSnifferConfig::default().with_channel(CHANNEL)),
+    let mut node = CSINode::sniffer(
+        WifiSnifferConfig::default().with_channel(CHANNEL),
         Some(CsiConfig::default()),
-        None,
         hardware,
     );
-
     node.set_protocol(esp_radio::wifi::Protocol::N);
 
     set_csi_callback(on_csi);
@@ -142,7 +161,7 @@ async fn main(spawner: Spawner) -> ! {
     join(node.run(), report_task()).await;
 
     loop {
-        log_ln!("Collector stopped");
+        log_ln!("Sniffer stopped");
         Timer::after(Duration::from_secs(5)).await;
     }
 }

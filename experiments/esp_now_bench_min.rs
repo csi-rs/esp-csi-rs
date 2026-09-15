@@ -1,14 +1,16 @@
-//! Footprint **min** — ESP-NOW central platform floor (no `CSINode`).
+//! **ESP-NOW footprint floor** — the platform baseline, with no `CSINode` in it.
 //!
-//! Binary-footprint counterpart to `esp_now_central`: identical platform
-//! boilerplate and the same raw ESP-NOW bring-up the crate's central arm relies
-//! on (STA config + channel + per-peer MCS0 PHY), but **without** the `CSINode`
-//! state machine, `ControlPacket` serialization, or TX scheduler — and no TX
-//! loop. `full − min` isolates the central state-machine footprint. Built and
-//! measured, not run (Test 3). The ESP-NOW radio floor is shared with
-//! `esp_now_peripheral_min`.
+//! The `min` half of the binary-footprint measurement. Performs the same platform boilerplate and
+//! the same raw ESP-NOW bring-up the crate's ESP-NOW arm relies on (STA config, channel, per-peer
+//! MCS0 PHY) and nothing else: no node state machine, no `ControlPacket` serialization, no TX
+//! scheduler and no TX loop.
 //!
-//! Build: `cargo build --release --target xtensa-esp32-none-elf --example esp_now_central_min --features=esp32`.
+//! `esp_now_bench − esp_now_bench_min` is the crate's ESP-NOW footprint. **Build both halves with
+//! the same feature set**, or the difference includes whatever the features linked. Built and
+//! measured, not run. The radio floor is shared between the central and peripheral ends, which is
+//! why there is one floor rather than two.
+//!
+//! Build: `cargo esp32c6-build --example esp_now_bench_min`
 
 #![no_std]
 #![no_main]
