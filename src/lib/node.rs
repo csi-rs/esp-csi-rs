@@ -45,7 +45,7 @@ use crate::model::{NodeView, OperationalMode, SimplexConfig};
 use crate::profile::{RadioProfile, StandardProfile};
 
 use crate::csi::delivery::{
-    CSINodeClient, CSI_OUTPUT_ENABLED, build_csi_config, run_process_csi_packet, set_csi,
+    CSINodeClient, build_csi_config, run_process_csi_packet, set_csi,
 };
 use crate::log_ln;
 use crate::radio::{apply_ht40_channel, suppress_espnow_rx};
@@ -1092,10 +1092,10 @@ impl<'a> CSINode<'a> {
         profile.tune_csi_acquisition(&mut config);
 
         log_ln!("Wi-Fi Controller Started");
-        CSI_OUTPUT_ENABLED.store(
-            self.mode.collection_mode() == crate::CollectionMode::Collector,
-            Ordering::Relaxed,
-        );
+        // The collection mode reaches the delivery gate through `set_runtime_collection_mode`
+        // above, not through here: `CSI_OUTPUT_ENABLED` is the user's runtime override and writing
+        // the configured mode into it would make `set-csi-output --enabled=true` unable to
+        // re-enable a node that had been configured as a listener.
         // Sequence-drop detection tracks per-source-MAC sequence numbers, so it
         // works for any collector: the emitter's driver-assigned incrementing
         // sequence numbers make gaps in a capture measurable.

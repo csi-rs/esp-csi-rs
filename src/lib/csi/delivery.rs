@@ -61,16 +61,21 @@ pub(crate) static IS_COLLECTOR: AtomicBool = AtomicBool::new(false);
 /// on a mode change wakes immediately instead of polling.
 pub(crate) static COLLECTION_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-/// Whether captured CSI is delivered off-device. See
-/// [`CSINode::set_csi_output_enabled`](crate::CSINode::set_csi_output_enabled).
-pub(crate) static CSI_OUTPUT_ENABLED: AtomicBool = AtomicBool::new(false);
-// CSI publish gate. The WiFi callback checks this in a single relaxed load
-// to decide whether to build and emit a CSIDataPacket.
-//
-// Deliberately separate from `CSI_OUTPUT_ENABLED`: that flag is the user's
-// output preference, while this one tracks whether any consumer is actually
-// installed. Conflating them would let an output-disabled node also block a
-// `CSINodeClient` that wants to read CSI directly.
+/// The user's runtime output preference, toggled by [`set_csi_output_enabled`] and, through it, by
+/// `set-csi-output --enabled=` on the serial console and `POST /config/csi-output` on the HTTP API.
+///
+/// Defaults to enabled: a node that has been asked for no preference delivers.
+pub(crate) static CSI_OUTPUT_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Whether any consumer is installed — a logger, a callback, or an async drainer. Set by the
+/// functions that install one, and distinct from the two gates above so that switching a node to
+/// `Listener` does not forget that a callback was registered.
+static USER_PUBLISH_INTENT: AtomicBool = AtomicBool::new(false);
+
+// CSI publish gate. The WiFi callback checks this in a single relaxed load to decide whether to
+// build and emit a CSIDataPacket. It is a cached AND of the three inputs above, recomputed by
+// `apply_publish_gate` whenever one of them moves — the hot path must not pay for three loads and
+// two branches per frame on `riscv32imc`.
 static CSI_PUBLISH_ENABLED: AtomicBool = AtomicBool::new(false);
 pub(crate) static CSI_OUTPUT_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
@@ -153,11 +158,10 @@ static CSI_INLINE_LOG_ENABLED: AtomicBool = AtomicBool::new(false);
 ///   touch this log-output flag.
 pub fn set_csi_logging_enabled(enabled: bool) {
     CSI_INLINE_LOG_ENABLED.store(enabled, Ordering::Release);
-    // Keep the master publish gate paired with logging by default so
-    // existing callers that only flip `set_csi_logging_enabled(true)` to
-    // get UART output still work. A registered `set_csi_callback` keeps
-    // the publish gate open independently when this is later disabled.
-    CSI_PUBLISH_ENABLED.store(enabled, Ordering::Release);
+    // Keep the master publish gate paired with logging by default so existing callers that only
+    // flip `set_csi_logging_enabled(true)` to get UART output still work.
+    USER_PUBLISH_INTENT.store(enabled, Ordering::Release);
+    apply_publish_gate();
 }
 
 /// Returns whether inline CSI logging is currently enabled (i.e. whether
@@ -222,7 +226,8 @@ pub fn set_csi_callback(cb: fn(&CSIDataPacket)) {
     // mode flipped to `Callback` while `CSI_CALLBACK` is still null.
     CSI_CALLBACK.store(cb as *mut (), core::sync::atomic::Ordering::Release);
     CSI_DELIVERY_MODE.store(CsiDeliveryMode::Callback as u8, Ordering::Release);
-    CSI_PUBLISH_ENABLED.store(true, Ordering::Release);
+    USER_PUBLISH_INTENT.store(true, Ordering::Release);
+    apply_publish_gate();
 }
 
 /// Remove the user CSI callback registered via [`set_csi_callback`]
@@ -247,12 +252,21 @@ pub fn clear_csi_callback() {
 /// being elided). Pass a `fn()` that does only minimal bookkeeping.
 pub fn set_csi_raw_callback(cb: fn()) {
     CSI_RAW_CALLBACK.store(cb as *mut (), core::sync::atomic::Ordering::Release);
-    CSI_PUBLISH_ENABLED.store(true, Ordering::Release);
+    USER_PUBLISH_INTENT.store(true, Ordering::Release);
+    apply_publish_gate();
 }
 
-/// Toggle CSI output delivery at runtime.
+/// Toggle CSI output delivery at runtime, leaving capture running.
+///
+/// The radio keeps capturing and the RX path keeps its timing, but nothing is decoded, logged or
+/// handed to a callback — which is what separates acquisition cost from delivery cost.
+///
+/// Before 0.11 this stored a flag that no CSI path read, so `set-csi-output --enabled=false` on the
+/// console, `POST /config/csi-output` on the HTTP API, and `CSINode::set_csi_output_enabled` all
+/// reported success and changed nothing. It now closes the publish gate.
 pub fn set_csi_output_enabled(enabled: bool) {
     CSI_OUTPUT_ENABLED.store(enabled, Ordering::Relaxed);
+    apply_publish_gate();
     CSI_OUTPUT_CHANGED.signal(());
 }
 
@@ -381,9 +395,26 @@ pub fn runtime_collection_mode() -> crate::CollectionMode {
     }
 }
 
+/// Recompute the publish gate from its three inputs: a consumer is installed, the node is a
+/// collector, and output has not been switched off at runtime.
+///
+/// Called from every writer of those three rather than read three times per frame, because this is
+/// the gate the Wi-Fi callback loads on the hot path for every captured frame.
+fn apply_publish_gate() {
+    let open = USER_PUBLISH_INTENT.load(Ordering::Relaxed)
+        && IS_COLLECTOR.load(Ordering::Relaxed)
+        && CSI_OUTPUT_ENABLED.load(Ordering::Relaxed);
+    CSI_PUBLISH_ENABLED.store(open, Ordering::Release);
+}
+
 /// Change collection mode at runtime — e.g. a central signalling a peripheral to start or stop.
+///
+/// Reopening the gate here is not optional. A peripheral paired with a listening central promotes
+/// itself to collector mid-run; without this the promoted node would capture in silence for the
+/// rest of the run, which is the failure the `Listener` gate is most likely to introduce.
 pub(crate) fn set_runtime_collection_mode(is_collector: bool) {
     IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
+    apply_publish_gate();
     COLLECTION_MODE_CHANGED.signal(());
 }
 
@@ -396,7 +427,11 @@ pub(crate) fn set_runtime_collection_mode(is_collector: bool) {
 /// user's callback.
 pub(crate) fn reset() {
     CSI_INLINE_LOG_ENABLED.store(false, Ordering::Release);
+    USER_PUBLISH_INTENT.store(false, Ordering::Release);
     CSI_PUBLISH_ENABLED.store(false, Ordering::Release);
+    // A user preference, not run state: restored rather than carried into the next run, so a node
+    // left with output off does not come back deaf.
+    CSI_OUTPUT_ENABLED.store(true, Ordering::Relaxed);
     CSI_DELIVERY_MODE.store(CsiDeliveryMode::Off as u8, Ordering::Release);
     CSI_CALLBACK.store(core::ptr::null_mut(), core::sync::atomic::Ordering::Release);
     // The attribution filters are deliberately NOT cleared: they are user configuration set from
@@ -454,7 +489,8 @@ impl CSINodeClient {
         // without one clobbering the other.
         if CSI_DELIVERY_MODE.load(Ordering::Relaxed) == CsiDeliveryMode::Off as u8 {
             CSI_DELIVERY_MODE.store(CsiDeliveryMode::Async as u8, Ordering::Release);
-            CSI_PUBLISH_ENABLED.store(true, Ordering::Release);
+            USER_PUBLISH_INTENT.store(true, Ordering::Release);
+            apply_publish_gate();
         }
         core::future::poll_fn(|cx| {
             if let Some(p) = CSI_QUEUE.dequeue() {
