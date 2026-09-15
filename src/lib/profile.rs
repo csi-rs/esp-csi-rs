@@ -6,9 +6,9 @@
 //! [`StandardProfile`] that performs only the generic, chip-level radio tuning;
 //! specialised profiles override the hooks they need.
 
-use crate::node::NodeRole;
+use crate::model::NodeView;
 #[cfg(feature = "esp32c5")]
-use crate::node::CollectorMode;
+use crate::model::OperationalMode;
 use esp_radio::wifi::csi::CsiConfig as RadioCsiConfig;
 use esp_radio::wifi::{Protocol, Protocols, WifiController};
 
@@ -20,15 +20,20 @@ use esp_radio::wifi::{Protocol, Protocols, WifiController};
 pub trait RadioProfile: Sync {
     /// Whether this profile takes over the extended bring-up sequence
     /// (bandwidth lock / pre-config forcing / post-config re-apply) for the
-    /// given role and requested protocol. `false` keeps the plain path.
-    fn wants_bringup(&self, _role: &NodeRole, _protocol: Option<Protocol>) -> bool {
+    /// given node and requested protocol. `false` keeps the plain path.
+    fn wants_bringup(&self, _node: NodeView<'_>, _protocol: Option<Protocol>) -> bool {
         false
     }
 
     /// Adjust the protocol set before it is applied. `base` is
     /// `Protocols::default().with_2_4(only(protocol))`; return it unchanged to
     /// keep the default, or rebuild it entirely.
-    fn tune_protocols(&self, _role: &NodeRole, _protocol: Protocol, base: Protocols) -> Protocols {
+    fn tune_protocols(
+        &self,
+        _node: NodeView<'_>,
+        _protocol: Protocol,
+        base: Protocols,
+    ) -> Protocols {
         base
     }
 
@@ -57,23 +62,27 @@ pub trait RadioProfile: Sync {
 pub struct StandardProfile;
 
 impl RadioProfile for StandardProfile {
-    fn tune_protocols(&self, role: &NodeRole, _protocol: Protocol, base: Protocols) -> Protocols {
+    fn tune_protocols(
+        &self,
+        node: NodeView<'_>,
+        _protocol: Protocol,
+        base: Protocols,
+    ) -> Protocols {
         // Generic, chip-level tuning shared by every deployment. Kept free of
         // any 5 GHz high-throughput advertising the plain path does not need.
         #[cfg(feature = "esp32c5")]
         {
             // The plain associated AP/STA paths advertise A/N on 5 GHz. A sniffer
-            // collector is excluded: it locks a channel rather than associating, and
-            // an emitter pins its own protocol set to match its forced TX PHY.
+            // is excluded: it locks a channel rather than associating, and an
+            // emitter pins its own protocol set to match its forced TX PHY.
             if matches!(
-                role,
-                NodeRole::Collector(CollectorMode::Station(_))
-                    | NodeRole::Collector(CollectorMode::AccessPoint(_))
+                node.mode(),
+                OperationalMode::Station(_) | OperationalMode::AccessPoint(_)
             ) {
                 return base.with_5(Protocol::A | Protocol::N);
             }
         }
-        let _ = role;
+        let _ = node;
         base
     }
 }

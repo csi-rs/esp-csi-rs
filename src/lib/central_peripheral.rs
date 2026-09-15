@@ -187,6 +187,13 @@ impl EspNowConfig {
     pub fn collection_mode(&self) -> crate::CollectionMode {
         self.collection
     }
+
+    /// In-place form of [`with_collection_mode`](Self::with_collection_mode). Exists for the
+    /// deprecated `CSINode::set_collection_mode` shim, which mutates a config it does not own;
+    /// `EspNowConfig` is deliberately not `Clone`, so the builder form cannot serve there.
+    pub(crate) fn set_collection_mode(&mut self, mode: crate::CollectionMode) {
+        self.collection = mode;
+    }
 }
 /// Central node operational modes.
 pub enum CentralOpMode {

@@ -327,9 +327,13 @@ pub use crate::emitter::frame::{
 };
 pub use crate::emitter::{EmitterConfig, HtBandwidth};
 pub use crate::node::{
-    CSINode, CollectorMode, IOTaskConfig, NodeHardware, NodeRole, WifiApConfig, WifiSnifferConfig,
-    WifiStationConfig,
+    CSINode, IOTaskConfig, NodeHardware, WifiApConfig, WifiSnifferConfig, WifiStationConfig,
 };
+/// The retired taxonomy, kept for one release so callers written against 0.10 keep compiling.
+/// Convert with `OperationalMode::from(role)`; see [`crate::model`] for what replaced it.
+#[allow(deprecated)]
+#[deprecated(since = "0.11.0", note = "see `esp_csi_rs::model`")]
+pub use crate::node::{CollectorMode, NodeRole};
 /// The node model's four attributes. [`OperationalMode`] is the enum; the other three are read back
 /// from it, because a mode that fixes an attribute has no field for it and therefore no way to
 /// disagree with itself.
