@@ -25,7 +25,7 @@
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::SecondaryChannel;
 
-use crate::node::{WifiApConfig, WifiSnifferConfig, WifiStationConfig};
+
 
 /// Configuration for ESP-NOW traffic generation.
 ///
@@ -159,12 +159,6 @@ impl EspNowConfig {
 pub enum CentralOpMode {
     /// Drive an ESP-NOW exchange with a peripheral node.
     EspNow(EspNowConfig),
-    /// Associate as a Wi-Fi station to harvest CSI from received frames.
-    WifiStation(WifiStationConfig),
-    /// Run a self-contained softAP CSI collector: start an access point (plus a
-    /// minimal DHCP server) so a [`CentralOpMode::WifiStation`] node can
-    /// associate and generate steady uplink traffic, captured as CSI on this AP.
-    WifiAccessPoint(WifiApConfig),
     /// Fast one-to-one ESP-NOW collector (asymmetric simplex): broadcast a
     /// sparse discovery beacon until a [`PeripheralOpMode::EspNowFastSource`] is
     /// heard, then stop beaconing and go RX-only, capturing CSI from the source's
@@ -178,9 +172,6 @@ pub enum CentralOpMode {
 pub enum PeripheralOpMode {
     /// Reply to a central's ESP-NOW control frames.
     EspNow(EspNowConfig),
-    /// Run as a Wi-Fi promiscuous sniffer; CSI is captured from every
-    /// frame received on the locked channel.
-    WifiSniffer(WifiSnifferConfig),
     /// Fast one-to-one ESP-NOW source (asymmetric simplex): listen for a
     /// [`CentralOpMode::EspNowFastCollector`] beacon, learn its MAC, then unicast
     /// a continuous forced-PHY flood for the collector to capture as CSI.

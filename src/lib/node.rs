@@ -1029,17 +1029,6 @@ impl<'a> CSINode<'a> {
                     );
                     drive_main(main_task, rx_enabled, duration, client).await;
                 }
-                // The Wi-Fi modes of the central taxonomy are the SAME code as the collector arms
-                // above — `central::{ap, sta}` is a re-export of `collector::{ap, sta}`, not a
-                // second copy. Rather than duplicate two long bring-up sequences that would drift,
-                // these are rejected at construction; a caller wanting them builds a
-                // `NodeRole::Collector`, which is where that path lives now.
-                CentralOpMode::WifiStation(_) | CentralOpMode::WifiAccessPoint(_) => {
-                    log_ln!(
-                        "central Wi-Fi modes are served by NodeRole::Collector — \
-                         build CollectorMode::Station / ::AccessPoint instead"
-                    );
-                }
             },
             NodeRole::Peripheral(mode) => match mode {
                 PeripheralOpMode::EspNow(cfg) => {
@@ -1063,14 +1052,6 @@ impl<'a> CSINode<'a> {
                         self.io_tasks,
                     );
                     drive_main(main_task, false, duration, client).await;
-                }
-                // As above: the sniffer path is `CollectorMode::Sniffer`, not a second
-                // implementation living under `peripheral`.
-                PeripheralOpMode::WifiSniffer(_) => {
-                    log_ln!(
-                        "peripheral sniffer is served by NodeRole::Collector — \
-                         build CollectorMode::Sniffer instead"
-                    );
                 }
             },
         }

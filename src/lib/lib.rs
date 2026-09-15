@@ -210,22 +210,13 @@
 //! `StationConfig` was renamed from `ClientConfig`, and `AuthMethod` was renamed to `AuthenticationMethod` in `esp-radio` 0.18. `with_ssid` now takes `impl Into<Ssid>`, so a `&str` literal works directly without `.to_string()`.
 //! #### Step 4: Create a CSI Collection Node Instance with the Desired Configuration
 //! ```rust,ignore
-//! let mut node = CSINode::new(
-//!     esp_csi_rs::NodeRole::Central(esp_csi_rs::CentralOpMode::WifiStation(station_config)),
+//! let mut node = CSINode::new_collector(
+//!     esp_csi_rs::CollectorMode::Station(station_config),
 //!     Some(CsiConfig::default()),
 //!     Some(100),
 //!     csi_hardware,
 //! );
-//! // A node delivers its CSI by default. `CollectionMode::Listener` used to be the
-//! // way to keep the radio capturing without delivering; that is now:
-//! // node.set_csi_output_enabled(false);
 //! ```
-//!
-//! Changed in 0.10: `CSINode::new` takes a [`NodeRole`] and no longer takes a
-//! `CollectionMode`. `NodeRole` is the four-variant role — `Emitter`, `Collector`,
-//! `Central`, `Peripheral` — where the ESP-NOW pair keeps the central/peripheral
-//! spelling it always had. There are also `CSINode::new_collector` and
-//! `CSINode::new_emitter` shorthands for the two most common cases.
 //! #### Step 5: (Optional) Register an On-Device CSI Callback
 //! ```rust,ignore
 //! set_csi_callback(|packet| {
