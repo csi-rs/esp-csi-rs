@@ -98,7 +98,7 @@ fn hz_to_interval_us(hz: u64) -> u64 {
 fn handle_peripheral_packet(
     esp_now: &mut EspNow<'static>,
     r: PoolFrame,
-    channel: u8,
+    config: &EspNowConfig,
     peer_mac: Option<[u8; 6]>,
     known_peers: &mut LinearMap<[u8; 6], (), RX_TRACKED_PEERS_CAPACITY>,
 ) {
@@ -126,15 +126,56 @@ fn handle_peripheral_packet(
                 interface: esp_radio::esp_now::EspNowWifiInterface::Station,
                 peer_address: r.info.src_address,
                 lmk: None,
-                channel: Some(channel),
+                channel: Some(config.channel),
                 encrypt: false,
             });
+        }
+
+        // Forced PHY is applied here rather than up front because this is a
+        // *learned unicast* peer. Per-peer rate config is only safe on one of
+        // those — on the broadcast peer it wedges the C5 dual-band Wi-Fi ISR —
+        // which is the same reason the peripheral defers it to
+        // `apply_central_peer_phy`.
+        if config.force_phy() {
+            crate::apply_peer_espnow_phy(
+                &r.info.src_address,
+                *config.phy_rate(),
+                config.secondary_channel(),
+            );
         }
 
         if known_peers.insert(r.info.src_address, ()).is_err() {
             known_peers.clear();
             let _ = known_peers.insert(r.info.src_address, ());
         }
+    }
+}
+
+/// The address the central's control traffic is sent to.
+///
+/// Auto-pairing has to *start* on broadcast, because that is how an unpaired
+/// peripheral discovers the central. It must not *stay* there. A broadcast
+/// frame does not reach the Wi-Fi CSI callback, so a peripheral fed nothing but
+/// broadcasts captures zero CSI while looking perfectly healthy — it still
+/// decodes every control packet and still replies. The exchange is symmetric on
+/// the wire and asymmetric in what it measures: the central collects (the
+/// replies are unicast), the peripheral collects nothing.
+///
+/// So once exactly one peripheral is known the downlink retargets to it and
+/// both ends collect. With more than one, broadcast is the only way to reach
+/// them all and the peripherals go back to being listeners — which is the star
+/// deployment, where the central is the collector anyway.
+fn downlink_target(
+    peer_mac: Option<[u8; 6]>,
+    known_peers: &LinearMap<[u8; 6], (), RX_TRACKED_PEERS_CAPACITY>,
+) -> [u8; 6] {
+    if let Some(mac) = peer_mac {
+        return mac;
+    }
+    let mut peers = known_peers.keys();
+    match (peers.next(), peers.next()) {
+        (Some(only), None) => *only,
+        _ => BROADCAST_ADDRESS,
     }
 }
 
@@ -158,7 +199,7 @@ pub async fn run_esp_now_central(
     let mut control_sequence: u32 = 0;
     let peer_mac = config.peer_mac();
     let send_magic = peer_mac.is_none();
-    let tx_target = peer_mac.unwrap_or(BROADCAST_ADDRESS);
+    let mut tx_target = peer_mac.unwrap_or(BROADCAST_ADDRESS);
     // Configure. In HT40 mode the channel (+secondary) was already set on the
     // controller before this task ran; calling esp_now.set_channel here would
     // reset the secondary to HT20, so skip it.
@@ -302,10 +343,15 @@ pub async fn run_esp_now_central(
                     break;
                 };
 
-                handle_peripheral_packet(esp_now, r, config.channel, peer_mac, &mut known_peers);
+                handle_peripheral_packet(esp_now, r, config, peer_mac, &mut known_peers);
                 rx_packets = rx_packets.saturating_add(1);
                 embassy_futures::yield_now().await;
             }
+
+            // Re-read every pass, not just on the first peer: a peripheral that
+            // drops out (or a second one appearing) has to move the downlink
+            // back to broadcast, or the pair silently stops pairing.
+            tx_target = downlink_target(peer_mac, &known_peers);
         }
         let mut now_us = Instant::now().as_micros();
 
