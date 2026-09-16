@@ -131,6 +131,22 @@ impl EmitterConfig {
         self.use_sta_if = false;
         self
     }
+
+    /// An emitter is always a [`Central`](crate::NetworkRole::Central): sounding frames are the
+    /// network's traffic, and it originates them. There is no setter for this.
+    pub const fn network_role() -> crate::NetworkRole {
+        crate::NetworkRole::Central
+    }
+
+    /// An emitter is always a [`Listener`](crate::CollectionMode::Listener): it captures nothing,
+    /// so it has nothing to report. There is no setter for this.
+    ///
+    /// This is the case the older two-role vocabulary could not express. "Emitter" was treated as a
+    /// role opposite "collector", which left no name for a node that measures without reporting —
+    /// and no name for the far more common thing an emitter actually is: a central that listens.
+    pub const fn collection_mode() -> crate::CollectionMode {
+        crate::CollectionMode::Listener
+    }
 }
 
 impl Default for EmitterConfig {
@@ -233,12 +249,13 @@ pub async fn run_emitter(
     cfg: &EmitterConfig,
 ) {
     // ESP-NOW is the transport for the open HT emitter on every chip. Raw injection is kept for
-    // HE20 only (proprietary, C5/C6): it works there, and ESP-NOW cannot carry an HE PPDU. The
+    // Raw injection on the newer MACs: it works there, and ESP-NOW cannot carry every PPDU. The
     // classic MACs accept raw injection and never radiate it, so a single transport that works
     // everywhere is preferable to a per-chip split whose classic half was silently dead.
     bringup(controller, cfg);
     // Transport is per PHY generation: the C5/C6 inject raw frames (measured working, and the
-    // same path HE20 uses), while the classic MACs accept raw injection and never radiate it, so
+    // same path an out-of-tree profile uses), while the classic MACs accept raw injection and
+    // never radiate it, so
     // they transmit over ESP-NOW instead.
     #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
     espnow::bringup(

@@ -33,15 +33,19 @@ use crate::collector::ap::{ap_init, run_ap};
 use crate::collector::sta::{run_sta_connect, sta_init};
 use crate::config::CsiConfig as CsiConfiguration;
 use crate::central::esp_now::run_esp_now_central;
-use crate::central::esp_now_fast::run_esp_now_fast_collector;
+// The simplex flip, made visible at the import: the driver that FLOODS is the central end and the
+// driver that goes receive-only is the peripheral end. The files still sit under the module names
+// they had when the roles were assigned the other way around; moving them is a separate step.
+use crate::central::esp_now_fast::run_esp_now_fast_collector as run_esp_now_simplex_peer;
 use crate::central_peripheral::{CentralOpMode, PeripheralOpMode};
 use crate::emitter::{EmitterConfig, run_emitter};
 use crate::peripheral::esp_now::run_esp_now_peripheral;
-use crate::peripheral::esp_now_fast::run_esp_now_fast_source;
+use crate::peripheral::esp_now_fast::run_esp_now_fast_source as run_esp_now_simplex_source;
+use crate::model::{NodeView, OperationalMode, SimplexConfig};
 use crate::profile::{RadioProfile, StandardProfile};
 
 use crate::csi::delivery::{
-    CSINodeClient, CSI_OUTPUT_ENABLED, build_csi_config, run_process_csi_packet, set_csi,
+    CSINodeClient, build_csi_config, run_process_csi_packet, set_csi,
 };
 use crate::log_ln;
 use crate::radio::{apply_ht40_channel, suppress_espnow_rx};
@@ -125,6 +129,20 @@ pub struct WifiSnifferConfig {
     channel: u8,
 }
 
+impl WifiSnifferConfig {
+    /// A sniffer is always a [`Peripheral`](crate::NetworkRole::Peripheral): it never transmits, so
+    /// it cannot source the network's traffic. There is no setter for this.
+    pub const fn network_role() -> crate::NetworkRole {
+        crate::NetworkRole::Peripheral
+    }
+
+    /// A sniffer is always a [`Collector`](crate::CollectionMode::Collector): a sniffer that does
+    /// not report observes nothing, so that configuration is not offered.
+    pub const fn collection_mode() -> crate::CollectionMode {
+        crate::CollectionMode::Collector
+    }
+}
+
 impl Default for WifiSnifferConfig {
     fn default() -> Self {
         Self {
@@ -178,6 +196,13 @@ pub struct WifiStationConfig {
     /// Primary channel of the target AP. On dual-band ESP32-C5 this selects
     /// 2.4 vs 5 GHz (`set_band_mode`) before scan/association.
     pub channel_hint: Option<u8>,
+    /// Whether the uplink this station generates is the traffic being measured. A station that
+    /// pings its gateway to keep the link busy is the network's traffic source and so a
+    /// [`Central`](crate::NetworkRole::Central); one that merely measures an already-busy link
+    /// sources nothing and is a [`Peripheral`](crate::NetworkRole::Peripheral).
+    network_role: crate::NetworkRole,
+    /// Whether this node reports the CSI it captures.
+    collection: crate::CollectionMode,
 }
 
 impl WifiStationConfig {
@@ -186,7 +211,33 @@ impl WifiStationConfig {
         Self {
             client_config,
             channel_hint: None,
+            network_role: crate::NetworkRole::Central,
+            collection: crate::CollectionMode::Collector,
         }
+    }
+
+    /// Set whether the uplink this station generates is the network's traffic. Defaults to
+    /// [`Central`](crate::NetworkRole::Central).
+    pub fn with_network_role(mut self, role: crate::NetworkRole) -> Self {
+        self.network_role = role;
+        self
+    }
+
+    /// Set whether this node reports its CSI. Defaults to
+    /// [`Collector`](crate::CollectionMode::Collector).
+    pub fn with_collection_mode(mut self, mode: crate::CollectionMode) -> Self {
+        self.collection = mode;
+        self
+    }
+
+    /// Whether the uplink this station generates is the network's traffic.
+    pub fn network_role(&self) -> crate::NetworkRole {
+        self.network_role
+    }
+
+    /// Whether this node reports the CSI it captures.
+    pub fn collection_mode(&self) -> crate::CollectionMode {
+        self.collection
     }
 
     /// Pin the radio band from the AP's primary channel (C5 dual-band only).
@@ -233,6 +284,10 @@ pub struct WifiApConfig {
     /// Whether to run the built-in DHCP server. When `false`, the AP only starts
     /// + collects CSI (clients must self-assign IPs).
     pub serve_dhcp: bool,
+    /// Whether this node reports the CSI it captures. The access point's *network* role is not
+    /// configurable — beacons and DHCP make it a traffic source by construction — but whether its
+    /// measurements leave it is.
+    collection: crate::CollectionMode,
     /// When `true`, every flood tick fires one unicast frame back-to-back to
     /// **all** active leases instead of advancing one lease per tick (round-robin).
     /// All associated stations then receive their downlink PPDU within tens of
@@ -275,7 +330,26 @@ impl WifiApConfig {
             lease_count: 1,
             serve_dhcp: true,
             sync_burst: false,
+            collection: crate::CollectionMode::Collector,
         }
+    }
+
+    /// An access point is always a [`Central`](crate::NetworkRole::Central): its beacons and DHCP
+    /// make it a traffic source by construction, so there is no setter for this.
+    pub const fn network_role() -> crate::NetworkRole {
+        crate::NetworkRole::Central
+    }
+
+    /// Set whether this node reports its CSI. Defaults to
+    /// [`Collector`](crate::CollectionMode::Collector).
+    pub fn with_collection_mode(mut self, mode: crate::CollectionMode) -> Self {
+        self.collection = mode;
+        self
+    }
+
+    /// Whether this node reports the CSI it captures.
+    pub fn collection_mode(&self) -> crate::CollectionMode {
+        self.collection
     }
 
     /// Override the AP/lease IPv4 addresses (must share a /24).
@@ -348,46 +422,79 @@ impl defmt::Format for WifiApConfig {
 
 /// How a collector obtains the frames it measures.
 ///
-/// These are capture paths, not roles: each one ends with this node holding CSI.
-/// Which one to use depends on what traffic is available to measure.
+/// **Deprecated in 0.11.** Superseded by [`OperationalMode`], which names
+/// the same three capture paths as three of its six variants. Removed in 0.12.
+#[deprecated(
+    since = "0.11.0",
+    note = "use `OperationalMode::{Sniffer, Station, AccessPoint}`"
+)]
 pub enum CollectorMode {
     /// Lock a channel in promiscuous mode and measure every frame overheard.
-    ///
-    /// This is the capture path that pairs with an [`NodeRole::Emitter`]: the
-    /// emitter injects unassociated frames and the sniffer measures them, with no
-    /// association or handshake between the two.
     Sniffer(WifiSnifferConfig),
     /// Associate as a Wi-Fi station and measure CSI from received frames.
     Station(WifiStationConfig),
-    /// Run a self-contained softAP: start an access point (plus a minimal DHCP
-    /// server) so a [`CollectorMode::Station`] node can associate and generate
-    /// steady uplink traffic, measured as CSI here.
+    /// Run a self-contained softAP so an associated station generates uplink traffic to measure.
     AccessPoint(WifiApConfig),
 }
 
 /// What this node is for.
 ///
-/// A CSI measurement needs energy in the channel and something to measure the
-/// channel's response. [`Emitter`](Self::Emitter) and [`Collector`](Self::Collector) are that
-/// split, and they are how every 802.11 capture path in this crate is expressed.
+/// **Deprecated in 0.11.** This enum fused two taxonomies that answer different questions:
+/// `Emitter`/`Collector` asked what a node is *for*, while `Central`/`Peripheral` asked which end
+/// of an ESP-NOW exchange it is. Those are two of the four independent attributes in
+/// [`crate::model`], and keeping them in one enum meant neither could be read without the other.
 ///
-/// [`Central`](Self::Central) and [`Peripheral`](Self::Peripheral) are the older ESP-NOW taxonomy,
-/// restored alongside rather than folded into the two above. They are not a different spelling of
-/// emitter/collector: an ESP-NOW pair is a two-way exchange in which both ends transmit and the
-/// central also measures, so neither end maps onto a role defined by which direction it faces.
-/// Collapsing them was what removed ESP-NOW from the crate in the first place (b069331).
+/// Superseded by [`OperationalMode`] plus
+/// [`NetworkRole`](crate::NetworkRole) and [`CollectionMode`](crate::CollectionMode). Convert with
+/// the [`From`] impl below, which also corrects the simplex role assignment. Removed in 0.12.
+#[deprecated(
+    since = "0.11.0",
+    note = "use `OperationalMode` plus `NetworkRole` / `CollectionMode` — see `esp_csi_rs::model`"
+)]
 pub enum NodeRole {
-    /// Transmit-only: force a TX PHY and loop-inject sounding frames. Never
-    /// captures CSI. See [`crate::emitter`].
+    /// Transmit-only sounding. Now `OperationalMode::Emitter`: a central listener.
     Emitter(EmitterConfig),
-    /// Capture the channel response and deliver it, via the chosen capture path.
-    /// See [`crate::collector`].
+    /// Capture and deliver, via the chosen capture path.
+    #[allow(deprecated)]
     Collector(CollectorMode),
-    /// Drive an ESP-NOW exchange, or one of the Wi-Fi modes that predate the emitter/collector
-    /// split. See [`crate::central`].
+    /// Drive an ESP-NOW exchange.
     Central(CentralOpMode),
-    /// Respond to a central's ESP-NOW exchange. See [`crate::peripheral`].
+    /// Respond to a central's ESP-NOW exchange.
     Peripheral(PeripheralOpMode),
+}
+
+#[allow(deprecated)]
+impl From<NodeRole> for OperationalMode {
+    /// Map the retired taxonomy onto the model.
+    ///
+    /// **This conversion moves the two simplex ends across the central/peripheral line**, because
+    /// they were on the wrong side of it: the end that floods is the traffic source and so the
+    /// central, and the end that beacons and then falls silent is the peripheral. A caller that has
+    /// not migrated therefore keeps compiling *and* gets the corrected assignment, with no change
+    /// to what either node does on air.
+    fn from(role: NodeRole) -> Self {
+        match role {
+            NodeRole::Emitter(config) => Self::Emitter(config),
+            NodeRole::Collector(CollectorMode::Sniffer(config)) => Self::Sniffer(config),
+            NodeRole::Collector(CollectorMode::Station(config)) => Self::Station(config),
+            NodeRole::Collector(CollectorMode::AccessPoint(config)) => Self::AccessPoint(config),
+            NodeRole::Central(CentralOpMode::EspNow(config)) => {
+                Self::EspNow(config.with_network_role(crate::NetworkRole::Central))
+            }
+            NodeRole::Peripheral(PeripheralOpMode::EspNow(config)) => {
+                Self::EspNow(config.with_network_role(crate::NetworkRole::Peripheral))
+            }
+            // Was `Central`; it beacons for discovery and then only receives, so it sources no
+            // traffic and is a peripheral collector.
+            NodeRole::Central(CentralOpMode::EspNowFastCollector(config)) => {
+                Self::EspNowSimplex(SimplexConfig::peer(config.channel))
+            }
+            // Was `Peripheral`; it owns all the transmit airtime, so it is the central listener.
+            NodeRole::Peripheral(PeripheralOpMode::EspNowFastSource(config)) => {
+                Self::EspNowSimplex(SimplexConfig::source(config))
+            }
+        }
+    }
 }
 
 /// Placeholder for the central driver's unused `_mac_addr` parameter. See its call site.
@@ -395,6 +502,8 @@ const UNSET_MAC: [u8; 6] = [0; 6];
 
 /// The ESP-NOW-era spelling of [`NodeRole`], kept so `Node::Central(..)` resolves for callers
 /// written against it. One type, two names — not a conversion.
+#[allow(deprecated)]
+#[deprecated(since = "0.11.0", note = "see `esp_csi_rs::model`")]
 pub use NodeRole as Node;
 
 /// Controls whether TX and RX tasks are active for a node.
@@ -461,7 +570,7 @@ pub(crate) fn reset_globals() {
     //
     // `stats::reset` now runs at the START of a run instead (see `run_inner`), which is both what
     // the README already documents ("counters reset on the start of each new `start` collection")
-    // and what the HE20 path already did via `stats_begin_run`.
+    // and what an out-of-tree run loop does via `stats_begin_run`.
     crate::csi::delivery::reset();
 }
 
@@ -470,10 +579,9 @@ pub(crate) fn reset_globals() {
 /// Construct with [`CSINode::new`] (or [`CSINode::new_collector`] for the common
 /// case), configure optional protocol / traffic frequency, then call `run()`.
 pub struct CSINode<'a> {
-    role: NodeRole,
-    /// Whether captured CSI is delivered off-device. See
-    /// [`CSINode::set_csi_output_enabled`].
-    csi_output_enabled: bool,
+    /// How this node reaches the channel. The node's network role and collection mode are read
+    /// back from it rather than stored alongside it — see [`OperationalMode`].
+    mode: OperationalMode,
     io_tasks: IOTaskConfig,
     /// CSI Configuration
     csi_config: Option<CsiConfiguration>,
@@ -487,40 +595,149 @@ pub struct CSINode<'a> {
     /// Pluggable Wi-Fi bring-up back-end. Defaults to [`StandardProfile`];
     /// override with [`CSINode::set_radio_profile`].
     profile: &'static dyn RadioProfile,
-    /// How much this node does with the CSI it collects. Restored with the central/peripheral
-    /// taxonomy; see [`CollectionMode`](crate::CollectionMode).
-    collection_mode: crate::CollectionMode,
-    /// Forced ESP-NOW peer PHY rate, set by [`CSINode::set_rate`].
-    esp_now_rate: Option<esp_radio::esp_now::WifiPhyRate>,
 }
 
 impl<'a> CSINode<'a> {
-    /// Create a node in the given role.
+    /// Create a node that reaches the channel through `mode`.
     ///
-    /// CSI output is enabled by default. An [`NodeRole::Emitter`] captures no CSI,
-    /// so the setting has no effect there.
+    /// The node's network role and collection mode come from the mode's config — see the
+    /// per-mode constructors below, which are the ergonomic way in.
     pub fn new(
-        role: NodeRole,
+        mode: OperationalMode,
         csi_config: Option<CsiConfiguration>,
         traffic_freq_hz: Option<u16>,
         hardware: NodeHardware<'a>,
     ) -> Self {
         Self {
-            role,
-            csi_output_enabled: true,
+            mode,
             io_tasks: IOTaskConfig::default(),
             csi_config,
             traffic_freq_hz,
             hardware,
-            collection_mode: crate::CollectionMode::Collector,
-            esp_now_rate: None,
             protocol: None,
             flood_unsolicited_reply: false,
             profile: &StandardProfile,
         }
     }
 
+    /// A node in the symmetric ESP-NOW exchange. Central or peripheral, collector or listener —
+    /// set both on the [`EspNowConfig`](crate::EspNowConfig); every combination is meaningful.
+    pub fn esp_now(
+        config: crate::EspNowConfig,
+        csi_config: Option<CsiConfiguration>,
+        traffic_freq_hz: Option<u16>,
+        hardware: NodeHardware<'a>,
+    ) -> Self {
+        Self::new(
+            OperationalMode::EspNow(config),
+            csi_config,
+            traffic_freq_hz,
+            hardware,
+        )
+    }
+
+    /// The flooding end of the asymmetric ESP-NOW exchange: a **central listener**. It owns all
+    /// the transmit airtime and captures nothing.
+    pub fn esp_now_simplex_source(
+        config: crate::EspNowConfig,
+        traffic_freq_hz: Option<u16>,
+        hardware: NodeHardware<'a>,
+    ) -> Self {
+        Self::new(
+            OperationalMode::EspNowSimplex(SimplexConfig::source(config)),
+            None,
+            traffic_freq_hz,
+            hardware,
+        )
+    }
+
+    /// The measuring end of the asymmetric ESP-NOW exchange: a **peripheral collector**. It
+    /// beacons until it is found, then goes receive-only.
+    pub fn esp_now_simplex_peer(
+        channel: u8,
+        csi_config: Option<CsiConfiguration>,
+        hardware: NodeHardware<'a>,
+    ) -> Self {
+        Self::new(
+            OperationalMode::EspNowSimplex(SimplexConfig::peer(channel)),
+            csi_config,
+            None,
+            hardware,
+        )
+    }
+
+    /// A promiscuous sniffer: a **peripheral collector**, always. It never transmits, so it cannot
+    /// source the network's traffic, and a sniffer that does not report observes nothing.
+    pub fn sniffer(
+        config: WifiSnifferConfig,
+        csi_config: Option<CsiConfiguration>,
+        hardware: NodeHardware<'a>,
+    ) -> Self {
+        Self::new(OperationalMode::Sniffer(config), csi_config, None, hardware)
+    }
+
+    /// A Wi-Fi station associated to an access point or a commercial router. Central when the
+    /// uplink it generates is the traffic being measured, peripheral when it is not.
+    pub fn station(
+        config: WifiStationConfig,
+        csi_config: Option<CsiConfiguration>,
+        traffic_freq_hz: Option<u16>,
+        hardware: NodeHardware<'a>,
+    ) -> Self {
+        Self::new(
+            OperationalMode::Station(config),
+            csi_config,
+            traffic_freq_hz,
+            hardware,
+        )
+    }
+
+    /// A self-contained softAP with DHCP. Always a **central** — beacons and DHCP make it a
+    /// traffic source by construction — and a collector or a listener.
+    pub fn access_point(
+        config: WifiApConfig,
+        csi_config: Option<CsiConfiguration>,
+        traffic_freq_hz: Option<u16>,
+        hardware: NodeHardware<'a>,
+    ) -> Self {
+        Self::new(
+            OperationalMode::AccessPoint(config),
+            csi_config,
+            traffic_freq_hz,
+            hardware,
+        )
+    }
+
+    /// An unassociated transmit-only sounding node: a **central listener**, always. It originates
+    /// the network's traffic and captures nothing, so it takes no CSI config.
+    pub fn emitter(config: EmitterConfig, hardware: NodeHardware<'a>) -> Self {
+        Self::new(OperationalMode::Emitter(config), None, None, hardware)
+    }
+
+    // ── Retired 0.10 surface, removed in 0.12 ───────────────────────────────────────────────
+    //
+    // Everything below forwards to the model API above. It exists so a crate written against 0.10
+    // compiles against 0.11 with warnings rather than errors, which is what makes it possible to
+    // migrate the downstream crates one at a time instead of in one commit.
+
+    /// Construct from the retired [`NodeRole`].
+    #[deprecated(since = "0.11.0", note = "use `CSINode::new` with an `OperationalMode`")]
+    #[allow(deprecated)]
+    pub fn new_role(
+        role: NodeRole,
+        csi_config: Option<CsiConfiguration>,
+        traffic_freq_hz: Option<u16>,
+        hardware: NodeHardware<'a>,
+    ) -> Self {
+        Self::new(role.into(), csi_config, traffic_freq_hz, hardware)
+    }
+
     /// Convenience constructor for a collector node.
+    #[deprecated(
+        since = "0.11.0",
+        note = "use `CSINode::sniffer` / `::station` / `::access_point`"
+    )]
+    #[allow(deprecated)]
     pub fn new_collector(
         mode: CollectorMode,
         csi_config: Option<CsiConfiguration>,
@@ -528,7 +745,7 @@ impl<'a> CSINode<'a> {
         hardware: NodeHardware<'a>,
     ) -> Self {
         Self::new(
-            NodeRole::Collector(mode),
+            NodeRole::Collector(mode).into(),
             csi_config,
             traffic_freq_hz,
             hardware,
@@ -536,48 +753,90 @@ impl<'a> CSINode<'a> {
     }
 
     /// Convenience constructor for an emitter node.
+    #[deprecated(since = "0.11.0", note = "use `CSINode::emitter`")]
     pub fn new_emitter(config: EmitterConfig, hardware: NodeHardware<'a>) -> Self {
-        Self::new(NodeRole::Emitter(config), None, None, hardware)
+        Self::new(OperationalMode::Emitter(config), None, None, hardware)
     }
 
-    /// Get the node's role.
-    pub fn get_role(&self) -> &NodeRole {
-        &self.role
+    /// Replace the node's role.
+    #[deprecated(since = "0.11.0", note = "use `CSINode::set_operational_mode`")]
+    #[allow(deprecated)]
+    pub fn set_role(&mut self, role: NodeRole) {
+        self.mode = role.into();
     }
 
-    /// Whether captured CSI is currently delivered off-device.
-    pub fn csi_output_enabled(&self) -> bool {
-        self.csi_output_enabled
-    }
-
-    /// If this is a collector, return its capture mode.
-    pub fn get_collector_mode(&self) -> Option<&CollectorMode> {
-        match &self.role {
-            NodeRole::Collector(mode) => Some(mode),
-            _ => None,
+    /// Set how much this node does with the CSI it collects.
+    ///
+    /// The collection mode is now part of the mode's configuration, because which values are
+    /// available depends on the mode — an emitter cannot be a collector and a sniffer cannot be a
+    /// listener, and a setter on the node could express both.
+    #[deprecated(
+        since = "0.11.0",
+        note = "set it on the mode's config, e.g. `EspNowConfig::with_collection_mode`"
+    )]
+    pub fn set_collection_mode(&mut self, mode: crate::CollectionMode) {
+        match &mut self.mode {
+            OperationalMode::EspNow(cfg) => cfg.set_collection_mode(mode),
+            OperationalMode::Station(cfg) => cfg.collection = mode,
+            OperationalMode::AccessPoint(_)
+            | OperationalMode::EspNowSimplex(_)
+            | OperationalMode::Sniffer(_)
+            | OperationalMode::Emitter(_) => {
+                log_ln!("set_collection_mode: this mode fixes its collection mode — ignored");
+            }
         }
+    }
+
+    /// Enable or disable delivery of captured CSI off-device.
+    ///
+    /// **This method never did anything.** It wrote a flag no CSI path read, so a node built as a
+    /// collector kept delivering after `set_csi_output_enabled(false)`. What it meant to express is
+    /// [`CollectionMode::Listener`](crate::CollectionMode::Listener), which is set on the mode's
+    /// config. The free function [`crate::set_csi_output_enabled`] is the runtime toggle and is
+    /// unaffected.
+    #[deprecated(
+        since = "0.11.0",
+        note = "this was a no-op; use `CollectionMode::Listener` on the mode's config"
+    )]
+    pub fn set_csi_output_enabled(&mut self, _enabled: bool) {}
+
+    /// Force the ESP-NOW peer PHY rate.
+    ///
+    /// **This method never did anything.** The rate was stored on the node and never read; the
+    /// rate that takes effect is the one on the config, and forcing it is what makes the node
+    /// bring the radio up in started STA mode in the first place.
+    #[deprecated(
+        since = "0.11.0",
+        note = "this was a no-op; use `EspNowConfig::with_phy_rate`"
+    )]
+    pub fn set_rate(&mut self, _rate: esp_radio::esp_now::WifiPhyRate) {}
+
+    /// How this node reaches the channel.
+    pub fn operational_mode(&self) -> &OperationalMode {
+        &self.mode
+    }
+
+    /// What this node contributes to the network. Computed from the mode.
+    pub fn network_role(&self) -> crate::NetworkRole {
+        self.mode.network_role()
+    }
+
+    /// Whether this node's measurements leave it, **as configured**. A peripheral paired with a
+    /// listening central promotes itself mid-run without rewriting its configuration, so this and
+    /// [`runtime_collection_mode`](crate::runtime_collection_mode) can legitimately differ.
+    pub fn collection_mode(&self) -> crate::CollectionMode {
+        self.mode.collection_mode()
+    }
+
+    /// Always [`Responder`](crate::SessionRole::Responder) — see [`SessionRole`](crate::SessionRole).
+    pub const fn session_role(&self) -> crate::SessionRole {
+        crate::SessionRole::Responder
     }
 
     /// If this is an emitter, return its configuration.
     pub fn get_emitter_config(&self) -> Option<&EmitterConfig> {
-        match &self.role {
-            NodeRole::Emitter(config) => Some(config),
-            _ => None,
-        }
-    }
-
-    /// If this is a central, return its operating mode.
-    pub fn get_central_mode(&self) -> Option<&CentralOpMode> {
-        match &self.role {
-            NodeRole::Central(mode) => Some(mode),
-            _ => None,
-        }
-    }
-
-    /// If this is a peripheral, return its operating mode.
-    pub fn get_peripheral_mode(&self) -> Option<&PeripheralOpMode> {
-        match &self.role {
-            NodeRole::Peripheral(mode) => Some(mode),
+        match &self.mode {
+            OperationalMode::Emitter(config) => Some(config),
             _ => None,
         }
     }
@@ -587,53 +846,16 @@ impl<'a> CSINode<'a> {
         self.csi_config = Some(config);
     }
 
-    /// Update Wi-Fi Station configuration (only applies to a station collector).
+    /// Update Wi-Fi Station configuration (only applies to a station node).
     pub fn set_station_config(&mut self, config: WifiStationConfig) {
-        if let NodeRole::Collector(CollectorMode::Station(_)) = &mut self.role {
-            self.role = NodeRole::Collector(CollectorMode::Station(config));
+        if let OperationalMode::Station(_) = &self.mode {
+            self.mode = OperationalMode::Station(config);
         }
     }
 
     /// Set traffic generation frequency in Hz (station / softAP collectors).
     pub fn set_traffic_frequency(&mut self, freq_hz: u16) {
         self.traffic_freq_hz = Some(freq_hz);
-    }
-
-    /// Enable or disable delivery of captured CSI off-device.
-    ///
-    /// When disabled the radio still captures CSI — keeping the RX path and its
-    /// timing identical — but nothing is decoded, logged, or handed to a callback.
-    /// Useful for a node whose only job is to keep traffic on air, or for
-    /// measuring capture overhead without the delivery cost.
-    ///
-    /// Has no effect on an [`NodeRole::Emitter`], which captures nothing.
-    pub fn set_csi_output_enabled(&mut self, enabled: bool) {
-        self.csi_output_enabled = enabled;
-    }
-
-    /// Set TX/RX task enablement for the node.
-    /// Set how much this node does with the CSI it collects.
-    ///
-    /// A separate call rather than a fifth argument to [`CSINode::new`]: the four-argument form is
-    /// what the open-source CLI calls, and widening it would break every existing caller to serve
-    /// a mode most of them never set.
-    pub fn set_collection_mode(&mut self, mode: crate::CollectionMode) {
-        self.collection_mode = mode;
-    }
-
-    /// Which collection mode this node is running in.
-    pub fn collection_mode(&self) -> crate::CollectionMode {
-        self.collection_mode
-    }
-
-    /// Force the ESP-NOW peer PHY rate.
-    ///
-    /// ESP-NOW only, by design — a station derives its rate from the AP it associated with, and a
-    /// sniffer from whatever it overhears, so neither has a rate to force. Stored here and applied
-    /// when the ESP-NOW roles are wired into the run loop; until then it is recorded and unused
-    /// rather than silently dropped.
-    pub fn set_rate(&mut self, rate: esp_radio::esp_now::WifiPhyRate) {
-        self.esp_now_rate = Some(rate);
     }
 
     pub fn set_io_tasks(&mut self, io_tasks: IOTaskConfig) {
@@ -655,9 +877,11 @@ impl<'a> CSINode<'a> {
         self.io_tasks
     }
 
-    /// Replace the node's role.
-    pub fn set_role(&mut self, role: NodeRole) {
-        self.role = role;
+    /// Replace how this node reaches the channel, and with it the network role and collection
+    /// mode the new mode implies. Used to run one node through several configurations without
+    /// reconstructing it — see `examples/runtime_config.rs`.
+    pub fn set_operational_mode(&mut self, mode: OperationalMode) {
+        self.mode = mode;
     }
 
     /// Set Wi-Fi protocol (overrides default).
@@ -704,7 +928,7 @@ impl<'a> CSINode<'a> {
     async fn run_inner(&mut self, duration: Option<u64>, client: Option<&mut CSINodeClient>) {
         // Zero the counters and stamp the capture start so `show-stats` describes THIS run, and
         // still describes it after the run ends. Deliberately here rather than in `reset_globals`,
-        // which runs at stop — see the note there. Mirrors what the HE20 collector path already
+        // which runs at stop — see the note there. Mirrors what an out-of-tree collector path
         // does with `stats_begin_run`.
         #[cfg(feature = "statistics")]
         crate::stats::stats_begin_run();
@@ -721,7 +945,7 @@ impl<'a> CSINode<'a> {
         // processing CSI in this one. Read by the ESP-NOW central to decide whether it does
         // anything with what it captures.
         crate::set_runtime_collection_mode(
-            self.collection_mode == crate::CollectionMode::Collector,
+            self.mode.collection_mode() == crate::CollectionMode::Collector,
         );
 
         // Deal with esp-radio's built-in ESP-NOW receive dispatcher before any other Wi-Fi
@@ -737,7 +961,10 @@ impl<'a> CSINode<'a> {
         // So an ESP-NOW role installs the static-pool dispatcher instead, which replaces the
         // allocating one rather than removing it — same protection against the heap growth, and the
         // frames still arrive.
-        if matches!(&self.role, NodeRole::Central(_) | NodeRole::Peripheral(_)) {
+        if matches!(
+            &self.mode,
+            OperationalMode::EspNow(_) | OperationalMode::EspNowSimplex(_)
+        ) {
             crate::esp_now_pool::install();
         } else {
             suppress_espnow_rx();
@@ -746,12 +973,9 @@ impl<'a> CSINode<'a> {
         // reconfiguration mutation (no-op off C5).
         c5_radio_settle().await;
 
-        let is_ap = matches!(
-            &self.role,
-            NodeRole::Collector(CollectorMode::AccessPoint(_))
-        );
-        let is_sniffer = matches!(&self.role, NodeRole::Collector(CollectorMode::Sniffer(_)));
-        let is_emitter = matches!(&self.role, NodeRole::Emitter(_));
+        let is_ap = matches!(&self.mode, OperationalMode::AccessPoint(_));
+        let is_sniffer = matches!(&self.mode, OperationalMode::Sniffer(_));
+        let is_emitter = matches!(&self.mode, OperationalMode::Emitter(_));
 
         // An emitter never captures, so CSI is only ever armed for a collector.
         // Everything downstream keys off this rather than re-testing the role.
@@ -761,7 +985,7 @@ impl<'a> CSINode<'a> {
         // `bringup` decides whether the profile takes over the extended Wi-Fi
         // bring-up sequence for this role/protocol.
         let profile = self.profile;
-        let bringup = profile.wants_bringup(&self.role, self.protocol);
+        let bringup = profile.wants_bringup(NodeView::new(&self.mode), self.protocol);
 
         // Apply protocol ladder before STA bring-up / CSI. Generic chip-level tuning
         // lives in the radio profile; specialised back-ends may rebuild the set
@@ -770,7 +994,8 @@ impl<'a> CSINode<'a> {
         if let Some(protocol) = self.protocol.take() {
             if !is_emitter {
                 let base = Protocols::default().with_2_4(protocol_ladder_2_4(protocol));
-                let protocols = profile.tune_protocols(&self.role, protocol, base);
+                let protocols =
+                    profile.tune_protocols(NodeView::new(&self.mode), protocol, base);
                 controller.set_protocols(protocols).unwrap();
                 c5_radio_settle().await;
             }
@@ -784,7 +1009,7 @@ impl<'a> CSINode<'a> {
 
         // Tasks necessary for a station collector.
         let sta_interface =
-            if let NodeRole::Collector(CollectorMode::Station(config)) = &self.role {
+            if let OperationalMode::Station(config) = &self.mode {
                 let ifaces = sta_init(
                     &mut interfaces.station,
                     config,
@@ -820,9 +1045,7 @@ impl<'a> CSINode<'a> {
         // Self-contained softAP: bring up the AP-side embassy-net stack (static
         // IP) and apply the AP config to the controller. `interfaces.access_point`
         // is disjoint from `.station`/`.sniffer`, so this borrow is fine.
-        let ap_interface = if let NodeRole::Collector(CollectorMode::AccessPoint(config)) =
-            &self.role
-        {
+        let ap_interface = if let OperationalMode::AccessPoint(config) = &self.mode {
             #[cfg(feature = "esp32c5")]
             if config.secondary_channel().is_none() {
                 apply_band_for_channel(controller, config.channel());
@@ -869,7 +1092,10 @@ impl<'a> CSINode<'a> {
         profile.tune_csi_acquisition(&mut config);
 
         log_ln!("Wi-Fi Controller Started");
-        CSI_OUTPUT_ENABLED.store(self.csi_output_enabled, Ordering::Relaxed);
+        // The collection mode reaches the delivery gate through `set_runtime_collection_mode`
+        // above, not through here: `CSI_OUTPUT_ENABLED` is the user's runtime override and writing
+        // the configured mode into it would make `set-csi-output --enabled=true` unable to
+        // re-enable a node that had been configured as a listener.
         // Sequence-drop detection tracks per-source-MAC sequence numbers, so it
         // works for any collector: the emitter's driver-assigned incrementing
         // sequence numbers make gaps in a capture measurable.
@@ -896,16 +1122,15 @@ impl<'a> CSINode<'a> {
         // to clear promiscuous mode on station shutdown.
         let sniffer = &interfaces.sniffer;
 
-        match &self.role {
-            NodeRole::Emitter(emitter_config) => {
+        match &self.mode {
+            OperationalMode::Emitter(emitter_config) => {
                 // The emitter owns its whole bring-up (forced TX PHY, unassociated
                 // interface start, channel lock) inside `run_emitter`, because the
                 // forced rate has to be applied before the interface starts.
                 let main_task = run_emitter(controller, interfaces, emitter_config);
                 drive_main(main_task, false, duration, client).await;
             }
-            NodeRole::Collector(mode) => match mode {
-                CollectorMode::Sniffer(sniffer_config) => {
+            OperationalMode::Sniffer(sniffer_config) => {
                     #[cfg(feature = "esp32c5")]
                     {
                         let band = if sniffer_config.channel() >= 36 {
@@ -946,7 +1171,7 @@ impl<'a> CSINode<'a> {
                     }
                     sniffer.set_promiscuous_mode(false).unwrap();
                 }
-                CollectorMode::AccessPoint(ap_config) => {
+            OperationalMode::AccessPoint(ap_config) => {
                     // Start the AP, run the net stack + optional DHCP server, and
                     // collect CSI from associated stations' uplink frames. CSI is
                     // registered inside `run_ap` (after the AP-start radio restart).
@@ -963,7 +1188,7 @@ impl<'a> CSINode<'a> {
                     drive_main(main_task, rx_enabled, duration, client).await;
                     sniffer.set_promiscuous_mode(false).unwrap();
                 }
-                CollectorMode::Station(_sta_config) => {
+            OperationalMode::Station(_sta_config) => {
                     // 1. Connect to the Wi-Fi network.
                     // 2. Run DHCP / NTP sync if enabled in config.
                     // 3. Drive STA connection handling and network operations.
@@ -983,7 +1208,6 @@ impl<'a> CSINode<'a> {
                     // unconditional shutdown path the untimed `run()` always took.
                     sniffer.set_promiscuous_mode(false).unwrap();
                 }
-            },
 
             // ── ESP-NOW ───────────────────────────────────────────────────────────────────────
             //
@@ -997,82 +1221,72 @@ impl<'a> CSINode<'a> {
             // take `&mut interfaces.esp_now`, a disjoint field, which the borrow checker accepts —
             // and they must not touch `sniffer`, which is why none of them clears promiscuous mode
             // on the way out. ESP-NOW never sets it.
-            NodeRole::Central(mode) => match mode {
-                CentralOpMode::EspNow(cfg) => {
-                    // `is_collector` decides whether the central PROCESSES the CSI it captures or
-                    // merely keeps it flowing — the `CollectionMode` distinction. It is read from
-                    // the same runtime flag the delivery path uses, so a mode change mid-run is
-                    // seen by both.
-                    let main_task = run_esp_now_central(
-                        &mut interfaces.esp_now,
-                        // `run_esp_now_central` takes this as `_mac_addr` and does not read it —
-                        // the peer MAC it actually uses comes from `EspNowConfig::peer_mac`. Passed
-                        // as an explicit unset value rather than a plausible-looking address, so
-                        // that if the driver ever starts reading it the result is obviously wrong
-                        // rather than subtly wrong.
-                        UNSET_MAC,
-                        cfg,
-                        self.traffic_freq_hz,
-                        crate::IS_COLLECTOR.load(Ordering::Relaxed),
-                        self.io_tasks,
-                    );
-                    drive_main(main_task, rx_enabled, duration, client).await;
+            OperationalMode::EspNow(cfg) => {
+                // The symmetric exchange has two ends and the network role picks which one this
+                // node drives: the central originates the control traffic, the peripheral answers
+                // it. Both capture, which is why this is the one mode where every combination of
+                // the two attributes is meaningful.
+                match cfg.network_role() {
+                    crate::NetworkRole::Central => {
+                        // `is_collector` decides whether the central PROCESSES the CSI it captures
+                        // or merely keeps it flowing — the `CollectionMode` distinction. It is read
+                        // from the same runtime flag the delivery path uses, so a mode change
+                        // mid-run is seen by both.
+                        let main_task = run_esp_now_central(
+                            &mut interfaces.esp_now,
+                            // `run_esp_now_central` takes this as `_mac_addr` and does not read
+                            // it — the peer MAC it actually uses comes from
+                            // `EspNowConfig::peer_mac`. Passed as an explicit unset value rather
+                            // than a plausible-looking address, so that if the driver ever starts
+                            // reading it the result is obviously wrong rather than subtly wrong.
+                            UNSET_MAC,
+                            cfg,
+                            self.traffic_freq_hz,
+                            crate::IS_COLLECTOR.load(Ordering::Relaxed),
+                            self.io_tasks,
+                        );
+                        drive_main(main_task, rx_enabled, duration, client).await;
+                    }
+                    crate::NetworkRole::Peripheral => {
+                        let main_task = run_esp_now_peripheral(
+                            &mut interfaces.esp_now,
+                            cfg,
+                            self.traffic_freq_hz,
+                            self.io_tasks,
+                        );
+                        drive_main(main_task, rx_enabled, duration, client).await;
+                    }
                 }
-                CentralOpMode::EspNowFastCollector(cfg) => {
-                    // Asymmetric simplex: this end beacons until it hears a source, then goes
-                    // RX-only. All airtime belongs to the one transmitter, which is the whole point
-                    // of the mode, so there is no TX task to drive alongside it.
-                    let main_task = run_esp_now_fast_collector(
+            }
+            OperationalMode::EspNowSimplex(cfg) => {
+                // Asymmetric simplex. The `source` end owns all the transmit airtime; the `peer`
+                // end beacons until it is found and then goes receive-only. Both drivers take the
+                // same `EspNowConfig`, so the end is what selects between them.
+                //
+                // Which end is which used to be spelled the other way around: the flooding end was
+                // a `PeripheralOpMode::EspNowFastSource` and the receive-only end a
+                // `CentralOpMode::EspNowFastCollector`, so the only node transmitting was the one
+                // called "peripheral". The drivers are unchanged; only the roles that name them
+                // moved, to follow the traffic as they do in every other mode.
+                if cfg.is_source() {
+                    // It captures nothing, so RX is forced off regardless of `rx_enabled` — a CSI
+                    // rate task here would compete for the airtime the flood exists to fill.
+                    let main_task = run_esp_now_simplex_source(
                         &mut interfaces.esp_now,
-                        cfg,
-                        self.io_tasks,
-                    );
-                    drive_main(main_task, rx_enabled, duration, client).await;
-                }
-                // The Wi-Fi modes of the central taxonomy are the SAME code as the collector arms
-                // above — `central::{ap, sta}` is a re-export of `collector::{ap, sta}`, not a
-                // second copy. Rather than duplicate two long bring-up sequences that would drift,
-                // these are rejected at construction; a caller wanting them builds a
-                // `NodeRole::Collector`, which is where that path lives now.
-                CentralOpMode::WifiStation(_) | CentralOpMode::WifiAccessPoint(_) => {
-                    log_ln!(
-                        "central Wi-Fi modes are served by NodeRole::Collector — \
-                         build CollectorMode::Station / ::AccessPoint instead"
-                    );
-                }
-            },
-            NodeRole::Peripheral(mode) => match mode {
-                PeripheralOpMode::EspNow(cfg) => {
-                    let main_task = run_esp_now_peripheral(
-                        &mut interfaces.esp_now,
-                        cfg,
-                        self.traffic_freq_hz,
-                        self.io_tasks,
-                    );
-                    drive_main(main_task, rx_enabled, duration, client).await;
-                }
-                PeripheralOpMode::EspNowFastSource(cfg) => {
-                    // The source end of asymmetric simplex: a continuous forced-PHY unicast flood.
-                    // It captures nothing, so RX is forced off regardless of `rx_enabled` — leaving
-                    // the CSI rate task running here would compete for airtime with the flood it
-                    // exists to produce.
-                    let main_task = run_esp_now_fast_source(
-                        &mut interfaces.esp_now,
-                        cfg,
+                        cfg.inner(),
                         self.traffic_freq_hz,
                         self.io_tasks,
                     );
                     drive_main(main_task, false, duration, client).await;
-                }
-                // As above: the sniffer path is `CollectorMode::Sniffer`, not a second
-                // implementation living under `peripheral`.
-                PeripheralOpMode::WifiSniffer(_) => {
-                    log_ln!(
-                        "peripheral sniffer is served by NodeRole::Collector — \
-                         build CollectorMode::Sniffer instead"
+                } else {
+                    let main_task = run_esp_now_simplex_peer(
+                        &mut interfaces.esp_now,
+                        cfg.inner(),
+                        self.io_tasks,
                     );
+                    drive_main(main_task, rx_enabled, duration, client).await;
                 }
-            },
+            }
         }
 
         STOP_SIGNAL.reset();

@@ -83,6 +83,11 @@ pub use csi_interface::CSI_CHANNEL;
 pub use csi_interface::LOG_DROPPED_PACKETS;
 
 static LOG_MODE: AtomicU8 = AtomicU8::new(LogMode::Text as u8);
+
+/// COBS frame delimiter. `postcard::to_slice_cobs` appends it to every packet and
+/// the host splits on it, so it is also what keeps text out of a packet — see
+/// [`write_text_framed`].
+const COBS_DELIMITER: u8 = 0;
 static ROLE: AtomicU8 = AtomicU8::new(Role::Sta as u8);
 static ESP_CSI_TOOL_HEADER_PRINTED: AtomicBool = AtomicBool::new(false);
 static ASYNC_LOG_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -541,6 +546,20 @@ mod logging_impl {
 /// emitter that owns the radio directly, for instance) can reach the same
 /// backend. Callers format their own message.
 pub fn log_line(msg: &str) {
+    // The sync backend has no logger task, so nothing downstream can frame this
+    // and `write_text_framed`'s job falls here. `log_raw!` is already a no-op
+    // while the async backend is live, so the two paths cannot both fire.
+    if !is_async_logging_active()
+        && matches!(
+            LogMode::from(LOG_MODE.load(Ordering::Relaxed)),
+            LogMode::Serialized
+        )
+    {
+        crate::log_raw!([COBS_DELIMITER]);
+        crate::log_raw!(msg.as_bytes());
+        crate::log_raw!([COBS_DELIMITER]);
+        return;
+    }
     crate::log_ln!("{}", msg);
 }
 
@@ -1809,11 +1828,11 @@ pub async fn logger_backend(mut driver: LogOutput) {
                 // `select` never reaches Either::Second on its own.
                 #[cfg(all(feature = "println", not(feature = "defmt")))]
                 while let Ok(message) = log_impl::LOG_CHANNEL.try_receive() {
-                    let _ = driver.write_all(message.as_bytes()).await;
+                    write_text_framed(&mut driver, message.as_bytes()).await;
                 }
                 #[cfg(all(feature = "defmt", not(feature = "external-defmt-logger")))]
                 while let Ok(message) = defmt_impl::DEFMT_CHANNEL.try_receive() {
-                    let _ = driver.write_all(&message).await;
+                    write_text_framed(&mut driver, &message).await;
                 }
 
                 // No per-packet flush: at sustained throughput each packet's
@@ -1827,9 +1846,9 @@ pub async fn logger_backend(mut driver: LogOutput) {
                 // `message` is heapless::String<256> in println mode,
                 // or [u8; 256] in defmt mode.
                 #[cfg(all(feature = "println", not(feature = "defmt")))]
-                let _ = driver.write_all(_message.as_bytes()).await;
+                write_text_framed(&mut driver, _message.as_bytes()).await;
                 #[cfg(all(feature = "defmt", not(feature = "external-defmt-logger")))]
-                let _ = driver.write_all(&_message).await;
+                write_text_framed(&mut driver, &_message).await;
 
                 // Only flush if no more messages are pending.
                 #[cfg(all(feature = "println", not(feature = "defmt")))]
@@ -1842,6 +1861,36 @@ pub async fn logger_backend(mut driver: LogOutput) {
                 }
             }
         }
+    }
+}
+
+/// Write a text message to the console, keeping it out of the CSI framing.
+///
+/// [`LogMode::Serialized`] frames CSI with COBS, whose delimiter is `\0`, and the
+/// console is the same link. An unframed text line written between two packets
+/// therefore does not sit *between* frames — it merges with the bytes that follow
+/// it, and the host's next delimiter closes one frame containing a log line and a
+/// whole CSI packet. That packet is unrecoverable, and it is reported as a decode
+/// error, so a diagnostic that fires every few seconds silently deletes real data
+/// and blames the wire format for it. A 5 s health tick cost one packet per tick.
+///
+/// So in that mode the message is bracketed with delimiters and occupies a frame
+/// slot of its own. The leading one closes whatever came before (an empty frame if
+/// nothing did, which the host already skips) and the trailing one closes the text,
+/// leaving the next packet to start clean. Every other mode is already text, so the
+/// message goes out as-is.
+#[cfg(any(feature = "async-print", feature = "auto"))]
+async fn write_text_framed(driver: &mut LogOutput, bytes: &[u8]) {
+    use embedded_io_async::Write as _;
+    if matches!(
+        LogMode::from(LOG_MODE.load(Ordering::Relaxed)),
+        LogMode::Serialized
+    ) {
+        let _ = driver.write_all(&[COBS_DELIMITER]).await;
+        let _ = driver.write_all(bytes).await;
+        let _ = driver.write_all(&[COBS_DELIMITER]).await;
+    } else {
+        let _ = driver.write_all(bytes).await;
     }
 }
 

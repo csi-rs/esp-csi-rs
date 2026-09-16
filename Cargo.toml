@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-rs"
-version = "0.10.1"
+version = "0.11.0"
 edition = "2024"
 authors = ["theembeddedrustacean", "stacks-of-data", "Abdullah-Alawad", "modatt"]
 description = "ESP CSI Driver for Rust"
@@ -256,118 +256,49 @@ targets = ["riscv32imc-unknown-none-elf"]
 features = ["esp32c3", "println"]
 
 # ---------------------------------------------------------------------------
-# Measurement & experimental examples.
+# Measurement & characterization harnesses.
 #
-# These benchmarking / characterization harnesses live in `experiments/`
-# (not `examples/`) to keep the canonical examples uncluttered. Cargo only
-# auto-discovers examples under `examples/`, so each is registered here with
-# an explicit `path`. Build/run them exactly as before via the cargo aliases,
-# e.g. `cargo esp32c3-build --example sniffer_wifi_exper --features statistics`.
-# The shared `experiments/cpu_test_schedule.rs` module is included by the
-# CPU-test examples via `#[path]` and is intentionally not a target itself.
+# These live in `experiments/` (not `examples/`) so the canonical examples stay
+# uncluttered. Cargo only auto-discovers examples under `examples/`, so each is
+# registered here with an explicit `path`.
+#
+# `required-features` is not decoration. Without it these targets are part of
+# `cargo check --examples` on every feature set, and the ones needing `statistics`
+# or `cpu-test-tx` fail to resolve — which is why that command could not pass.
+#
+# Each subject has a `_min` counterpart that performs the same platform and radio
+# bring-up with no `CSINode` in it. The binary-footprint number is `full − min`,
+# and both halves must be built with the SAME features for the difference to mean
+# anything.
 # ---------------------------------------------------------------------------
 
+[[example]]
+name = "esp_now_bench"
+path = "experiments/esp_now_bench.rs"
+required-features = ["statistics"]
 
 [[example]]
-name = "esp_now_central_bw_tx"
-path = "experiments/esp_now_central_bw_tx.rs"
+name = "esp_now_bench_min"
+path = "experiments/esp_now_bench_min.rs"
 
 [[example]]
-name = "esp_now_central_drop"
-path = "experiments/esp_now_central_drop.rs"
+name = "sniffer_bench"
+path = "experiments/sniffer_bench.rs"
+required-features = ["statistics"]
 
 [[example]]
-name = "esp_now_central_exper"
-path = "experiments/esp_now_central_exper.rs"
+name = "sniffer_bench_min"
+path = "experiments/sniffer_bench_min.rs"
 
 [[example]]
-name = "esp_now_central_exper_cpu_tx"
-path = "experiments/esp_now_central_exper_cpu_tx.rs"
+name = "station_bench"
+path = "experiments/station_bench.rs"
+required-features = ["statistics"]
 
 [[example]]
-name = "esp_now_central_exper_heap"
-path = "experiments/esp_now_central_exper_heap.rs"
+name = "station_bench_min"
+path = "experiments/station_bench_min.rs"
 
-[[example]]
-name = "esp_now_central_min"
-path = "experiments/esp_now_central_min.rs"
-
-[[example]]
-name = "esp_now_central_min_cpu_tx"
-path = "experiments/esp_now_central_min_cpu_tx.rs"
-
-[[example]]
-name = "esp_now_central_min_drop"
-path = "experiments/esp_now_central_min_drop.rs"
-
-[[example]]
-name = "esp_now_central_min_power"
-path = "experiments/esp_now_central_min_power.rs"
-
-[[example]]
-name = "esp_now_central_power"
-path = "experiments/esp_now_central_power.rs"
-
-[[example]]
-name = "esp_now_peripheral_bw_check"
-path = "experiments/esp_now_peripheral_bw_check.rs"
-
-[[example]]
-name = "esp_now_peripheral_drop"
-path = "experiments/esp_now_peripheral_drop.rs"
-
-[[example]]
-name = "esp_now_peripheral_exper"
-path = "experiments/esp_now_peripheral_exper.rs"
-
-[[example]]
-name = "esp_now_peripheral_exper_cpu"
-path = "experiments/esp_now_peripheral_exper_cpu.rs"
-
-[[example]]
-name = "esp_now_peripheral_exper_heap"
-path = "experiments/esp_now_peripheral_exper_heap.rs"
-
-[[example]]
-name = "esp_now_peripheral_min"
-path = "experiments/esp_now_peripheral_min.rs"
-
-[[example]]
-name = "esp_now_peripheral_min_cpu"
-path = "experiments/esp_now_peripheral_min_cpu.rs"
-
-[[example]]
-name = "esp_now_peripheral_min_drop"
-path = "experiments/esp_now_peripheral_min_drop.rs"
-
-[[example]]
-name = "sniffer_wifi_exper"
-path = "experiments/sniffer_wifi_exper.rs"
-
-[[example]]
-name = "sniffer_wifi_exper_esp_csi_tool"
-path = "experiments/sniffer_wifi_exper_esp_csi_tool.rs"
-
-[[example]]
-name = "sniffer_wifi_exper_heap"
-path = "experiments/sniffer_wifi_exper_heap.rs"
-
-[[example]]
-name = "sniffer_wifi_exper_logmode_cycle"
-path = "experiments/sniffer_wifi_exper_logmode_cycle.rs"
-
-[[example]]
-name = "sniffer_wifi_min"
-path = "experiments/sniffer_wifi_min.rs"
-
-[[example]]
-name = "wifi_station_heap"
-path = "experiments/wifi_station_heap.rs"
-
-[[example]]
-name = "wifi_station_min"
-path = "experiments/wifi_station_min.rs"
-
-[[example]]
-name = "wifi_station_power"
-path = "experiments/wifi_station_power.rs"
+# `experiments/cpu_test_schedule.rs` is deliberately NOT a target: it is the shared phase schedule
+# that `esp_now_bench` includes with `#[path]` under `cpu-test-tx`, so the DUT and the traffic
+# generator march through identical phases without a control channel between them.
