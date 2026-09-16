@@ -418,6 +418,21 @@ pub(crate) fn set_runtime_collection_mode(is_collector: bool) {
     COLLECTION_MODE_CHANGED.signal(());
 }
 
+/// Set the collection mode from outside the crate, for a node that owns the radio directly.
+///
+/// `CSINode::run` does this for every mode it dispatches, but an out-of-tree node — the pro HE20
+/// node, for instance — never passes through it, and [`IS_COLLECTOR`] is process-wide. A board left
+/// as a `Listener` by one run therefore stayed one across every later run that did not set it,
+/// capturing normally and delivering nothing until a reboot. Nothing upstream reports that: the
+/// capture counters climb, and the silence looks like a radio problem.
+///
+/// So any node that bypasses `CSINode::run` must state its collection mode here. A mode that fixes
+/// the attribute states the fixed value — an HE20 collector is a collector, an emitter a listener —
+/// rather than leaving the previous run's choice in place.
+pub fn set_collection_mode(mode: crate::CollectionMode) {
+    set_runtime_collection_mode(matches!(mode, crate::CollectionMode::Collector));
+}
+
 /// Reset the CSI delivery gates. Called by `reset_globals` between runs.
 ///
 /// Closes all CSI delivery gates so any late-firing WiFi callback runs
