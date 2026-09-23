@@ -1,25 +1,26 @@
-//! Central-node operating modes.
+//! Drivers for the central end of the ESP-NOW modes, plus the Wi-Fi collection modules.
 //!
-//! A *central* node is the active driver of CSI collection. It either
-//! orchestrates an ESP-NOW exchange with a peripheral
-//! ([`esp_now`]) or associates as a Wi-Fi station
-//! ([`sta`]) to extract CSI from regular 802.11 traffic. The
-//! [`sniffer`] module is a placeholder for future
-//! central-side sniffer logic.
+//! A *central* originates the network's traffic (see [`crate::model`]). This module holds the
+//! central end of the symmetric ESP-NOW exchange ([`esp_now`]), and re-exports the station
+//! ([`sta`]) and access-point ([`ap`]) engines from [`crate::collector`] so their pre-0.11 paths
+//! keep resolving.
+//!
+//! [`esp_now_fast`] is here for historical reasons only: it drives the receive-only **peer** end
+//! of the simplex exchange, which is a peripheral collector. It sits under the module name it had
+//! when the simplex ends were assigned the other way round.
 
-// `ap` and `sta` are RE-EXPORTED from `collector`, not duplicated here.
-//
-// The emitter/collector refactor moved both modules wholesale and edited them on the way. Restoring
-// the pre-refactor copies alongside would leave two versions of the same softAP and station code to
-// keep in step, and they would drift — so `central` is a compatibility facade over the live ones
-// plus the ESP-NOW drivers, which have no counterpart under `collector`.
+// `ap` and `sta` are RE-EXPORTED from `collector`, not duplicated here, so there is one copy of
+// the softAP and station code to keep in step. `central` is a compatibility facade over them plus
+// the ESP-NOW drivers, which have no counterpart under `collector`.
 pub use crate::collector::{ap, sta};
 
-/// Central-side ESP-NOW driver: latency-balanced control/reply exchange
-/// with a peripheral that supplies the CSI source frames.
+/// ESP-NOW central driver: originates the control traffic of the symmetric exchange and measures
+/// the peripherals' replies.
 pub mod esp_now;
-/// Fast one-to-one ESP-NOW collector (asymmetric simplex): sparse discovery
-/// beacon, then RX-only capture of a source's continuous unicast flood.
+/// ESP-NOW simplex **peer** driver (a peripheral collector, despite the module's location): sparse
+/// discovery beacon, then receive-only capture of the source's continuous unicast flood.
 pub mod esp_now_fast;
-/// Reserved for future central-side promiscuous sniffer logic. Currently empty.
+/// Empty. Kept only so the pre-0.11 path still resolves; a sniffer is always a peripheral and is
+/// driven from [`crate::CSINode::run`].
+#[doc(hidden)]
 pub mod sniffer;

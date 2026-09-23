@@ -1,33 +1,29 @@
-//! The **emitter** role: a transmit-only node that sounds the channel.
+//! The **Emitter** operational mode: transmit-only sounding.
 //!
-//! An emitter exists to put known RF energy into the channel so that collectors
-//! can measure the channel's response to it. It never associates and never
-//! captures CSI: it forces its interface to a fixed TX PHY (see [`phy`]) and
-//! loop-injects a raw, rate-agnostic frame (see [`frame`]) at a configured
-//! period.
+//! An emitter node is a **central listener** (see [`crate::model`]): it originates the network's
+//! traffic and captures nothing. It exists to put known RF energy into the channel so that other
+//! nodes — typically [sniffers](crate::CSINode::sniffer) — can measure the channel's response to
+//! it. It never associates: it forces its interface to a fixed TX PHY (see [`phy`]) and sends a
+//! rate-agnostic frame (see [`frame`]) at a configured period.
 //!
 //! Because the frame carries no meaning, an emitter needs no peer, no handshake,
 //! and no protocol — which is what makes it compose into any topology. One
-//! emitter with many collectors, or several emitters distinguished by their
+//! emitter measured by many nodes, or several emitters distinguished by their
 //! source MAC, are both just deployment choices.
 //!
 //! # Chip support
 //!
-//! Raw injection is **verified on the ESP32-C5 and ESP32-C6** (~90 CSI reports per
-//! second at a 10 ms period, measured at a paired collector).
+//! How the frames leave the radio is chosen at compile time from the chip feature, because the
+//! transport that radiates is not the same on every part:
 //!
-//! On the **ESP32-S3 it does not work**: `esp_wifi_80211_tx` returns `ESP_OK` for
-//! every frame, the forced TX PHY is accepted, and nothing reaches any collector.
-//! This is not a board fault — the same S3 associates to an access point and
-//! sustains ~290 CSI reports per second as a station — and it is not this crate's
-//! logic, since the identical code path radiates on C5/C6. It appears to be
-//! raw-TX behaviour in esp-radio / ESP-IDF on that part.
+//! | Chip | Transport | Status |
+//! |---|---|---|
+//! | ESP32-C5, ESP32-C6 | Raw injection (`esp_wifi_80211_tx`) | Verified — roughly 90 CSI reports/s at a 10 ms period, measured at a paired sniffer |
+//! | ESP32, ESP32-C3, ESP32-S3 | ESP-NOW broadcast (the `espnow` module) | Works; broadcast frames are never ACKed, so the offered rate stays flat whether or not anyone is listening |
 //!
-//! To use an ESP32-S3 as the traffic source in a capture set, pair
-//! [`crate::node::CollectorMode::Station`] on the S3 with
-//! [`crate::node::CollectorMode::AccessPoint`] on the measuring node instead of
-//! running an emitter. That is an associated link rather than blind sounding, but
-//! it puts energy in the channel and yields more reports per second.
+//! Raw injection is not offered on the classic parts because it does not radiate there: on the
+//! ESP32-S3 `esp_wifi_80211_tx` returns `ESP_OK` for every frame and nothing reaches any receiver.
+//! `docs/emitter-support.md` has the detail.
 
 #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
 pub mod espnow;
@@ -248,15 +244,10 @@ pub async fn run_emitter(
     interfaces: &mut Interfaces<'static>,
     cfg: &EmitterConfig,
 ) {
-    // ESP-NOW is the transport for the open HT emitter on every chip. Raw injection is kept for
-    // Raw injection on the newer MACs: it works there, and ESP-NOW cannot carry every PPDU. The
-    // classic MACs accept raw injection and never radiate it, so a single transport that works
-    // everywhere is preferable to a per-chip split whose classic half was silently dead.
     bringup(controller, cfg);
     // Transport is per PHY generation: the C5/C6 inject raw frames (measured working, and the
     // same path an out-of-tree profile uses), while the classic MACs accept raw injection and
-    // never radiate it, so
-    // they transmit over ESP-NOW instead.
+    // never radiate it, so they transmit over ESP-NOW instead.
     #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
     espnow::bringup(
         controller,

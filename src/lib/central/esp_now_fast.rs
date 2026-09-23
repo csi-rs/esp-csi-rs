@@ -1,13 +1,16 @@
-//! Fast one-to-one ESP-NOW collector (asymmetric simplex).
+//! The **peer** end of the ESP-NOW simplex exchange: a peripheral collector.
 //!
-//! The collector broadcasts a **sparse discovery beacon** (~1 Hz) until it hears
-//! a [`EspNowFastSource`](crate::PeripheralOpMode::EspNowFastSource), then stops
-//! beaconing entirely and goes **RX-only**, letting the source own all the
-//! airtime with its continuous unicast flood. CSI is captured from that flood by
-//! the radio's `capture_csi_info` callback independently of this task — the
-//! collector's only jobs are (1) discovery and (2) draining the receive pool so
-//! it never wedges. Leaving the channel to a single transmitter is what
-//! maximizes CSI packets/sec versus the balanced bidirectional ESP-NOW mode.
+//! Built by [`SimplexConfig::peer`](crate::SimplexConfig::peer) /
+//! [`CSINode::esp_now_simplex_peer`](crate::CSINode::esp_now_simplex_peer). The module keeps the
+//! name it had when this end was called the "fast collector" and filed under `central`.
+//!
+//! The peer broadcasts a **sparse discovery beacon** (~1 Hz) until it hears the
+//! [source](crate::SimplexConfig::source), then stops beaconing entirely and goes
+//! **RX-only**, letting the source own all the airtime with its continuous unicast flood. CSI is
+//! captured from that flood by the radio's `capture_csi_info` callback independently of this
+//! task — the peer's only jobs are (1) discovery and (2) draining the receive pool so it never
+//! wedges. Leaving the channel to a single transmitter is what maximizes CSI packets/sec versus
+//! the balanced bidirectional ESP-NOW mode.
 
 use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_time::{Duration, Instant, Timer};
@@ -32,7 +35,7 @@ const RX_BURST_MAX_RX_ONLY: u16 = 64;
 /// Control-packet scratch buffer (4-byte magic + small postcard body).
 const BEACON_BUF_LEN: usize = 16;
 
-/// Run the fast ESP-NOW collector: sparse beacon → detect source → RX-only.
+/// Run the simplex peer end: sparse beacon → detect source → RX-only.
 pub async fn run_esp_now_fast_collector(
     esp_now: &mut EspNow<'static>,
     config: &EspNowConfig,

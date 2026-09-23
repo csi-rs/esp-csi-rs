@@ -59,14 +59,20 @@
 //! | [`CSINode::sniffer`] | Wi-Fi sniffer | peripheral | collector |
 //! | [`CSINode::station`] | Wi-Fi station | either | either |
 //! | [`CSINode::access_point`] | Wi-Fi access point | central | either |
-//! | [`CSINode::emitter`] | Emitter (raw sounding) | central | listener |
+//! | [`CSINode::emitter`] | Emitter (transmit-only sounding) | central | listener |
 //! | [`CSINode::esp_now`] | ESP-NOW | either | either |
 //! | [`CSINode::esp_now_simplex_source`] | ESP-NOW simplex | central | listener |
 //! | [`CSINode::esp_now_simplex_peer`] | ESP-NOW simplex | peripheral | collector |
 //!
 //! Where an attribute is fixed there is no setter to call, so a central sniffer or a collecting
-//! emitter cannot be built. Where it is free, set it on the mode's config —
-//! [`EspNowConfig::with_network_role`] and `with_collection_mode`.
+//! emitter cannot be built. Where it is free, set it on the mode's config:
+//!
+//! - [`EspNowConfig`] and [`WifiStationConfig`] carry both setters,
+//!   [`with_network_role`](EspNowConfig::with_network_role) and
+//!   [`with_collection_mode`](EspNowConfig::with_collection_mode);
+//! - [`WifiApConfig`] carries only [`with_collection_mode`](WifiApConfig::with_collection_mode),
+//!   because an access point is always a central;
+//! - the sniffer, emitter and simplex configs carry neither.
 //!
 //! Every node here is a session **responder**: the run starts when something calls
 //! [`CSINode::run`] and stops when something calls [`CSINodeClient::send_stop`]. See
@@ -75,7 +81,7 @@
 //! ## Bandwidth
 //! An emitter transmits HT20 or HT40 ([`HtBandwidth`]) — plain 802.11n, supported on every chip
 //! listed above. 40 MHz needs a secondary channel above or below the primary, and every node in a
-//! capture set must agree on the primary channel. Confirm it engaged at the collector: a subcarrier
+//! capture set must agree on the primary channel. Confirm it engaged at the measuring node: a subcarrier
 //! count >= 100 (commonly ~117) is HT40, ~53/~56 means it fell back.
 //!
 //! ## Output Formats & Logging Modes
@@ -83,7 +89,7 @@
 //! - **LogMode::ArrayList**: This prints CSI data as an array, where the array represents the CSI values for a received packet. This format is more compact and easier to read for large volumes of CSI data.
 //!
 //! Example output:
-//! ```
+//! ```text
 //! [3916,-93,11,157,1,1815804,256,0,260,2,0,1,1,128,0,1,1,0,1,0,0,0,256,128,[...]]
 //! ```
 //! The array fields map to the [`csi::CSIDataPacket`] struct fields in the following order:
@@ -98,18 +104,18 @@
 //! | 5 | `timestamp` | Local timestamp when the packet was received (microseconds) |
 //! | 6 | `sig_len` | Length of the packet including Frame Check Sequence (FCS) |
 //! | 7 | `rx_state` | Reception state: `0` = no error, non-zero = error code |
-//! | 8 | `secondary_channel` | Secondary channel: `0` = none, `1` = above, `2` = below *(non-ESP32-C6 only)* |
-//! | 9 | `sgi` | Short Guard Interval: `0` = Long GI, `1` = Short GI *(non-ESP32-C6 only)* |
-//! | 10 | `antenna` | Antenna number: `0` = antenna 0, `1` = antenna 1 *(non-ESP32-C6 only)* |
-//! | 11 | `ampdu_cnt` | Number of subframes aggregated in AMPDU *(non-ESP32-C6 only)* |
-//! | 12 | `sig_mode` | Protocol: `0` = non-HT (11b/g), `1` = HT (11n), `3` = VHT (11ac) *(non-ESP32-C6 only)* |
-//! | 13 | `mcs` | Modulation Coding Scheme; for HT packets ranges from 0 (MCS0) to 76 (MCS76) *(non-ESP32-C6 only)* |
-//! | 14 | `bandwidth` | Channel bandwidth: `0` = 20 MHz, `1` = 40 MHz *(non-ESP32-C6 only)* |
-//! | 15 | `smoothing` | Channel estimate smoothing: `0` = unsmoothed, `1` = smoothing recommended *(non-ESP32-C6 only)* |
-//! | 16 | `not_sounding` | Sounding PPDU flag: `0` = sounding PPDU, `1` = not a sounding PPDU *(non-ESP32-C6 only)* |
-//! | 17 | `aggregation` | Aggregation type: `0` = MPDU, `1` = AMPDU *(non-ESP32-C6 only)* |
-//! | 18 | `stbc` | Space-Time Block Code: `0` = non-STBC, `1` = STBC *(non-ESP32-C6 only)* |
-//! | 19 | `fec_coding` | Forward Error Correction / LDPC flag; set for 11n LDPC packets *(non-ESP32-C6 only)* |
+//! | 8 | `secondary_channel` | Secondary channel: `0` = none, `1` = above, `2` = below *(not on ESP32-C5/C6)* |
+//! | 9 | `sgi` | Short Guard Interval: `0` = Long GI, `1` = Short GI *(not on ESP32-C5/C6)* |
+//! | 10 | `antenna` | Antenna number: `0` = antenna 0, `1` = antenna 1 *(not on ESP32-C5/C6)* |
+//! | 11 | `ampdu_cnt` | Number of subframes aggregated in AMPDU *(not on ESP32-C5/C6)* |
+//! | 12 | `sig_mode` | Protocol: `0` = non-HT (11b/g), `1` = HT (11n), `3` = VHT (11ac) *(not on ESP32-C5/C6)* |
+//! | 13 | `mcs` | Modulation Coding Scheme; for HT packets ranges from 0 (MCS0) to 76 (MCS76) *(not on ESP32-C5/C6)* |
+//! | 14 | `bandwidth` | Channel bandwidth: `0` = 20 MHz, `1` = 40 MHz *(not on ESP32-C5/C6)* |
+//! | 15 | `smoothing` | Channel estimate smoothing: `0` = unsmoothed, `1` = smoothing recommended *(not on ESP32-C5/C6)* |
+//! | 16 | `not_sounding` | Sounding PPDU flag: `0` = sounding PPDU, `1` = not a sounding PPDU *(not on ESP32-C5/C6)* |
+//! | 17 | `aggregation` | Aggregation type: `0` = MPDU, `1` = AMPDU *(not on ESP32-C5/C6)* |
+//! | 18 | `stbc` | Space-Time Block Code: `0` = non-STBC, `1` = STBC *(not on ESP32-C5/C6)* |
+//! | 19 | `fec_coding` | Forward Error Correction / LDPC flag; set for 11n LDPC packets *(not on ESP32-C5/C6)* |
 //! | 20 | `sig_len` | Packet length including FCS (repeated) |
 //! | 21 | `csi_data_len` | Length of the raw CSI data (number of `i8` samples) |
 //! | 22 | `[csi_data]` | Inner array of raw CSI `i8` samples |
@@ -117,7 +123,7 @@
 //! - **LogMode::Text**: This output prints CSI data in a more verbose, human-readable format. This includes additional metadata and explanations alongside the raw CSI values, making it easier to understand the context of each packet's CSI data.
 //!
 //! Example output:
-//! ```rust,ignore
+//! ```text
 //! mac: 56:6C:EB:6F:BC:3D
 //! sequence number: 426
 //! rssi: -82
@@ -145,9 +151,20 @@
 //! data length: 128
 //! csi raw data: [0, 0, 0, 0, 0, 0, 0, 0, -6, 0, 6, 0, -24, 10, -23, 9, -23, 8, -23, 7, -22, 6, -22, 5, -22, 6, -23, 5, -22, 6, -22, 6, -22, 7, -20, 7, -19, 9, -19, 10, -19, 12, -19, 12, -18, 14, -19, 14, -19, 16, -20, 17, -21, 18, -20, 18, -19, 18, -16, 18, -14, 19, -13, 18, 0, 0, -19, 22, -20, 22, -20, 22, -20, 21, -21, 19, -22, 18, -20, 16, -18, 16, -17, 15, -16, 15, -14, 15, -13, 13, -12, 13, -9, 13, -7, 14, -6, 14, -5, 13, -3, 12, 0, 13, 2, 12, 3, 12, 5, 12, 7, 13, 8, 13, 10, 13, 12, 14, 9, 1, -5, -4, 0, 0, 0, 0, 0, 0]
 //! ```
-//! - **LogMode::Serialized**: This mode serializes the `CSIDataPacket` structure and prints it in a serialized COBS format. This is a compact binary format that can be parsed by and serde compatible crate like [postcard](https://crates.io/crates/postcard). It is not human-readable but is efficient for logging large amounts of CSI data on the host without overwhelming the console output.
+//! - **LogMode::Serialized**: This mode serializes the `CSIDataPacket` structure and prints it in a serialized COBS format. This is a compact binary format that can be parsed by any serde-compatible crate like [postcard](https://crates.io/crates/postcard). It is not human-readable but is efficient for logging large amounts of CSI data on the host without overwhelming the console output. Log lines written while this mode is active are COBS-delimited too, so they occupy a frame of their own instead of corrupting the packet that follows.
+//! - **LogMode::EspCsiTool**: One `CSI_DATA,...` CSV line per packet in the
+//!   [ESP32-CSI-Tool](https://github.com/StevenMHernandez/ESP32-CSI-Tool) layout, with its header
+//!   line printed once at startup, so existing tooling for that format reads it unchanged. The 26
+//!   columns are:
 //!
+//!   ```text
+//!   type,role,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_state,real_time_set,real_timestamp,len,CSI_DATA
+//!   ```
 //!
+//!   `role` is a label, not a node attribute: set it with [`logging::logging::set_role`]
+//!   (`STA`, `AP` or `PASSIVE`). On the ESP32-C5/C6, which do not report the per-packet PHY fields,
+//!   those columns are written as `0`. [`logging::logging::set_csi_tool_emit_cap`] caps the
+//!   number of samples in the last column.
 //!
 //! ### On-Device CSI Processing
 //!
@@ -169,7 +186,7 @@
 //! set_csi_callback(on_csi);
 //! ```
 //!
-//! ### Example for creating WiFi Station Central Collector
+//! ### Example for creating a Wi-Fi Station Central Collector
 //! There are more examples in the repository. The example below demonstrates how to collect CSI data with an ESP configured in WIFI Station mode.
 //!
 //! #### Step 1: Initialize Logger
@@ -178,7 +195,8 @@
 //! ```
 //! #### Step 2: Create a Hardware Instance for the CSI Node
 //! ```rust,ignore
-//! let csi_hardware = CSINodeHardware::new(&mut interfaces, controller);
+//! // `controller` is a `&mut WifiController<'static>`: the one `esp_radio::wifi::new` returns, in a `StaticCell`.
+//! let csi_hardware = NodeHardware::new(&mut interfaces, controller);
 //! ```
 //! #### Step 3: Create a Station Configuration
 //! ```rust,ignore
@@ -186,9 +204,9 @@
 //! use esp_radio::wifi::AuthenticationMethod;
 //!
 //! let client_config = StationConfig::default()
-//! .with_ssid("SSID")
-//! .with_password("PASS".to_string())
-//! .with_auth_method(AuthenticationMethod::Wpa2Personal);
+//!     .with_ssid("SSID")
+//!     .with_password("PASS".into())
+//!     .with_auth_method(AuthenticationMethod::Wpa2Personal);
 //!
 //! // `WifiStationConfig` carries the two attributes this mode admits; both default as shown.
 //! let station_config = WifiStationConfig::new(client_config)
@@ -196,13 +214,13 @@
 //!     .with_collection_mode(esp_csi_rs::CollectionMode::Collector);
 //! ```
 //!
-//! `StationConfig` was renamed from `ClientConfig`, and `AuthMethod` was renamed to `AuthenticationMethod` in `esp-radio` 0.18. `with_ssid` now takes `impl Into<Ssid>`, so a `&str` literal works directly without `.to_string()`.
+//! `StationConfig` was renamed from `ClientConfig`, and `AuthMethod` was renamed to `AuthenticationMethod` in `esp-radio` 0.18. `with_ssid` takes `impl Into<Ssid>`, so a `&str` literal works directly; `with_password` takes an owned `String`.
 //! #### Step 4: Create a CSI Collection Node Instance with the Desired Configuration
 //! ```rust,ignore
 //! let mut node = CSINode::station(
 //!     station_config,
 //!     Some(CsiConfig::default()),
-//!     Some(100), // gateway ping rate (Hz) — the uplink an AP collector measures
+//!     Some(100), // gateway ping rate (Hz) — the uplink this central sources
 //!     csi_hardware,
 //! );
 //! ```
@@ -228,7 +246,7 @@
 //! Build one with the per-chip cargo aliases, e.g. `cargo esp32c6 --example esp_now`.
 //!
 //! There is **one example per operational mode**, with the variants that used to be separate files
-//! folded into `const`s at the top of each. Every example opens with its node's four model
+//! folded into `const`s at the top of each. Every per-mode example opens with its node's four model
 //! attributes.
 //!
 //! | Example | What it does |
@@ -274,7 +292,6 @@ extern crate alloc;
 // and re-exports the public API (and the crate-internal items that submodules
 // reach by crate-root path) from their new homes. The actual implementations
 // live in the modules below.
-// Restored alongside `collector` / `emitter`, not instead of them — see `central_peripheral`.
 pub mod central;
 pub mod central_peripheral;
 pub mod collector;
@@ -331,12 +348,14 @@ pub use crate::node::{CollectorMode, NodeRole};
 pub use crate::model::{
     CollectionMode, NetworkRole, NodeView, OperationalMode, SessionRole, SimplexConfig,
 };
-/// The restored central/peripheral taxonomy. Re-exported at the crate root because that is where
-/// every existing caller and every ESP-NOW driver in this crate expects to find it.
-pub use crate::central_peripheral::{CentralOpMode, EspNowConfig, Node, PeripheralOpMode};
-/// Pre-refactor name for [`NodeHardware`]. It served only the central/peripheral pair before the
-/// emitter/collector split gave it a second caller, and the rename was the whole change — so this is
-/// an alias, not a second type to keep in step.
+/// The configuration of both ESP-NOW operational modes.
+pub use crate::central_peripheral::EspNowConfig;
+/// The pre-0.11 ESP-NOW enums, kept for one release so callers written against 0.10 keep compiling.
+/// Deprecated and removed in 0.12; see [`OperationalMode::EspNow`] and
+/// [`OperationalMode::EspNowSimplex`] for what replaced them.
+#[allow(deprecated)]
+pub use crate::central_peripheral::{CentralOpMode, Node, PeripheralOpMode};
+/// Pre-0.10 name for [`NodeHardware`]. An alias, not a second type to keep in step.
 pub type CSINodeHardware<'a> = crate::node::NodeHardware<'a>;
 pub use crate::esp_now_pool::set_raw_recv_callback;
 pub use crate::espnow_phy::{

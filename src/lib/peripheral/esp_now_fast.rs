@@ -1,14 +1,16 @@
-//! Fast one-to-one ESP-NOW source (asymmetric simplex).
+//! The **source** end of the ESP-NOW simplex exchange: a central listener.
 //!
-//! The source listens for a
-//! [`EspNowFastCollector`](crate::CentralOpMode::EspNowFastCollector) beacon,
-//! learns the collector's MAC, registers it as a **unicast peer with a forced
-//! PHY** (HT20 MCS7-LGI by default, HT40 when a secondary channel is set), sends
-//! one magic-tagged hello so the collector switches to RX-only, then unicasts a
-//! **continuous max-rate flood**. Unlike the balanced peripheral responder there
-//! is no per-control-packet reply gating and no adaptive pacing — the source
-//! transmits as fast as `send_async` completes, which (with the collector silent)
-//! drives the maximum CSI packets/sec on the collector.
+//! Built by [`SimplexConfig::source`](crate::SimplexConfig::source) /
+//! [`CSINode::esp_now_simplex_source`](crate::CSINode::esp_now_simplex_source). The module keeps
+//! the name it had when this end was called the "fast source" and filed under `peripheral`.
+//!
+//! The source listens for the [peer](crate::SimplexConfig::peer)'s discovery beacon, learns the
+//! peer's MAC, registers it as a **unicast peer with a forced PHY** (HT20 MCS7-LGI by default,
+//! HT40 when a secondary channel is set), sends one magic-tagged hello so the peer switches to
+//! RX-only, then unicasts a **continuous max-rate flood**. Unlike the symmetric exchange's
+//! peripheral there is no per-control-packet reply gating and no adaptive pacing — the source
+//! transmits as fast as `send_async` completes (or at the traffic frequency, when one is set),
+//! which with the peer silent drives the maximum CSI packets/sec at the peer.
 
 use embassy_futures::select::{Either, select};
 use embassy_time::{Instant, Timer};
@@ -51,7 +53,7 @@ fn add_collector_peer(esp_now: &EspNow<'static>, mac: &[u8; 6], channel: u8) -> 
         .is_ok()
 }
 
-/// Run the fast ESP-NOW source: discover collector → forced-PHY unicast flood.
+/// Run the simplex source end: discover the peer → forced-PHY unicast flood.
 pub async fn run_esp_now_fast_source(
     esp_now: &mut EspNow<'static>,
     config: &EspNowConfig,

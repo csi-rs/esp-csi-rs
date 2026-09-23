@@ -134,14 +134,18 @@ pub fn set_csi_tool_emit_cap(cap: u16) {
     CSI_TOOL_EMIT_CAP.store(cap, Ordering::Relaxed);
 }
 
-/// Role string emitted in column 2 of the ESP32-CSI-Tool CSV format.
+/// Label written in column 2 (`role`) of the ESP32-CSI-Tool CSV format.
+///
+/// This is that tool's column vocabulary, kept so its parsers read the output unchanged. It is a
+/// label chosen by the caller, not one of this crate's node attributes: nothing reads it back, and
+/// it is not derived from the node's operational mode or network role (see [`crate::model`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    /// Wi-Fi station role (`STA`).
+    /// `STA` — conventionally, a Wi-Fi station node.
     Sta = 0,
-    /// Soft-AP role (`AP`).
+    /// `AP` — conventionally, a softAP node.
     Ap = 1,
-    /// Promiscuous sniffer role (`PASSIVE`).
+    /// `PASSIVE` — conventionally, a promiscuous sniffer node.
     Passive = 2,
 }
 
@@ -165,10 +169,10 @@ impl From<u8> for Role {
     }
 }
 
-/// Set the role string used by `LogMode::EspCsiTool`.
+/// Set the `role` column label used by `LogMode::EspCsiTool`.
 ///
 /// Call once before starting the node when emitting the ESP32-CSI-Tool CSV
-/// format. Defaults to `Role::Sta`.
+/// format. Defaults to `Role::Sta`. See [`Role`]: this only changes the label.
 pub fn set_role(role: Role) {
     ROLE.store(role as u8, Ordering::Relaxed);
 }
@@ -404,8 +408,9 @@ pub enum LogMode {
     /// Compact CSV-style array list.
     ArrayList,
     /// ESP32-CSI-Tool compatible CSV (`CSI_DATA,...` lines, 26 columns, header
-    /// printed once at startup). See the crate-level documentation for the
-    /// exact field layout.
+    /// printed once at startup). The column list is in the crate-level
+    /// documentation, under "Output Formats & Logging Modes"; the `role` column
+    /// is set with [`set_role`].
     EspCsiTool,
 }
 
@@ -725,10 +730,12 @@ pub fn log_csi(packet: CSIDataPacket) {
 ))]
 use crate::logging::logging::logging_impl::LogOutput;
 
-/// Initialize the logging backend and spawn the async logger task.
+/// Initialize the logging backend and, when the async path is selected, spawn the async logger task.
 ///
-/// `async-print` forces async logging. Without it, `auto` selects async only
-/// when USB SOF indicates JTAG/USB-Serial-JTAG; UART stays on the sync path.
+/// With `auto` (on every chip except the original ESP32), the choice follows the transport found
+/// at boot: async when USB SOF indicates USB-Serial-JTAG, sync on UART — whether or not
+/// `async-print` is also enabled. Without `auto`, or on the ESP32, `async-print` selects async and
+/// its absence selects sync. The chosen backend is printed once (`log backend: ...`).
 pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
     LOG_MODE.store(log_mode as u8, Ordering::Relaxed);
     ESP_CSI_TOOL_HEADER_PRINTED.store(false, Ordering::Relaxed);

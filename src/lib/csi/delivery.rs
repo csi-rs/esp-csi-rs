@@ -45,11 +45,11 @@ static CSI_QUEUE: heapless::mpmc::Q32<CSIDataPacket> = heapless::mpmc::Q32::new(
 /// after a successful `CSI_QUEUE.enqueue`.
 static CSI_WAKER: AtomicWaker = AtomicWaker::new();
 
-/// Whether this node is currently acting as a CSI collector.
+/// Whether this node's collection mode currently in force is `Collector`.
 ///
-/// Restored with the central/peripheral roles: the ESP-NOW exchange lets a central tell a peripheral
-/// to start or stop collecting mid-run, which the emitter/collector roles have no equivalent for —
-/// there, the role is fixed when the node starts.
+/// Set from the configured mode at the start of every run, and moved mid-run in one case only: a
+/// peripheral of the symmetric ESP-NOW exchange that hears a listening central promotes itself to
+/// collector. Every other mode keeps its configured value for the whole run.
 ///
 /// Deliberately NOT the same gate as `CSI_PUBLISH_ENABLED`. That one decides whether the WiFi
 /// callback builds a packet at all; this one drives the ESP-NOW responder/initiator behaviour.
@@ -262,8 +262,12 @@ pub fn set_csi_raw_callback(cb: fn()) {
 /// handed to a callback — which is what separates acquisition cost from delivery cost.
 ///
 /// Before 0.11 this stored a flag that no CSI path read, so `set-csi-output --enabled=false` on the
-/// console, `POST /config/csi-output` on the HTTP API, and `CSINode::set_csi_output_enabled` all
-/// reported success and changed nothing. It now closes the publish gate.
+/// console and `POST /config/csi-output` on the HTTP API reported success and changed nothing. It
+/// now closes the publish gate. (The deprecated `CSINode::set_csi_output_enabled` method is still
+/// the no-op it always was; call this function instead.)
+///
+/// This is only the delivery gate. Whether the node reports at all is its collection mode, set on
+/// the mode's config; a `Listener` delivers nothing whatever this is set to.
 pub fn set_csi_output_enabled(enabled: bool) {
     CSI_OUTPUT_ENABLED.store(enabled, Ordering::Relaxed);
     apply_publish_gate();
@@ -420,15 +424,19 @@ pub(crate) fn set_runtime_collection_mode(is_collector: bool) {
 
 /// Set the collection mode from outside the crate, for a node that owns the radio directly.
 ///
-/// `CSINode::run` does this for every mode it dispatches, but an out-of-tree node — the pro HE20
-/// node, for instance — never passes through it, and [`IS_COLLECTOR`] is process-wide. A board left
+/// `CSINode::run` does this for every mode it dispatches, but an out-of-tree node that drives the
+/// radio itself never passes through it, and the gate it sets is process-wide. A board left
 /// as a `Listener` by one run therefore stayed one across every later run that did not set it,
 /// capturing normally and delivering nothing until a reboot. Nothing upstream reports that: the
 /// capture counters climb, and the silence looks like a radio problem.
 ///
 /// So any node that bypasses `CSINode::run` must state its collection mode here. A mode that fixes
-/// the attribute states the fixed value — an HE20 collector is a collector, an emitter a listener —
-/// rather than leaving the previous run's choice in place.
+/// the attribute states the fixed value — a node that only measures is a collector, an emitter a
+/// listener — rather than leaving the previous run's choice in place.
+///
+/// This is the collection mode, not the runtime output toggle: [`set_csi_output_enabled`] is the
+/// separate user override, and delivery needs both. Nodes built with [`CSINode`](crate::CSINode)
+/// set the collection mode on their mode's config instead.
 pub fn set_collection_mode(mode: crate::CollectionMode) {
     set_runtime_collection_mode(matches!(mode, crate::CollectionMode::Collector));
 }
@@ -457,9 +465,9 @@ pub(crate) fn reset() {
 /// Handle for controlling a running [`CSINode`](crate::CSINode) from user code.
 ///
 /// CSI packets are delivered to user code via [`set_csi_callback`] (the
-/// preferred path: zero channel hops, lowest latency) or — under the
-/// `async-print` feature — by awaiting [`Self::get_csi_data`] /
-/// [`Self::print_csi_w_metadata`]. The client also signals the running
+/// preferred path: zero channel hops, lowest latency) or by awaiting
+/// [`Self::next_csi_packet`] / [`Self::print_csi_w_metadata`], which work with
+/// either logging backend (sync or async). The client also signals the running
 /// node to stop early via [`Self::send_stop`].
 pub struct CSINodeClient {
     _private: (),
@@ -525,7 +533,7 @@ impl CSINodeClient {
     }
 
     /// Back-compat alias for [`Self::next_csi_packet`]. Older code paths
-    /// (and the `async-print` feature) referred to this name.
+    /// referred to this name.
     pub async fn get_csi_data(&mut self) -> CSIDataPacket {
         self.next_csi_packet().await
     }
@@ -840,10 +848,11 @@ fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
     }
 }
 
-/// Internal task that handles collection-mode changes and rate statistics.
+/// Internal task that maintains the rate statistics and restarts them when CSI output is toggled.
 ///
-/// Seq drop detection runs inside `capture_csi_info` (ISR context) so this task
-/// never drains `CSI_PACKET`, leaving the channel exclusively for `CSINodeClient`.
+/// Runs for the whole of a capturing run and exits on the stop signal. Seq drop detection runs
+/// inside `capture_csi_info` (ISR context), so this task never drains `CSI_QUEUE`, leaving the
+/// queue exclusively for [`CSINodeClient`].
 pub async fn run_process_csi_packet() {
     #[cfg(feature = "statistics")]
     STATS
@@ -870,9 +879,9 @@ pub async fn run_process_csi_packet() {
             }
             Either3::Second(_) => {
                 CSI_OUTPUT_CHANGED.reset();
-                // A runtime Collector/Listener switch is not a collection
-                // teardown. Keep CSI delivery gates and callbacks intact; closing
-                // them here disables output mid-run until the next CLI `start`.
+                // A runtime output toggle is not a collection teardown. Keep
+                // CSI delivery gates and callbacks intact; closing them here
+                // disables output mid-run until the next CLI `start`.
                 #[cfg(feature = "statistics")]
                 {
                     STATS

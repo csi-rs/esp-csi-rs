@@ -5,12 +5,12 @@
 //! parts it does not radiate: measured on an ESP32-S3, the driver returns `ESP_OK` for every
 //! frame, the forced-TX call reports `rc = 0` before and after start, the emitter logs
 //! "Emitter running" — and three independent collectors see nothing, while the same board beacons
-//! normally as a softAP. That was reproduced against four different configurations (the AX-era
-//! struct API, the legacy per-interface rate API, a management probe-request instead of a data
+//! normally as a softAP. That was reproduced against four different configurations (the
+//! struct-based rate API, the legacy per-interface rate API, a management probe-request instead of a data
 //! frame, and no forced rate at all), so it is not a rate or frame-type problem.
 //!
 //! ESP-NOW does not have that problem, and never did — it is how this crate transmitted from
-//! classic chips before the emitter/collector rework. It is connectionless in exactly the way an
+//! classic chips before 0.10. It is connectionless in exactly the way an
 //! emitter needs (no association, no handshake, no reply expected) and it reaches the air through
 //! the MAC's ordinary vendor-action-frame path rather than the raw-TX hook.
 //!

@@ -1,17 +1,19 @@
-//! Node role/configuration types and the [`CSINode`] orchestrator.
+//! The [`CSINode`] orchestrator and the Wi-Fi mode configs.
 //!
-//! This module owns the user-facing description of a CSI node — its role
-//! ([`NodeRole`], and for a collector its capture path [`CollectorMode`]), the
-//! per-mode configs ([`EmitterConfig`], [`WifiSnifferConfig`],
-//! [`WifiStationConfig`], [`WifiApConfig`]), and the TX/RX toggles — plus
-//! [`CSINode`], whose `run` / `run_duration` wire up Wi-Fi, CSI, and the
-//! role-specific tasks. It also holds the shared stop signal and the per-run
-//! lifecycle helpers.
+//! [`CSINode`] holds one [`OperationalMode`] and its `run` / `run_duration` wire up Wi-Fi, CSI
+//! and the mode's tasks. This module also owns the configs of the three Wi-Fi modes
+//! ([`WifiSnifferConfig`], [`WifiStationConfig`], [`WifiApConfig`]), the hardware bundle
+//! ([`NodeHardware`]), the TX/RX toggles ([`IOTaskConfig`]), the shared stop signal and the
+//! per-run lifecycle helpers. The emitter's config is [`EmitterConfig`] and the ESP-NOW modes'
+//! is [`EspNowConfig`](crate::EspNowConfig).
 //!
-//! There are exactly two roles. An **emitter** puts known RF energy into the
-//! channel and never captures; a **collector** captures the channel's response
-//! and delivers it. Everything else — station, softAP, promiscuous sniffer — is a
-//! *way of collecting*, not a role of its own.
+//! A node is described by the four attributes in [`crate::model`]: its network role and
+//! collection mode are read back from the operational mode, never stored beside it. Each
+//! mode's config exposes only the attributes that mode admits, so a node that the model rules
+//! out cannot be built.
+//!
+//! The retired 0.10 taxonomy ([`NodeRole`], [`CollectorMode`]) is kept here as a deprecated
+//! shim and removed in 0.12.
 
 #[cfg(any(feature = "async-print", feature = "auto"))]
 use embassy_time::with_timeout;
@@ -37,6 +39,7 @@ use crate::central::esp_now::run_esp_now_central;
 // driver that goes receive-only is the peripheral end. The files still sit under the module names
 // they had when the roles were assigned the other way around; moving them is a separate step.
 use crate::central::esp_now_fast::run_esp_now_fast_collector as run_esp_now_simplex_peer;
+#[allow(deprecated)]
 use crate::central_peripheral::{CentralOpMode, PeripheralOpMode};
 use crate::emitter::{EmitterConfig, run_emitter};
 use crate::peripheral::esp_now::run_esp_now_peripheral;
@@ -458,8 +461,10 @@ pub enum NodeRole {
     #[allow(deprecated)]
     Collector(CollectorMode),
     /// Drive an ESP-NOW exchange.
+    #[allow(deprecated)]
     Central(CentralOpMode),
     /// Respond to a central's ESP-NOW exchange.
+    #[allow(deprecated)]
     Peripheral(PeripheralOpMode),
 }
 
@@ -500,8 +505,10 @@ impl From<NodeRole> for OperationalMode {
 /// Placeholder for the central driver's unused `_mac_addr` parameter. See its call site.
 const UNSET_MAC: [u8; 6] = [0; 6];
 
-/// The ESP-NOW-era spelling of [`NodeRole`], kept so `Node::Central(..)` resolves for callers
-/// written against it. One type, two names — not a conversion.
+/// A second name for [`NodeRole`], kept so `node::Node::Central(..)` resolves for callers written
+/// against it. One type, two names — not a conversion. Deprecated with `NodeRole` and removed in
+/// 0.12. (The crate-root `esp_csi_rs::Node` is the unrelated, equally deprecated
+/// [`central_peripheral::Node`](crate::central_peripheral::Node).)
 #[allow(deprecated)]
 #[deprecated(since = "0.11.0", note = "see `esp_csi_rs::model`")]
 pub use NodeRole as Node;
@@ -533,7 +540,7 @@ impl Default for IOTaskConfig {
     }
 }
 
-/// Hardware handles required to operate a node in either role.
+/// Hardware handles required to operate a node in any operational mode.
 pub struct NodeHardware<'a> {
     interfaces: &'a mut Interfaces<'static>,
     controller: &'a mut WifiController<'static>,
@@ -576,8 +583,11 @@ pub(crate) fn reset_globals() {
 
 /// Primary orchestration object for a CSI node.
 ///
-/// Construct with [`CSINode::new`] (or [`CSINode::new_collector`] for the common
-/// case), configure optional protocol / traffic frequency, then call `run()`.
+/// Construct with a per-mode constructor — [`CSINode::sniffer`], [`CSINode::station`],
+/// [`CSINode::access_point`], [`CSINode::emitter`], [`CSINode::esp_now`],
+/// [`CSINode::esp_now_simplex_source`] or [`CSINode::esp_now_simplex_peer`] — or with
+/// [`CSINode::new`] and an [`OperationalMode`]. Configure an optional protocol / traffic
+/// frequency, then call `run()`.
 pub struct CSINode<'a> {
     /// How this node reaches the channel. The node's network role and collection mode are read
     /// back from it rather than stored alongside it — see [`OperationalMode`].
@@ -853,11 +863,19 @@ impl<'a> CSINode<'a> {
         }
     }
 
-    /// Set traffic generation frequency in Hz (station / softAP collectors).
+    /// Set the traffic generation frequency in Hz.
+    ///
+    /// Read by the modes that source traffic: the station's gateway ping, the access point's
+    /// downlink flood, the ESP-NOW central's control-packet rate and the ESP-NOW peripheral's reply
+    /// pacing, and the simplex source's flood. The sniffer, the emitter (which uses
+    /// [`EmitterConfig::period`]) and the simplex peer ignore it.
     pub fn set_traffic_frequency(&mut self, freq_hz: u16) {
         self.traffic_freq_hz = Some(freq_hz);
     }
 
+    /// Replace the TX/RX task configuration. See [`IOTaskConfig`]; the two fields can also be set
+    /// one at a time with [`set_tx_enabled`](Self::set_tx_enabled) and
+    /// [`set_rx_enabled`](Self::set_rx_enabled).
     pub fn set_io_tasks(&mut self, io_tasks: IOTaskConfig) {
         self.io_tasks = io_tasks;
     }
@@ -1337,8 +1355,8 @@ async fn drive_main(
 /// Expand a single requested 2.4 GHz protocol into the cumulative set the radio needs.
 ///
 /// 802.11 protocol sets on 2.4 GHz are a **ladder**, not a choice: 11n is an extension of
-/// 11b/11g and 11ax extends all three, so a station must advertise the rungs beneath the one
-/// it wants. Advertising a lone bit (the previous `EnumSet::only(protocol)`) produces a set
+/// 11b/11g, and the ESP32-C5/C6 rung above it extends all three, so a station must advertise
+/// the rungs beneath the one it wants. Advertising a lone bit (the previous `EnumSet::only(protocol)`) produces a set
 /// no real link can use.
 ///
 /// This was measured, not theorised. With an N-only set, an ESP32-C6 `sniffer` collected
@@ -1356,9 +1374,10 @@ fn protocol_ladder_2_4(protocol: Protocol) -> EnumSet<Protocol> {
         Protocol::B => EnumSet::only(Protocol::B),
         Protocol::G => Protocol::B | Protocol::G,
         Protocol::N => Protocol::B | Protocol::G | Protocol::N,
-        Protocol::AX => Protocol::B | Protocol::G | Protocol::N | Protocol::AX,
         // Proprietary long-range, and the 5 GHz-only rungs: not part of the 2.4 GHz ladder.
-        other => EnumSet::only(other),
+        Protocol::LR | Protocol::A | Protocol::AC => EnumSet::only(protocol),
+        // The rung above N (ESP32-C5/C6 only) extends all three beneath it.
+        higher => Protocol::B | Protocol::G | Protocol::N | higher,
     }
 }
 
@@ -1375,10 +1394,15 @@ mod protocol_ladder_tests {
             protocol_ladder_2_4(Protocol::N),
             Protocol::B | Protocol::G | Protocol::N
         );
-        assert_eq!(
-            protocol_ladder_2_4(Protocol::AX),
-            Protocol::B | Protocol::G | Protocol::N | Protocol::AX
-        );
+        // Every rung above N carries B | G | N beneath it.
+        for p in EnumSet::<Protocol>::all().iter().filter(|p| {
+            !matches!(
+                p,
+                Protocol::B | Protocol::G | Protocol::N | Protocol::LR | Protocol::A | Protocol::AC
+            )
+        }) {
+            assert_eq!(protocol_ladder_2_4(p), Protocol::B | Protocol::G | Protocol::N | p);
+        }
     }
 
     /// Regression for the measured failure: an N-only 2.4 GHz set made an ESP32-C6
