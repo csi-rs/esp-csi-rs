@@ -1,14 +1,14 @@
 //! Footprint **min** — Wi-Fi promiscuous-sniffer platform floor (no `CSINode`).
 //!
-//! Binary-footprint counterpart to `sniffer_wifi_exper`: identical platform
+//! Binary-footprint counterpart to `sniffer_bench`: identical platform
 //! boilerplate (esp-hal + esp-rtos + esp-radio + embassy + alloc + the Wi-Fi
 //! blob) and the same raw promiscuous bring-up the crate's sniffer arm performs
 //! (`Sniffer::set_promiscuous_mode` + `set_channel`), but **without** the
 //! `CSINode` state machine, `CsiConfig`, `set_csi`, `CSIDataPacket` build, or
 //! `log_csi` pipeline. `full − min` isolates that crate machinery for the
-//! sniffer role. Not meant to be run — it is built and measured (Test 3).
+//! sniffer mode. Not meant to be run — it is built and measured (Test 3).
 //!
-//! Build: `cargo build --release --target xtensa-esp32-none-elf --example sniffer_wifi_min --features=esp32`.
+//! Build: `cargo build --release --target xtensa-esp32-none-elf --example sniffer_bench_min --features=esp32`.
 
 #![no_std]
 #![no_main]
@@ -24,7 +24,7 @@ use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
 
-/// Wi-Fi channel — match `sniffer_wifi_exper`.
+/// Wi-Fi channel. Irrelevant to the footprint; `sniffer_bench` uses its own.
 const CHANNEL: u8 = 1;
 
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
