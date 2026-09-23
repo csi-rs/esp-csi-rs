@@ -1,4 +1,3 @@
-//! Reserved for future central-side promiscuous sniffer support.
-//!
-//! Currently empty; central-side sniffer flows are handled in
-//! [`crate::CSINode::run`] via the Wi-Fi driver's sniffer API.
+//! Empty, and never to be filled: a sniffer never transmits, so it is always a peripheral
+//! collector (see [`crate::model`]). Sniffer capture is driven from [`crate::CSINode::run`] via the
+//! Wi-Fi driver's sniffer API. Kept only so the pre-0.11 module path still resolves.

@@ -1,24 +1,24 @@
-//! The **central / peripheral** node taxonomy, and the ESP-NOW configuration it carries.
+//! [`EspNowConfig`], the configuration of both ESP-NOW operational modes, and the retired enums
+//! that used to wrap it.
 //!
-//! This vocabulary predates [`NodeRole`](crate::NodeRole) and was removed in "Replace ESP-NOW
-//! central/peripheral with emitter/collector roles". It is restored here, **alongside** the newer
-//! roles rather than in place of them, because the two describe different things and both are in
-//! use:
+//! `EspNowConfig` carries what the symmetric exchange ([`OperationalMode::EspNow`]) admits —
+//! channel, forced TX PHY, HT40, an explicit peer MAC, and the node's network role and collection
+//! mode — and is the inner config of both ends of the asymmetric one
+//! ([`OperationalMode::EspNowSimplex`], built through [`SimplexConfig`]). What those attributes
+//! mean is in [`crate::model`].
 //!
-//! * [`NodeRole`](crate::NodeRole) says what a node is *for* — put energy in the channel, or measure
-//!   it. That is the right axis for a raw-injection capture, where the transmitter is unassociated
-//!   and there is no exchange at all.
-//! * [`Node`] describes a *paired ESP-NOW exchange*, where one side drives and the other responds.
-//!   The emitter/collector split cannot express it: an ESP-NOW central both transmits control frames
-//!   and measures the replies, so it is neither a pure emitter nor a pure collector.
+//! [`CentralOpMode`], [`PeripheralOpMode`] and [`Node`] are the pre-0.11 spelling of the same two
+//! modes, kept so callers written against 0.10 compile with warnings. They are deprecated and are
+//! removed in 0.12. That spelling also put the simplex ends on the wrong sides: the flooding end
+//! was a "peripheral" and the receive-only end a "central". `From<NodeRole> for OperationalMode`
+//! corrects the assignment for callers that have not migrated.
 //!
-//! The naming is admittedly backwards — the "central" is the receiver that aggregates CSI while its
-//! "peripherals" transmit — and that was one of the reasons for the original removal. It is kept
-//! as-is because it is the on-the-wire and on-the-CLI contract; renaming it would break every
-//! configuration that uses it without making the exchange any easier to describe.
+//! Station and access-point collection are not here: they live in [`crate::collector`], which
+//! [`crate::central`] re-exports rather than duplicates.
 //!
-//! `ap` and `sta` collection are NOT duplicated here: [`crate::central`] re-exports the live
-//! [`crate::collector`] modules, so there is one copy of that code.
+//! [`OperationalMode::EspNow`]: crate::OperationalMode::EspNow
+//! [`OperationalMode::EspNowSimplex`]: crate::OperationalMode::EspNowSimplex
+//! [`SimplexConfig`]: crate::SimplexConfig
 
 // `WifiPhyRate` moved from `wifi` to `esp_now` in esp-radio 0.18 — it only ever described the
 // ESP-NOW peer rate, so the move is where it belongs.
@@ -27,12 +27,13 @@ use esp_radio::wifi::SecondaryChannel;
 
 
 
-/// Configuration for ESP-NOW traffic generation.
+/// Configuration for the ESP-NOW operational modes.
 ///
-/// Used by both Central and Peripheral nodes when operating in ESP-NOW mode.
-/// Construct with `EspNowConfig::default()` then chain `with_channel` /
-/// `with_phy_rate` to override defaults — both nodes must agree on the
-/// channel for ESP-NOW frames to be received.
+/// Both ends of the symmetric exchange take one, and it is where their network role and collection
+/// mode are set; the simplex source end takes one through
+/// [`SimplexConfig::source`](crate::SimplexConfig::source). Construct with
+/// `EspNowConfig::default()` then chain `with_channel` / `with_phy_rate` to override defaults —
+/// both nodes must agree on the channel for ESP-NOW frames to be received.
 pub struct EspNowConfig {
     phy_rate: WifiPhyRate,
     pub(crate) channel: u8,
@@ -80,16 +81,20 @@ impl Default for EspNowConfig {
 }
 
 impl EspNowConfig {
-    /// Recommended base config for the fast one-to-one (asymmetric simplex)
-    /// mode: forces HT20 at MCS7 Long-GI for maximum CSI packets/sec. Chain
-    /// `with_channel` / `with_ht40` to override. Used by
-    /// [`CentralOpMode::EspNowFastCollector`] / [`PeripheralOpMode::EspNowFastSource`].
+    /// Recommended base config for the source end of the asymmetric ESP-NOW simplex exchange:
+    /// forces HT20 at MCS7 Long-GI for maximum CSI packets/sec at the peer. Chain `with_channel` /
+    /// `with_ht40` to override. Pass it to [`SimplexConfig::source`](crate::SimplexConfig::source)
+    /// or [`CSINode::esp_now_simplex_source`](crate::CSINode::esp_now_simplex_source); the peer end
+    /// takes only a channel.
     pub fn fast_default() -> Self {
         Self::default().with_phy_rate(WifiPhyRate::RateMcs7Lgi)
     }
 
-    /// Override the 2.4 GHz channel (1–14). Both central and peripheral
-    /// must be configured with the same channel.
+    /// Override the channel. Both nodes must be configured with the same one.
+    ///
+    /// The ESP-NOW modes are built and measured on 2.4 GHz (`1`–`14`). Unlike the sniffer,
+    /// station and access-point modes they do not select the band themselves on the dual-band
+    /// ESP32-C5, so a 5 GHz primary channel here is untested.
     pub fn with_channel(mut self, channel: u8) -> Self {
         self.channel = channel;
         self
@@ -121,7 +126,7 @@ impl EspNowConfig {
         self
     }
 
-    /// Configured 2.4 GHz channel.
+    /// Configured channel.
     pub fn channel(&self) -> u8 {
         self.channel
     }
@@ -195,30 +200,56 @@ impl EspNowConfig {
         self.collection = mode;
     }
 }
-/// Central node operational modes.
+/// The pre-0.11 "central" ESP-NOW modes.
+///
+/// **Deprecated in 0.11, removed in 0.12.** Use [`OperationalMode::EspNow`](crate::OperationalMode)
+/// with [`NetworkRole::Central`](crate::NetworkRole::Central) on the config, or
+/// [`SimplexConfig::peer`](crate::SimplexConfig::peer) for what was `EspNowFastCollector`. This
+/// spelling put the simplex ends the wrong way round: the receive-only end is a peripheral.
+#[deprecated(
+    since = "0.11.0",
+    note = "removed in 0.12; use `OperationalMode::EspNow` / `OperationalMode::EspNowSimplex`. \
+            This spelling put the simplex ends the wrong way round: `EspNowFastCollector` is the \
+            peripheral collector, `SimplexConfig::peer`"
+)]
 pub enum CentralOpMode {
-    /// Drive an ESP-NOW exchange with a peripheral node.
+    /// The central end of the symmetric exchange. Now `OperationalMode::EspNow` with
+    /// `NetworkRole::Central`.
     EspNow(EspNowConfig),
-    /// Fast one-to-one ESP-NOW collector (asymmetric simplex): broadcast a
-    /// sparse discovery beacon until a [`PeripheralOpMode::EspNowFastSource`] is
-    /// heard, then stop beaconing and go RX-only, capturing CSI from the source's
-    /// continuous unicast flood. Maximizes CSI packets/sec by leaving all airtime
-    /// to the single transmitter.
+    /// The receive-only simplex end. Now `SimplexConfig::peer`: a **peripheral** collector.
     EspNowFastCollector(EspNowConfig),
 }
 
-// Enum for Peripheral modes, each wrapping its specific config.
-/// Peripheral node operational modes.
+/// The pre-0.11 "peripheral" ESP-NOW modes.
+///
+/// **Deprecated in 0.11, removed in 0.12.** Use [`OperationalMode::EspNow`](crate::OperationalMode)
+/// with [`NetworkRole::Peripheral`](crate::NetworkRole::Peripheral) on the config, or
+/// [`SimplexConfig::source`](crate::SimplexConfig::source) for what was `EspNowFastSource`. This
+/// spelling put the simplex ends the wrong way round: the flooding end is a central.
+#[deprecated(
+    since = "0.11.0",
+    note = "removed in 0.12; use `OperationalMode::EspNow` / `OperationalMode::EspNowSimplex`. \
+            This spelling put the simplex ends the wrong way round: `EspNowFastSource` is the \
+            central listener, `SimplexConfig::source`"
+)]
 pub enum PeripheralOpMode {
-    /// Reply to a central's ESP-NOW control frames.
+    /// The peripheral end of the symmetric exchange. Now `OperationalMode::EspNow` with
+    /// `NetworkRole::Peripheral`.
     EspNow(EspNowConfig),
-    /// Fast one-to-one ESP-NOW source (asymmetric simplex): listen for a
-    /// [`CentralOpMode::EspNowFastCollector`] beacon, learn its MAC, then unicast
-    /// a continuous forced-PHY flood for the collector to capture as CSI.
+    /// The flooding simplex end. Now `SimplexConfig::source`: a **central** listener.
     EspNowFastSource(EspNowConfig),
 }
 
-/// High-level node type and mode.
+/// The pre-0.11 wrapper around [`CentralOpMode`] and [`PeripheralOpMode`]. Nothing in the crate
+/// consumes it.
+///
+/// **Deprecated in 0.11, removed in 0.12.** Use [`OperationalMode`](crate::OperationalMode).
+#[deprecated(
+    since = "0.11.0",
+    note = "removed in 0.12; use `OperationalMode`. This spelling put the simplex ends the wrong \
+            way round — see `esp_csi_rs::model`"
+)]
+#[allow(deprecated)]
 pub enum Node {
     /// Run as the peripheral side of the chosen [`PeripheralOpMode`].
     Peripheral(PeripheralOpMode),

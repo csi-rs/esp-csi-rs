@@ -3,9 +3,9 @@ name = "esp-csi-rs"
 version = "0.11.0"
 edition = "2024"
 authors = ["theembeddedrustacean", "stacks-of-data", "Abdullah-Alawad", "modatt"]
-description = "ESP CSI Driver for Rust"
+description = "Wi-Fi Channel State Information (CSI) collection on ESP32, ESP32-C3, ESP32-C5, ESP32-C6 and ESP32-S3 for no_std Rust: sniffer, station, access point, emitter and ESP-NOW nodes"
 keywords = ["embedded", "esp32", "wifi", "csi"]
-categories = ["embedded"]
+categories = ["embedded", "no-std", "hardware-support"]
 readme = "README.md"
 homepage = "https://blog.theembeddedrustacean.com/"
 documentation = "https://docs.rs/esp-csi-rs"
@@ -24,14 +24,16 @@ default = ["no-std", "println", "auto"]
 no-std = []
 ## Enable logging via `println!()`.
 println = ["dep:log", "esp-backtrace/println"]
-## Automatically select the logging backend at runtime.
+## Automatically select the logging transport and backend at runtime.
 ##
-## Runtime behavior (when `async-print` is NOT enabled):
-## - USB SOF detected (USB-Serial-JTAG/JTAG path) -> async logging backend
+## Runtime behavior (every chip except the original ESP32, which has no
+## USB-Serial-JTAG):
+## - USB SOF detected (USB-Serial-JTAG path) -> async logging backend
 ## - no USB SOF (UART path) -> sync inline logging
 ##
 ## Precedence:
-## - `async-print` overrides `auto` and forces async logging.
+## - Under `auto` the backend follows the transport, with or without
+##   `async-print`: a UART console is never run through the async backend.
 ## - `jtag-serial` / `uart` force transport selection; `auto` is for runtime
 ##   transport selection.
 auto = ["esp-println/auto"]
@@ -56,19 +58,25 @@ uart = ["esp-println/uart"]
 no-print = ["esp-println/no-op"]
 ## Enable collection of runtime statistics (e.g., latency, dropped packets).
 statistics = []
-## Non-blocking async logging override.
-## When enabled explicitly, async logging is forced regardless of runtime backend detection.
+## Non-blocking async logging.
+## Without `auto` (or on the ESP32) this selects the async backend. With `auto` it
+## no longer forces async: the backend still follows the transport detected at
+## boot (async on USB-Serial-JTAG, sync on UART).
 async-print = []
 ## Use an external defmt global logger instead of registering one from this crate.
 external-defmt-logger = []
-## Enable esp-rtos scheduler tracing so the CPU-utilization DUT
-## (`esp_now_peripheral_exper_cpu`) can measure absolute idle *time* from
-## `system_idle`/`task_exec_begin` switch hooks (spec v2 §2.2). Only the CPU
-## experiment needs this; it adds a hook call to every context switch.
+## Enable esp-rtos scheduler tracing (`esp-rtos/rtos-trace` plus the
+## `rtos-trace` crate), so a CPU-utilization device under test can measure
+## absolute idle *time* from the `system_idle` / `task_exec_begin` switch hooks
+## by installing a `rtos_trace::global_trace!` sink. No in-tree target installs
+## one; the matching traffic generator is `esp_now_bench` in `experiments/`
+## (see `cpu-test-tx`). Adds a hook call to every context switch.
 cpu-trace = ["dep:rtos-trace", "esp-rtos/rtos-trace"]
-## Expose runtime TX controls (rate / payload / pause) that let the CPU-test
-## TX example (`esp_now_central_exper_cpu_tx`) steer the real `run_esp_now_central`
-## loop from the experiment schedule. Only that example needs it.
+## Expose runtime TX controls (rate / payload / pause) that let the
+## CPU-utilization harness (`esp_now_bench` in `experiments/`, with
+## `MEASURE = Cpu`) steer the real TX loops from its phase schedule: the ESP-NOW
+## central's control-packet loop and the emitter's send loop. Only that
+## measurement needs it.
 cpu-test-tx = []
 
 ## Support for the ESP32
@@ -130,6 +138,7 @@ esp32s3 = [
     "esp-rtos/esp32s3",
 ]
 
+## Support for the ESP32-C5 (dual-band 2.4/5 GHz)
 esp32c5 = [
     "esp-hal/esp32c5",
     "esp-hal/rt",

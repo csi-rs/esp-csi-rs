@@ -1,8 +1,8 @@
 //! CSI packet types and frame-format definitions.
 //!
 //! Defines the wire-level [`CSIDataPacket`] emitted to host tooling and the
-//! [`RxCSIFmt`] enumeration mirroring Espressif's HT/non-HT/HE-SU receive
-//! mode classification used to decode CSI tones.
+//! [`RxCSIFmt`] enumeration mirroring Espressif's receive-mode classification
+//! (non-HT, HT and VHT) used to decode CSI tones.
 
 use crate::time::DateTime;
 use heapless::Vec;

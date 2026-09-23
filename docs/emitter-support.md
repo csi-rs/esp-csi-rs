@@ -25,10 +25,11 @@ ESP-NOW frames carry the node's station MAC as the transmitter address, so a col
 CSI to the emitter exactly as it would for an injected sounding frame, and several emitters can
 share one collector.
 
-## If you need an ESP32-S3 as the traffic source
+## If you need more reports per second from a classic chip
 
-Pair it as a **station** against a **softAP** (`station` + `access_point`) instead of running an
-emitter. That is an associated link rather than blind sounding, but it puts energy in the channel
-and yields more reports per second.
+An ESP32-S3 (or ESP32, ESP32-C3) emitter works, over ESP-NOW broadcast. When an unassociated
+sounding source is not a requirement, pairing a **station** against a **softAP**
+(`station` + `access_point`) is the alternative: an associated link rather than blind sounding, but
+unicast, ACKed traffic that yields more reports per second — ~290/s measured on an S3 station.
 
-Any chip works fine as a **collector**.
+Any chip can measure an emitter's frames as a **sniffer**.

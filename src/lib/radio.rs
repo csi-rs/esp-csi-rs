@@ -1,4 +1,4 @@
-//! Low-level radio helpers shared by every node role.
+//! Low-level radio helpers shared by every operational mode.
 //!
 //! Band selection, HT40 channel setup, and the one piece of ESP-NOW handling
 //! this crate still needs: silencing esp-radio's built-in ESP-NOW receive
@@ -20,9 +20,11 @@ use crate::log_ln;
 /// fire and grow the deque; on the small ESP32-S3 heap the next grow allocation
 /// can fail, panicking in `handle_alloc_error` *inside esp-radio's `rcv_cb`*.
 ///
-/// No role in this crate consumes ESP-NOW data, so the callback is dropped
-/// outright at bring-up: overheard frames are then discarded at the C layer with
-/// zero allocation. This also keeps Wi-Fi ISR work out of the way while a
+/// None of the 802.11 modes (sniffer, station, access point, emitter) consumes
+/// ESP-NOW data, so for them the callback is dropped outright at bring-up:
+/// overheard frames are then discarded at the C layer with zero allocation. The
+/// ESP-NOW modes need the frames, and install the static-pool dispatcher
+/// (`crate::esp_now_pool`) in its place instead of calling this. This also keeps Wi-Fi ISR work out of the way while a
 /// dual-band ESP32-C5 radio is still being reconfigured, which was a recurring
 /// source of interrupt-watchdog timeouts during `set_protocols` / `set_config` /
 /// `set_csi`.

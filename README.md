@@ -3,7 +3,7 @@
 A Rust crate for collecting **Channel State Information (CSI)** on **ESP32** series devices using
 the `no-std` embedded framework.
 
-[![crates.io](https://img.shields.io/crates/v/esp_csi_rs.svg)](https://crates.io/crates/esp_csi_rs)
+[![crates.io](https://img.shields.io/crates/v/esp-csi-rs.svg)](https://crates.io/crates/esp-csi-rs)
 [![docs.rs](https://docs.rs/esp-csi-rs/badge.svg)](https://docs.rs/esp-csi-rs)
 
 > **Want CSI without writing code?** [`esp-csi-cli-rs`](https://github.com/csi-rs/esp-csi-cli-rs) is
@@ -33,7 +33,7 @@ there is no setter to call, so a central sniffer or a collecting emitter cannot 
 | `CSINode::sniffer` | Wi-Fi sniffer | peripheral | collector |
 | `CSINode::station` | Wi-Fi station | either | either |
 | `CSINode::access_point` | Wi-Fi access point | central | either |
-| `CSINode::emitter` | Emitter (raw sounding) | central | listener |
+| `CSINode::emitter` | Emitter (transmit-only sounding) | central | listener |
 | `CSINode::esp_now` | ESP-NOW | either | either |
 | `CSINode::esp_now_simplex_source` | ESP-NOW simplex | central | listener |
 | `CSINode::esp_now_simplex_peer` | ESP-NOW simplex | peripheral | collector |
@@ -145,7 +145,8 @@ Measurement harnesses live under `experiments/`, documented in `experiments/READ
 | [`docs/bandwidth.md`](docs/bandwidth.md) | HT20 vs HT40, verifying HT40 engaged, filtering legacy/ACK CSI |
 | [`docs/emitter-support.md`](docs/emitter-support.md) | Which transport each chip uses, and why raw injection is not offered everywhere |
 | [`docs/defmt.md`](docs/defmt.md) | Logging backends, and the three steps to use `defmt` from your own app |
-| [docs.rs](https://docs.rs/esp_csi_rs) | Full API documentation |
+| [docs.rs](https://docs.rs/esp-csi-rs) | Full API documentation |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release notes, including the 0.11 migration |
 
 ## Development
 
@@ -153,8 +154,12 @@ Early development, `no-std` only. Contributions and suggestions are welcome.
 
 ## License
 
-Copyright 2026 The csi-rs Team. Licensed under the Apache License, Version 2.0 — see
-[`LICENSE`](LICENSE).
+Copyright 2026 The csi-rs Team. Licensed under either of
+
+- the Apache License, Version 2.0 ([`LICENSE`](LICENSE)), or
+- the MIT license ([`LICENSE-MIT`](LICENSE-MIT)),
+
+at your option.
 
 ---
 

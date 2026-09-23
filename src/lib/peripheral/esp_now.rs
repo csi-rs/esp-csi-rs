@@ -1,7 +1,8 @@
 //! Peripheral-side ESP-NOW driver task.
 //!
-//! Receives [`crate::ControlPacket`] frames from the central, mirrors the
-//! collector mode advertised by the central, and replies with a
+//! Receives [`crate::ControlPacket`] frames from the central, promotes itself to
+//! [`Collector`](crate::CollectionMode::Collector) when the central announces that it is a
+//! listener (so the pair still produces a dataset), and replies with a
 //! [`crate::PeripheralPacket`] presence beacon. Operates against the lock-free
 //! [`crate::esp_now_pool`] receive queue to avoid heap churn in the
 //! ESP-NOW interrupt path.

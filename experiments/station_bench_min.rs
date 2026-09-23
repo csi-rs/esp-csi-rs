@@ -1,14 +1,14 @@
 //! Footprint **min** — Wi-Fi STA platform floor (no `CSINode`, no net stack).
 //!
-//! Binary-footprint counterpart to `wifi_station`: identical platform
+//! Binary-footprint counterpart to `station_bench`: identical platform
 //! boilerplate and a raw STA bring-up (config + associate at the controller
 //! level), but **without** the `CSINode` state machine, the embassy-net/smoltcp
 //! IP stack, DHCP, `sta_network_ops`, `set_csi`, or `CSIDataPacket` pipeline that
-//! the full STA CSI role pulls in. `full − min` exposes that whole stack; the
+//! the full station mode pulls in. `full − min` exposes that whole stack; the
 //! per-library breakdown attributes it (smoltcp / embassy-net / esp_csi_rs).
 //! Built and measured, not run (Test 3).
 //!
-//! Build: `cargo build --release --target xtensa-esp32-none-elf --example wifi_station_min --features=esp32`.
+//! Build: `cargo build --release --target xtensa-esp32-none-elf --example station_bench_min --features=esp32`.
 
 #![no_std]
 #![no_main]

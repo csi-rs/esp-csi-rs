@@ -1,7 +1,7 @@
 //! Shared schedule for the CPU-utilization experiment (spec v2).
 //!
-//! Both the CPU DUT and the companion emitter TX experiment
-//! (TX traffic generator) iterate this same sequence so they stay
+//! Both the CPU DUT and the companion TX traffic generator
+//! (`esp_now_bench` with `MEASURE = Cpu` and `cpu-test-tx`) iterate this same sequence so they stay
 //! lockstep without a control channel. After a fixed `BOOT_DELAY_S`
 //! handshake delay both firmwares march phase-by-phase.
 //!

@@ -20,8 +20,10 @@ pub(crate) static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
 /// `statistics` feature, which gates `sequence_number`) for frames to parse.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ControlPacket {
-    /// Whether the central is currently in collector mode; the peripheral
-    /// mirrors this flag to keep the pair in sync.
+    /// Whether the central's collection mode is currently
+    /// [`Collector`](crate::CollectionMode::Collector). A peripheral that hears a listening central
+    /// promotes itself to collector so the pair still produces a dataset; a collecting central
+    /// leaves the peripheral's own collection mode alone.
     pub is_collector: bool,
     /// Monotonic sequence number used to detect drops/reordering. Only present
     /// when the `statistics` feature is enabled, to keep the frame small.

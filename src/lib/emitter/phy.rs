@@ -67,7 +67,7 @@ fn force_tx_ap_before_start(phymode: u32) -> i32 {
     }
 }
 
-/// Legacy HT protocols (802.11 B|G|N — no AX). The C5 also advertises A|N on 5 GHz.
+/// Legacy HT protocols (802.11 B|G|N only). The C5 also advertises A|N on 5 GHz.
 fn ht_protocols() -> Protocols {
     let protocols = Protocols::default().with_2_4(Protocol::B | Protocol::G | Protocol::N);
     #[cfg(feature = "esp32c5")]

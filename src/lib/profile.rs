@@ -26,8 +26,10 @@ pub trait RadioProfile: Sync {
     }
 
     /// Adjust the protocol set before it is applied. `base` is
-    /// `Protocols::default().with_2_4(only(protocol))`; return it unchanged to
-    /// keep the default, or rebuild it entirely.
+    /// `Protocols::default()` with its 2.4 GHz set replaced by the cumulative ladder for
+    /// `protocol` — `N` becomes `B | G | N`, `G` becomes `B | G`, and so on; `LR` and the
+    /// 5 GHz-only protocols stay single. Return it unchanged to keep the default, or rebuild it
+    /// entirely (a profile owns the 5 GHz set).
     fn tune_protocols(
         &self,
         _node: NodeView<'_>,
