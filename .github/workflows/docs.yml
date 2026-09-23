@@ -13,10 +13,10 @@ name: Docs
 on:
   workflow_dispatch:
   pull_request:
-    paths: ["**/*.rs", "Cargo.toml", "README.md", ".github/workflows/docs.yml"]
+    paths: ["**/*.rs", "Cargo.toml", "README.md", "docs/**", ".github/workflows/docs.yml"]
   push:
     branches: [main]
-    paths: ["**/*.rs", "Cargo.toml", "README.md", ".github/workflows/docs.yml"]
+    paths: ["**/*.rs", "Cargo.toml", "README.md", "docs/**", ".github/workflows/docs.yml"]
 
 concurrency:
   group: docs-${{ github.workflow }}-${{ github.ref }}

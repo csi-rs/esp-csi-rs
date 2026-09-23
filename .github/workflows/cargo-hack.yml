@@ -172,11 +172,12 @@ jobs:
           fi
 
           # The feature sweeps above pass --no-dev-deps, which is right (a powerset
-          # that also builds 26 examples would be enormous) but means CI has never
-          # compiled a single example. That is how an engine-side rename could break
-          # all 26 targets invisibly. One check per chip, at the baseline feature set,
-          # closes that gap cheaply. `cpu-trace`/`cpu-test-tx` are required because
-          # four experiments are gated on them.
+          # that also builds 14 examples would be enormous) but means they never
+          # compile an example. That is how an engine-side rename could break all 14
+          # targets (8 in examples/, 6 in experiments/) invisibly. One check per chip,
+          # at the baseline feature set, closes that gap cheaply. `statistics` is
+          # required by three experiments; `cpu-test-tx`/`cpu-trace` are on so the
+          # code `esp_now_bench` gates on them is compiled too.
           cargo check \
             --target "${target}" \
             --examples \
