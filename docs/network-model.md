@@ -78,7 +78,7 @@ radio entirely. `esp-csi-rs` supplies six:
 | **Wi-Fi sniffer** | promiscuous capture on a locked channel; the traffic is whatever is already on air |
 | **Wi-Fi station** | associates to an ESP softAP or a commercial router |
 | **Wi-Fi access point** | self-contained softAP with DHCP; associated stations generate the uplink that is measured |
-| **Emitter** | raw sounding: unassociated transmit-only injection, no peer and no handshake |
+| **Emitter** | transmit-only sounding (raw injection or ESP-NOW broadcast, by chip): unassociated, no peer and no handshake |
 
 ### 2.4 Session role — who starts and stops the measurement
 

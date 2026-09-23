@@ -11,9 +11,12 @@ console, not the radio, is usually what saturates first.
 
 ## Sync vs async
 
-- `async-print` **forces** async logging.
-- With `auto` (and without `async-print`), the backend is chosen at runtime:
-  USB-Serial-JTAG detected → async logging; UART path → sync logging.
+- With `auto` (the default; every chip except the original ESP32), the backend is chosen at
+  runtime from the transport: USB-Serial-JTAG detected → async logging; UART path → sync logging.
+  Adding `async-print` does not change that — a UART console is never run through the async
+  backend.
+- Without `auto`, or on the original ESP32, `async-print` selects async logging and its absence
+  selects sync logging.
 
 This keeps the JTAG throughput benefit while preserving UART's low-overhead sync path.
 
@@ -39,7 +42,8 @@ and `build.rs` handle all three steps. A separate application needs them:
 
 ```toml
 [dependencies]
-esp-csi-rs = { version = "0.11", features = ["esp32c3", "defmt"] }
+# `println` is a default feature and excludes `defmt`, so turn the defaults off and re-add the rest.
+esp-csi-rs = { version = "0.11", default-features = false, features = ["esp32c3", "no-std", "auto", "defmt"] }
 defmt = "1.0"
 ```
 
