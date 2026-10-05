@@ -4,7 +4,7 @@
 //! boilerplate (esp-hal + esp-rtos + esp-radio + embassy + alloc + the Wi-Fi
 //! blob) and the same raw promiscuous bring-up the crate's sniffer arm performs
 //! (`Sniffer::set_promiscuous_mode` + `set_channel`), but **without** the
-//! `CSINode` state machine, `CsiConfig`, `set_csi`, `CSIDataPacket` build, or
+//! `CSINode` state machine, `CsiConfig`, `set_csi`, `CsiPacket` build, or
 //! `log_csi` pipeline. `full − min` isolates that crate machinery for the
 //! sniffer mode. Not meant to be run — it is built and measured (Test 3).
 //!
@@ -41,9 +41,7 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     log_ln!("Footprint min: Wi-Fi sniffer platform floor (no CSINode)");
 
@@ -51,13 +49,18 @@ async fn main(spawner: Spawner) -> ! {
         .with_static_rx_buf_num(25)
         .with_dynamic_rx_buf_num(128)
         .with_rx_queue_size(32);
-    let (wifi_controller, interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, config_radio).expect("Wi-Fi init failed");
+    let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio).expect("Wi-Fi init failed");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
+    // Claim the same radio handles `NodeHardware::new` claims, so the footprint difference
+    // against the full harness is only the CSINode machinery.
+    let _station = esp_radio::wifi::Interface::station();
+    let _access_point = esp_radio::wifi::Interface::access_point();
+    let _esp_now = controller.esp_now();
 
     // Same esp-radio calls the CSINode sniffer arm makes — raw promiscuous +
     // channel lock — but no CSI capture/serialize/log machinery is linked.
-    let sniffer = &interfaces.sniffer;
+    let sniffer = controller.sniffer();
+    let sniffer = &sniffer;
     let _ = sniffer.set_promiscuous_mode(true);
     let _ = controller.set_channel(CHANNEL, SecondaryChannel::None);
 

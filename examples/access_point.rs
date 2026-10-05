@@ -4,7 +4,7 @@
 //! |---|---|
 //! | Operational mode | Wi-Fi access point |
 //! | Network role | Central — beacons and DHCP make it a traffic source by construction |
-//! | Collection mode | `COLLECTION_MODE` below — both are meaningful |
+//! | Reporting policy | `REPORTING` below — `Always`, `Never`, `Threshold` or `Decimate` |
 //! | Session role | Responder |
 //!
 //! The network role is not settable, so there is no way to build a peripheral access point.
@@ -29,10 +29,10 @@
 
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
-use esp_csi_rs::csi::CSIDataPacket;
+use esp_csi_rs::csi::CsiPacket;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CollectionMode, NodeHardware, WifiApConfig, config::CsiConfig, log_ln,
+    CSINode, ReportingPolicy, NodeHardware, WifiApConfig, config::CsiConfig, log_ln,
     set_csi_callback,
 };
 use esp_hal::clock::CpuClock;
@@ -53,7 +53,7 @@ const CHANNEL: u8 = 6;
 
 /// `Listener` keeps the flood on air without reporting — the AP half of a measurement whose data
 /// comes from the stations.
-const COLLECTION_MODE: CollectionMode = CollectionMode::Collector;
+const REPORTING: ReportingPolicy = ReportingPolicy::Always;
 
 /// DHCP lease pool size. Each client gets a distinct address (MAC to IP binding).
 const LEASE_POOL: u8 = 1;
@@ -74,8 +74,8 @@ esp_bootloader_esp_idf::esp_app_desc!();
 static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
 static CSI_PKT_COUNT: AtomicU32 = AtomicU32::new(0);
 
-fn on_csi(packet: &CSIDataPacket) {
-    LATEST_RSSI.store(packet.rssi as i32, Ordering::Relaxed);
+fn on_csi(packet: &CsiPacket) {
+    LATEST_RSSI.store(packet.rssi() as i32, Ordering::Relaxed);
     CSI_PKT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -100,23 +100,21 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+    let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
     let _ = controller.set_power_saving(PowerSaveMode::None);
 
     let ap_radio_config = AccessPointConfig::default()
-        .with_ssid(SSID)
+        .with_ssid(SSID.try_into().expect("SSID longer than 32 bytes"))
         .with_channel(CHANNEL);
     let ap_config = WifiApConfig::new(ap_radio_config, CHANNEL, None)
         .with_lease_pool(LEASE_POOL)
         .with_sync_burst(SYNC_BURST)
-        .with_collection_mode(COLLECTION_MODE);
+        .with_reporting(REPORTING);
 
     log_ln!(
         "Starting softAP (central) — SSID {}, channel {}, {} lease(s)",
@@ -125,7 +123,7 @@ async fn main(spawner: Spawner) -> ! {
         LEASE_POOL
     );
 
-    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
+    let csi_hardware = NodeHardware::new(controller);
     let mut node = CSINode::access_point(
         ap_config,
         Some(CsiConfig::default()),

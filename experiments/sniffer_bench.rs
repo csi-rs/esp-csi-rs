@@ -93,19 +93,17 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 60000);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+    let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     log_ln!("Sniffer bench — channel {}", CHANNEL);
 
     let mut node_handle = CSINodeClient::new();
-    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
+    let csi_hardware = NodeHardware::new(controller);
     let mut node = CSINode::sniffer(
         WifiSnifferConfig::default().with_channel(CHANNEL),
         Some(CsiConfig::default()),

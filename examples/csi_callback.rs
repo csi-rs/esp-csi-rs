@@ -37,7 +37,7 @@ use core::sync::atomic::Ordering;
 use embassy_executor::Spawner;
 use embassy_futures::join::{join, join3};
 use embassy_time::{Duration, Timer};
-use esp_csi_rs::csi::CSIDataPacket;
+use esp_csi_rs::csi::CsiPacket;
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{config::CsiConfig, CsiDeliveryMode, CSINode, logging::logging::init_logger, WifiSnifferConfig};
 use esp_csi_rs::{CSINodeClient, log_ln, NodeHardware, set_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled};
@@ -89,8 +89,8 @@ static LATEST_DRAIN_ENERGY: AtomicU64 = AtomicU64::new(0);
 /// Runs inline in the WiFi task callback. Must be fast and non-blocking
 /// — no heap allocation, no locking, no UART writes. Reads/writes only
 /// to atomics or stack memory.
-fn on_csi(packet: &CSIDataPacket) {
-    LATEST_RSSI.store(packet.rssi as i32, Ordering::Relaxed);
+fn on_csi(packet: &CsiPacket) {
+    LATEST_RSSI.store(packet.rssi() as i32, Ordering::Relaxed);
     CSI_CB_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // Demonstrate bounded inline math: sum |I| + |Q| across all CSI tones.
@@ -98,8 +98,8 @@ fn on_csi(packet: &CSIDataPacket) {
     // crude amplitude proxy good enough to show "callback can do real
     // work" without dragging in `f32` or heap.
     let mut energy: u64 = 0;
-    let tones = packet.csi_data.len();
-    for sample in packet.csi_data.iter() {
+    let tones = packet.csi_data().len();
+    for sample in packet.csi_data().iter() {
         energy = energy.wrapping_add((*sample as i32).unsigned_abs() as u64);
     }
     LATEST_TONE_ENERGY.store(energy, Ordering::Relaxed);
@@ -122,7 +122,7 @@ async fn csi_drainer(client: &mut CSINodeClient) {
         // real app this is where ML inference, file logging, or anything
         // that allocates / waits would go.
         let mut energy: u64 = 0;
-        for sample in packet.csi_data.iter() {
+        for sample in packet.csi_data().iter() {
             energy = energy.wrapping_add((*sample as i32).unsigned_abs() as u64);
         }
         LATEST_DRAIN_ENERGY.store(energy, Ordering::Relaxed);
@@ -192,21 +192,19 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     log_ln!("Embassy initialized!");
     log_ln!("Starting CSI callback test (sniffer mode)");
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+    let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let mut node_handle = CSINodeClient::new();
-    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
+    let csi_hardware = NodeHardware::new(controller);
     let mut node = CSINode::sniffer(
         WifiSnifferConfig::default(),
         Some(CsiConfig::default()),

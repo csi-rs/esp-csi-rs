@@ -18,7 +18,7 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
-use esp_csi_rs::{log_ln, set_peer_espnow_phy};
+use esp_csi_rs::{PeerPhy, log_ln, set_peer_espnow_phy};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::esp_now::{BROADCAST_ADDRESS, WifiPhyRate};
@@ -45,23 +45,29 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     log_ln!("Footprint min: ESP-NOW central platform floor (no CSINode)");
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, config_radio).expect("Wi-Fi init failed");
+    let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio).expect("Wi-Fi init failed");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
+    // Claim the same radio handles `NodeHardware::new` claims, so the footprint difference
+    // against the full harness is only the CSINode machinery.
+    let _station = esp_radio::wifi::Interface::station();
+    let _access_point = esp_radio::wifi::Interface::access_point();
+    let _sniffer = controller.sniffer();
 
     // Raw ESP-NOW bring-up (STA started, channel, per-peer MCS0) — no CSINode,
     // no ControlPacket, no TX loop. Keeps the ESP-NOW interface alive/linked.
-    let _esp_now = interfaces.esp_now;
+    let _esp_now = controller.esp_now();
     let _ = controller.set_config(&Config::Station(StationConfig::default()));
     let _ = controller.set_channel(CHANNEL, SecondaryChannel::None);
-    set_peer_espnow_phy(&BROADCAST_ADDRESS, WifiPhyRate::RateMcs0Lgi, None);
+    set_peer_espnow_phy(
+        &_esp_now,
+        &BROADCAST_ADDRESS,
+        PeerPhy { rate: WifiPhyRate::RateMcs0Lgi, secondary: None, he20: false },
+    );
 
     loop {
         Timer::after(Duration::from_secs(60)).await;

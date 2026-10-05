@@ -4,13 +4,41 @@
 //! this crate still needs: silencing esp-radio's built-in ESP-NOW receive
 //! dispatcher. See [`suppress_espnow_rx`].
 
-use esp_radio::wifi::{SecondaryChannel, WifiController};
+use esp_radio::esp_now::EspNow;
+use esp_radio::wifi::sniffer::Sniffer;
+use esp_radio::wifi::{Interface, SecondaryChannel, WifiController};
 
 use crate::log_ln;
 
+/// The radio handles a node drives, taken from one [`WifiController`].
+///
+/// esp-radio 1.0 no longer hands these out as a bundle from `esp_radio::wifi::new`: interfaces are
+/// singletons claimed with [`Interface::station`] / [`Interface::access_point`], and ESP-NOW and the
+/// sniffer are created from the controller. Keeping the old field names means every mode's code reads
+/// as it did.
+pub(crate) struct RadioInterfaces {
+    pub(crate) station: Interface,
+    pub(crate) access_point: Interface,
+    pub(crate) sniffer: Sniffer,
+    pub(crate) esp_now: EspNow,
+}
+
+impl RadioInterfaces {
+    /// Claim every handle. Panics if an interface was already claimed elsewhere — a node owns the
+    /// radio, so a second claimant is a wiring bug in the application.
+    pub(crate) fn claim(controller: &WifiController<'_>) -> Self {
+        Self {
+            station: Interface::station(),
+            access_point: Interface::access_point(),
+            sniffer: controller.sniffer(),
+            esp_now: controller.esp_now(),
+        }
+    }
+}
+
 /// Permanently unregister esp-radio's ESP-NOW receive callback.
 ///
-/// `esp_radio::wifi::new` eagerly builds `EspNow` (via `EspNow::new_internal`),
+/// [`RadioInterfaces::claim`] builds `EspNow` (via `EspNow::new_internal`),
 /// which calls `esp_now_init()`, registers esp-radio's heap-allocating `rcv_cb`,
 /// and adds a broadcast peer — whether or not anything in this crate speaks
 /// ESP-NOW. From that instant, and `esp_rtos` is already running, every

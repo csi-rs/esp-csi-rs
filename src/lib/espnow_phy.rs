@@ -1,8 +1,8 @@
 //! ESP-NOW PHY forcing: per-peer rate and HT bandwidth.
 //!
-//! esp-radio doesn't expose `esp_now_set_peer_rate_config`, the only API that
-//! actually forces the ESP-NOW frame PHY (rate + HT bandwidth), so it is bound
-//! directly here.
+//! Forced through esp-radio's per-peer rate config (`EspNow::set_peer_rate`),
+//! the only API that actually forces the ESP-NOW frame PHY (rate, HT/HE mode
+//! and bandwidth).
 //!
 //! This used to also carry controller-level bring-up helpers that forced the PHY
 //! by restarting the STA interface and setting band/channel/bandwidth on the
@@ -10,17 +10,17 @@
 //! carries the HT40 secondary channel too — and were removed once nothing called
 //! them on any chip.
 
-use esp_radio::esp_now::WifiPhyRate;
+use esp_radio::esp_now::{EspNow, PhyMode, RateConfig, WifiPhyRate};
 use esp_radio::wifi::SecondaryChannel;
 
 use crate::log_ln;
 
 /// Install this crate's static-pool ESP-NOW receive callback.
 ///
-/// Call this immediately after `esp_radio::wifi::new()` in examples that may
-/// boot while another ESP-NOW node is already transmitting. `wifi::new()`
-/// constructs `EspNow` internally and briefly installs esp-radio's heap-backed
-/// receive queue; replacing it early keeps startup traffic out of that queue.
+/// Call this immediately after building [`NodeHardware`](crate::NodeHardware) in
+/// examples that may boot while another ESP-NOW node is already transmitting.
+/// Creating `EspNow` briefly installs esp-radio's heap-backed receive queue;
+/// replacing it early keeps startup traffic out of that queue.
 /// On ESP32-C5 this also avoids Wi-Fi ISR work while the dual-band radio is
 /// still being reconfigured (a common source of interrupt watchdog timeouts).
 pub fn install_static_espnow_recv() {
@@ -61,80 +61,69 @@ pub(crate) fn with_espnow_recv_suspended<F: FnOnce()>(f: F) {
     f();
 }
 
-// ESP-NOW per-peer TX rate config (ESP-IDF `esp_now_set_peer_rate_config`).
-#[repr(C)]
-struct WifiTxRateConfig {
-    phymode: u32,
-    rate: u32,
-    ersu: bool,
-    dcm: bool,
+/// The TX PHY a node forces on an ESP-NOW peer.
+///
+/// Built by [`EspNowConfig::peer_phy`](crate::EspNowConfig::peer_phy). The PHY mode is derived:
+/// an MCS rate goes out at HT20, HT40 when `secondary` is set, or HE20 when `he20` is set; a
+/// legacy rate goes out at 11b or 11g, whichever carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct PeerPhy {
+    /// The forced rate.
+    pub rate: WifiPhyRate,
+    /// HT40 secondary channel, or `None` for a 20 MHz PHY.
+    pub secondary: Option<SecondaryChannel>,
+    /// Send MCS rates as HE20 (802.11ax SU) instead of HT20. 20 MHz only, so it
+    /// overrides `secondary`. Honoured on the ESP32-C5 and ESP32-C6, the parts
+    /// with an 802.11ax PHY.
+    pub he20: bool,
 }
 
-const WIFI_PHY_MODE_11B: u32 = 1;
-const WIFI_PHY_MODE_11G: u32 = 2;
-const WIFI_PHY_MODE_HT20: u32 = 4;
-const WIFI_PHY_MODE_HT40: u32 = 5;
-
-unsafe extern "C" {
-    fn esp_now_set_peer_rate_config(peer_addr: *const u8, config: *mut WifiTxRateConfig) -> i32;
-}
-
-fn wifi_phy_rate_to_c(rate: WifiPhyRate) -> u32 {
-    match rate {
-        WifiPhyRate::RateLora250k => 41,
-        WifiPhyRate::RateLora500k => 42,
-        WifiPhyRate::RateMax => 43,
-        // `esp-radio::WifiPhyRate` is a contiguous Rust enum, but ESP-IDF's
-        // `wifi_phy_rate_t` has a gap at value 4 (there is no *_4M symbol).
-        // Shift all non-LoRa values >= 4 to preserve the C ABI mapping.
-        other => {
-            let idx = other as u32;
-            if idx < 4 { idx } else { idx + 1 }
-        }
-    }
-}
-
-fn espnow_phymode(rate: WifiPhyRate, secondary: Option<SecondaryChannel>) -> u32 {
-    let c = wifi_phy_rate_to_c(rate);
-    if (16..=31).contains(&c) {
-        if secondary.is_some() {
-            WIFI_PHY_MODE_HT40
+impl PeerPhy {
+    fn phy_mode(&self) -> PhyMode {
+        let c = self.rate as u32;
+        // `WifiPhyRate` discriminants are ESP-IDF's `wifi_phy_rate_t` values: the MCS block
+        // is 16..=35 (LGI then SGI), 0..=7 the 11b rates and 8..=15 the 11g ones.
+        if (16..=35).contains(&c) {
+            #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+            if self.he20 {
+                return PhyMode::He20;
+            }
+            if self.secondary.is_some() {
+                PhyMode::Ht40
+            } else {
+                PhyMode::Ht20
+            }
+        } else if c <= 7 {
+            PhyMode::_11b
         } else {
-            WIFI_PHY_MODE_HT20
+            PhyMode::_11g
         }
-    } else if c <= 7 {
-        WIFI_PHY_MODE_11B
-    } else {
-        WIFI_PHY_MODE_11G
     }
 }
 
-/// Force a peer's ESP-NOW TX PHY to the configured `rate` and bandwidth.
-pub fn set_peer_espnow_phy(peer: &[u8; 6], rate: WifiPhyRate, secondary: Option<SecondaryChannel>) {
-    let mut cfg = WifiTxRateConfig {
-        phymode: espnow_phymode(rate, secondary),
-        rate: wifi_phy_rate_to_c(rate),
+/// Force a peer's ESP-NOW TX PHY. The peer must already be registered with `esp_now`.
+pub fn set_peer_espnow_phy(esp_now: &EspNow, peer: &[u8; 6], phy: PeerPhy) {
+    let phy_mode = phy.phy_mode();
+    let cfg = RateConfig {
+        phy_mode,
+        rate: phy.rate,
         ersu: false,
         dcm: false,
     };
-    let rc = unsafe { esp_now_set_peer_rate_config(peer.as_ptr(), &mut cfg) };
-    if rc != 0 {
+    if let Err(e) = esp_now.set_peer_rate(peer, cfg) {
         log_ln!(
-            "ESP-NOW: set_peer_rate_config rc={} phymode={} rate={}",
-            rc,
-            cfg.phymode,
-            cfg.rate
+            "ESP-NOW: set_peer_rate failed {:?} phymode={:?} rate={:?}",
+            e,
+            phy_mode,
+            phy.rate
         );
     }
 }
 
-/// Apply per-peer ESP-NOW PHY with recv suspended during the driver call (C5-safe).
-pub fn apply_peer_espnow_phy(
-    peer: &[u8; 6],
-    rate: WifiPhyRate,
-    secondary: Option<SecondaryChannel>,
-) {
+/// [`set_peer_espnow_phy`] with receive suspended during the driver call (C5-safe).
+pub fn apply_peer_espnow_phy(esp_now: &EspNow, peer: &[u8; 6], phy: PeerPhy) {
     with_espnow_recv_suspended(|| {
-        set_peer_espnow_phy(peer, rate, secondary);
+        set_peer_espnow_phy(esp_now, peer, phy);
     });
 }

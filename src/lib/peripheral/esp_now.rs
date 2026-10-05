@@ -21,7 +21,7 @@ use crate::STOP_SIGNAL;
 use crate::log_ln;
 use crate::parse_with_magic;
 use crate::serialize_with_magic;
-use crate::set_runtime_collection_mode;
+use crate::set_runtime_reporting;
 
 use crate::espnow_phy::{apply_peer_espnow_phy, with_espnow_recv_suspended};
 use embassy_futures::select::{Either, select};
@@ -212,12 +212,12 @@ fn unicast_replies(config: &EspNowConfig) -> bool {
     }
 }
 
-fn apply_central_peer_phy(config: &EspNowConfig, central_mac: &[u8; 6]) {
+fn apply_central_peer_phy(esp_now: &EspNow, config: &EspNowConfig, central_mac: &[u8; 6]) {
     if !config.force_phy() {
         return;
     }
     if unicast_replies(config) {
-        apply_peer_espnow_phy(central_mac, *config.phy_rate(), config.secondary_channel());
+        apply_peer_espnow_phy(esp_now, central_mac, config.peer_phy());
     }
 }
 
@@ -230,7 +230,7 @@ fn reply_destination(shared: &Shared, config: &EspNowConfig) -> [u8; 6] {
 }
 
 fn register_central_peer(
-    esp_now: &EspNow<'static>,
+    esp_now: &EspNow,
     channel: u8,
     config: &EspNowConfig,
     central_mac: [u8; 6],
@@ -249,7 +249,7 @@ fn register_central_peer(
 
     match add_res {
         Ok(()) => {
-            apply_central_peer_phy(config, &central_mac);
+            apply_central_peer_phy(esp_now, config, &central_mac);
             true
         }
         Err(_) => {
@@ -283,7 +283,7 @@ struct Shared {
 ///
 /// This takes `&EspNow` because it only needs peer-management helpers.
 fn ingest_control_packet(
-    esp_now: &EspNow<'static>,
+    esp_now: &EspNow,
     channel: u8,
     config: &EspNowConfig,
     r: PoolFrame,
@@ -324,6 +324,9 @@ fn ingest_control_packet(
         }
         return;
     };
+
+    // The CSI this control frame produces belongs to the central's sounding with this number.
+    crate::csi::session::set_sounding_instance(packet.sequence_number);
 
     #[cfg(feature = "statistics")]
     {
@@ -419,7 +422,7 @@ fn ingest_control_packet(
         if streak == MODE_SWITCH_HYSTERESIS && central_is_listener {
             // Central has consistently been a listener → switch peripheral to collector.
             if !shared.is_collector.load(Ordering::Relaxed) {
-                set_runtime_collection_mode(true);
+                set_runtime_reporting(crate::ReportingPolicy::Always);
                 shared.is_collector.store(true, Ordering::Relaxed);
             }
         }
@@ -433,7 +436,7 @@ fn ingest_control_packet(
 /// Configures the channel and starts the responder loop that listens for
 /// `ControlPacket`s from a Central node and reply with `PeripheralPacket`s.
 pub async fn run_esp_now_peripheral(
-    esp_now: &mut EspNow<'static>,
+    esp_now: &mut EspNow,
     config: &EspNowConfig,
     freq_hz: Option<u16>,
     io_tasks: IOTaskConfig,
@@ -450,11 +453,7 @@ pub async fn run_esp_now_peripheral(
     // HT40 applies forced PHY to the learned central unicast peer inside `responder`.
     #[cfg(not(feature = "esp32c5"))]
     if config.force_phy() && config.secondary_channel().is_none() {
-        crate::set_peer_espnow_phy(
-            &BROADCAST_ADDRESS,
-            *config.phy_rate(),
-            config.secondary_channel(),
-        );
+        crate::set_peer_espnow_phy(esp_now, &BROADCAST_ADDRESS, config.peer_phy());
     }
     log_ln!("esp-now version {}", esp_now.version().unwrap());
 
@@ -477,7 +476,7 @@ pub async fn run_esp_now_peripheral(
 ///
 /// RX and TX intentionally do not run concurrently in this mode.
 async fn responder(
-    esp_now: &mut EspNow<'static>,
+    esp_now: &mut EspNow,
     config: &EspNowConfig,
     frequency_hz: u64,
     io_tasks: IOTaskConfig,

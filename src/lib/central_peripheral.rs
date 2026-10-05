@@ -1,17 +1,13 @@
-//! [`EspNowConfig`], the configuration of both ESP-NOW operational modes, and the retired enums
-//! that used to wrap it.
+//! [`EspNowConfig`], the configuration of both ESP-NOW operational modes.
 //!
 //! `EspNowConfig` carries what the symmetric exchange ([`OperationalMode::EspNow`]) admits —
-//! channel, forced TX PHY, HT40, an explicit peer MAC, and the node's network role and collection
-//! mode — and is the inner config of both ends of the asymmetric one
+//! channel, forced TX PHY (HT20, HT40 or HE20), an explicit peer MAC, and the node's network role
+//! and reporting policy — and is the inner config of both ends of the asymmetric one
 //! ([`OperationalMode::EspNowSimplex`], built through [`SimplexConfig`]). What those attributes
 //! mean is in [`crate::model`].
 //!
-//! [`CentralOpMode`], [`PeripheralOpMode`] and [`Node`] are the pre-0.11 spelling of the same two
-//! modes, kept so callers written against 0.10 compile with warnings. They are deprecated and are
-//! removed in 0.12. That spelling also put the simplex ends on the wrong sides: the flooding end
-//! was a "peripheral" and the receive-only end a "central". `From<NodeRole> for OperationalMode`
-//! corrects the assignment for callers that have not migrated.
+//! The pre-0.11 `CentralOpMode`, `PeripheralOpMode` and `Node` enums that used to wrap this config
+//! were removed in 0.12.
 //!
 //! Station and access-point collection are not here: they live in [`crate::collector`], which
 //! [`crate::central`] re-exports rather than duplicates.
@@ -24,8 +20,6 @@
 // ESP-NOW peer rate, so the move is where it belongs.
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::SecondaryChannel;
-
-
 
 /// Configuration for the ESP-NOW operational modes.
 ///
@@ -53,13 +47,16 @@ pub struct EspNowConfig {
     /// the radio is left in its default state and ESP-NOW frames go out at the
     /// driver's default (legacy) PHY. Set by `with_phy_rate` / `with_ht40`.
     force_phy: bool,
+    /// Send forced MCS rates as HE20 instead of HT20. Set by `with_he20`.
+    he20: bool,
     /// Which end of the exchange this node is. ESP-NOW is the one mode that admits both, because
     /// the exchange is symmetric: the central originates the control traffic and the peripheral
     /// answers it, and either end can measure.
     network_role: crate::NetworkRole,
-    /// Whether this node reports the CSI it captures. A central announces its value on the wire so
-    /// a peripheral paired with a listening central can promote itself.
-    collection: crate::CollectionMode,
+    /// Whether, and how often, this node reports the CSI it captures. A central announces whether
+    /// it reports at all on the wire, so a peripheral paired with a silent central can promote
+    /// itself.
+    reporting: crate::ReportingPolicy,
 }
 
 impl Default for EspNowConfig {
@@ -74,8 +71,9 @@ impl Default for EspNowConfig {
             peer_mac: None,
             secondary_channel: None,
             force_phy: false,
+            he20: false,
             network_role: crate::NetworkRole::Central,
-            collection: crate::CollectionMode::Collector,
+            reporting: crate::ReportingPolicy::Always,
         }
     }
 }
@@ -155,6 +153,34 @@ impl EspNowConfig {
         self
     }
 
+    /// Send the forced MCS rate as HE20 (802.11ax SU, 20 MHz) instead of HT20, using the configured
+    /// [`with_phy_rate`] (default `RateMcs0Lgi`). Implies `force_phy` and overrides
+    /// [`with_ht40`]: HE20 is a 20 MHz PHY. Only the ESP32-C5 and ESP32-C6 have an 802.11ax PHY.
+    ///
+    /// [`with_phy_rate`]: EspNowConfig::with_phy_rate
+    /// [`with_ht40`]: EspNowConfig::with_ht40
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+    pub fn with_he20(mut self) -> Self {
+        self.he20 = true;
+        self.secondary_channel = None;
+        self.force_phy = true;
+        self
+    }
+
+    /// Whether forced MCS rates go out as HE20.
+    pub fn he20(&self) -> bool {
+        self.he20
+    }
+
+    /// The PHY this node forces on its ESP-NOW peers.
+    pub fn peer_phy(&self) -> crate::espnow_phy::PeerPhy {
+        crate::espnow_phy::PeerPhy {
+            rate: self.phy_rate,
+            secondary: self.secondary_channel,
+            he20: self.he20,
+        }
+    }
+
     /// Configured HT40 secondary channel, or `None` for HT20.
     pub fn secondary_channel(&self) -> Option<SecondaryChannel> {
         self.secondary_channel
@@ -176,11 +202,17 @@ impl EspNowConfig {
         self
     }
 
-    /// Set whether this node reports its CSI. Defaults to
-    /// [`Collector`](crate::CollectionMode::Collector).
-    pub fn with_collection_mode(mut self, mode: crate::CollectionMode) -> Self {
-        self.collection = mode;
+    /// Set whether, and how often, this node reports its CSI. Defaults to
+    /// [`Always`](crate::ReportingPolicy::Always).
+    pub fn with_reporting(mut self, policy: crate::ReportingPolicy) -> Self {
+        self.reporting = policy;
         self
+    }
+
+    /// The pre-0.12 name of [`with_reporting`](Self::with_reporting).
+    #[deprecated(since = "0.12.0", note = "renamed to `with_reporting`")]
+    pub fn with_collection_mode(self, policy: crate::ReportingPolicy) -> Self {
+        self.with_reporting(policy)
     }
 
     /// Which end of the exchange this node is.
@@ -188,75 +220,17 @@ impl EspNowConfig {
         self.network_role
     }
 
-    /// Whether this node reports the CSI it captures.
-    pub fn collection_mode(&self) -> crate::CollectionMode {
-        self.collection
+    /// Whether, and how often, this node reports the CSI it captures.
+    pub fn reporting(&self) -> crate::ReportingPolicy {
+        self.reporting
     }
 
-    /// In-place form of [`with_collection_mode`](Self::with_collection_mode). Exists for the
-    /// deprecated `CSINode::set_collection_mode` shim, which mutates a config it does not own;
-    /// `EspNowConfig` is deliberately not `Clone`, so the builder form cannot serve there.
-    pub(crate) fn set_collection_mode(&mut self, mode: crate::CollectionMode) {
-        self.collection = mode;
+    /// The pre-0.12 name of [`reporting`](Self::reporting).
+    #[deprecated(since = "0.12.0", note = "renamed to `reporting`")]
+    pub fn collection_mode(&self) -> crate::ReportingPolicy {
+        self.reporting
     }
 }
-/// The pre-0.11 "central" ESP-NOW modes.
-///
-/// **Deprecated in 0.11, removed in 0.12.** Use [`OperationalMode::EspNow`](crate::OperationalMode)
-/// with [`NetworkRole::Central`](crate::NetworkRole::Central) on the config, or
-/// [`SimplexConfig::peer`](crate::SimplexConfig::peer) for what was `EspNowFastCollector`. This
-/// spelling put the simplex ends the wrong way round: the receive-only end is a peripheral.
-#[deprecated(
-    since = "0.11.0",
-    note = "removed in 0.12; use `OperationalMode::EspNow` / `OperationalMode::EspNowSimplex`. \
-            This spelling put the simplex ends the wrong way round: `EspNowFastCollector` is the \
-            peripheral collector, `SimplexConfig::peer`"
-)]
-pub enum CentralOpMode {
-    /// The central end of the symmetric exchange. Now `OperationalMode::EspNow` with
-    /// `NetworkRole::Central`.
-    EspNow(EspNowConfig),
-    /// The receive-only simplex end. Now `SimplexConfig::peer`: a **peripheral** collector.
-    EspNowFastCollector(EspNowConfig),
-}
-
-/// The pre-0.11 "peripheral" ESP-NOW modes.
-///
-/// **Deprecated in 0.11, removed in 0.12.** Use [`OperationalMode::EspNow`](crate::OperationalMode)
-/// with [`NetworkRole::Peripheral`](crate::NetworkRole::Peripheral) on the config, or
-/// [`SimplexConfig::source`](crate::SimplexConfig::source) for what was `EspNowFastSource`. This
-/// spelling put the simplex ends the wrong way round: the flooding end is a central.
-#[deprecated(
-    since = "0.11.0",
-    note = "removed in 0.12; use `OperationalMode::EspNow` / `OperationalMode::EspNowSimplex`. \
-            This spelling put the simplex ends the wrong way round: `EspNowFastSource` is the \
-            central listener, `SimplexConfig::source`"
-)]
-pub enum PeripheralOpMode {
-    /// The peripheral end of the symmetric exchange. Now `OperationalMode::EspNow` with
-    /// `NetworkRole::Peripheral`.
-    EspNow(EspNowConfig),
-    /// The flooding simplex end. Now `SimplexConfig::source`: a **central** listener.
-    EspNowFastSource(EspNowConfig),
-}
-
-/// The pre-0.11 wrapper around [`CentralOpMode`] and [`PeripheralOpMode`]. Nothing in the crate
-/// consumes it.
-///
-/// **Deprecated in 0.11, removed in 0.12.** Use [`OperationalMode`](crate::OperationalMode).
-#[deprecated(
-    since = "0.11.0",
-    note = "removed in 0.12; use `OperationalMode`. This spelling put the simplex ends the wrong \
-            way round — see `esp_csi_rs::model`"
-)]
-#[allow(deprecated)]
-pub enum Node {
-    /// Run as the peripheral side of the chosen [`PeripheralOpMode`].
-    Peripheral(PeripheralOpMode),
-    /// Run as the central side of the chosen [`CentralOpMode`].
-    Central(CentralOpMode),
-}
-// `CollectionMode` moved to `crate::model`, where it sits beside the other three attributes of the
-// node model instead of beside the ESP-NOW transport that happens to put it on the wire. It is
-// re-exported from the crate root, so `esp_csi_rs::CollectionMode` is unchanged for callers.
-pub use crate::model::CollectionMode;
+// `ReportingPolicy` lives in `crate::model`, beside the other attributes of the node model instead of
+// beside the ESP-NOW transport that happens to put it on the wire.
+pub use crate::model::ReportingPolicy;

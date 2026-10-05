@@ -31,8 +31,8 @@ pub struct CsiConfig {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg(feature = "esp32c6")]
 pub struct CsiConfig {
-    /// Note: the default C6 config enables legacy/HT20/HT40 acquisition and ACK
-    /// dump. For HT40-only collection, set `acquire_csi_legacy = 0`,
+    /// Note: the default C6 config enables legacy/HT20/HT40/HE20 acquisition and ACK
+    /// dump (ESP-IDF's defaults). For HE20-only collection use [`CsiConfig::he20`]. For HT40-only collection, set `acquire_csi_legacy = 0`,
     /// `acquire_csi_ht20 = 0`, and `dump_ack_en = 0`.
     /// Enable to acquire CSI.
     pub enable: u32,
@@ -42,6 +42,17 @@ pub struct CsiConfig {
     pub acquire_csi_ht20: u32,
     /// Enable to acquire HT-LTF when receiving an HT40 PPDU.
     pub acquire_csi_ht40: u32,
+    /// Enable to acquire HE-LTF when receiving an HE20 SU PPDU.
+    pub acquire_csi_su: u32,
+    /// Enable to acquire HE-LTF when receiving an HE20 MU PPDU.
+    pub acquire_csi_mu: u32,
+    /// Enable to acquire HE-LTF when receiving an HE20 DCM-applied PPDU.
+    pub acquire_csi_dcm: u32,
+    /// Enable to acquire HE-LTF when receiving an HE20 beamformed PPDU.
+    pub acquire_csi_beamformed: u32,
+    /// HE-LTF acquisition for an STBC PPDU: 0 = HE-LTF1, 1 = HE-LTF2, 2 = sample
+    /// evenly across HE-LTF1 and HE-LTF2.
+    pub acquire_csi_he_stbc: u32,
     /// Value 0-3.
     pub val_scale_cfg: u32,
     /// Enable to dump 802.11 ACK frame, default disabled.
@@ -54,8 +65,8 @@ pub struct CsiConfig {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg(feature = "esp32c5")]
 pub struct CsiConfig {
-    /// Note: the default C5 config enables legacy/HT20/HT40 acquisition and ACK
-    /// dump. For HT40-only collection, set `acquire_csi_legacy = 0`,
+    /// Note: the default C5 config enables legacy/HT20/HT40/VHT/HE20 acquisition and
+    /// ACK dump (ESP-IDF's defaults). For HE20-only collection use [`CsiConfig::he20`]. For HT40-only collection, set `acquire_csi_legacy = 0`,
     /// `acquire_csi_ht20 = 0`, and `dump_ack_en = 0`.
     /// Enable to acquire CSI.
     pub enable: u32,
@@ -69,6 +80,17 @@ pub struct CsiConfig {
     pub acquire_csi_ht40: u32,
     /// Enable to acquire VHT-LTF when receiving a VHT20 PPDU.
     pub acquire_csi_vht: bool,
+    /// Enable to acquire HE-LTF when receiving an HE20 SU PPDU.
+    pub acquire_csi_su: u32,
+    /// Enable to acquire HE-LTF when receiving an HE20 MU PPDU.
+    pub acquire_csi_mu: u32,
+    /// Enable to acquire HE-LTF when receiving an HE20 DCM-applied PPDU.
+    pub acquire_csi_dcm: u32,
+    /// Enable to acquire HE-LTF when receiving an HE20 beamformed PPDU.
+    pub acquire_csi_beamformed: u32,
+    /// HE-LTF acquisition for an STBC PPDU: 0 = HE-LTF1, 1 = HE-LTF2, 2 = sample
+    /// evenly across HE-LTF1 and HE-LTF2.
+    pub acquire_csi_he_stbc: u32,
     /// Value 0-3.
     pub val_scale_cfg: u32,
     /// Enable to dump 802.11 ACK frame, default disabled.
@@ -108,6 +130,11 @@ impl Default for CsiConfig {
             acquire_csi_legacy: 1,
             acquire_csi_ht20: 1,
             acquire_csi_ht40: 1,
+            acquire_csi_su: 1,
+            acquire_csi_mu: 1,
+            acquire_csi_dcm: 1,
+            acquire_csi_beamformed: 1,
+            acquire_csi_he_stbc: 2,
             val_scale_cfg: 2,
             // Enabled by default in IDF profile; disable for HT40-only capture.
             dump_ack_en: 1,
@@ -124,10 +151,36 @@ impl Default for CsiConfig {
             acquire_csi_ht20: 1,
             acquire_csi_ht40: 1,
             acquire_csi_vht: true,
+            acquire_csi_su: 1,
+            acquire_csi_mu: 1,
+            acquire_csi_dcm: 1,
+            acquire_csi_beamformed: 1,
+            acquire_csi_he_stbc: 2,
             val_scale_cfg: 2,
             // Enabled by default in IDF profile; disable for HT40-only capture.
             dump_ack_en: 1,
             reserved: 0,
         }
+    }
+}
+
+#[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+impl CsiConfig {
+    /// HE20-only acquisition (ESP32-C5 / C6): HE-LTF from SU, MU, DCM and beamformed PPDUs,
+    /// with legacy, HT, VHT and ACK acquisition switched off so short legacy and ACK frames do not
+    /// dilute the stream. Pair with an [`EmitterPhy::He20`](crate::EmitterPhy) emitter or an
+    /// associated 802.11ax link to receive the full ~242-subcarrier estimate.
+    pub fn he20() -> Self {
+        let mut cfg = Self::default();
+        cfg.acquire_csi_legacy = 0;
+        cfg.acquire_csi_ht20 = 0;
+        cfg.acquire_csi_ht40 = 0;
+        cfg.dump_ack_en = 0;
+        #[cfg(feature = "esp32c5")]
+        {
+            cfg.acquire_csi_force_lltf = false;
+            cfg.acquire_csi_vht = false;
+        }
+        cfg
     }
 }

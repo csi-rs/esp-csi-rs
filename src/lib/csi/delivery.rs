@@ -14,38 +14,64 @@ use embassy_sync::waitqueue::AtomicWaker;
 #[cfg(feature = "statistics")]
 use embassy_time::Instant;
 use embassy_time::Timer;
-use heapless::Vec;
 use portable_atomic::{AtomicBool, Ordering};
 
 use esp_radio::wifi::WifiController;
 use esp_radio::wifi::csi::CsiConfig;
 
-use super::{CSIDataPacket, RxCSIFmt};
+use super::CsiPacket;
 use crate::STOP_SIGNAL;
 use crate::config::CsiConfig as CsiConfiguration;
 #[cfg(feature = "statistics")]
 use crate::stats::STATS;
-#[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
-use crate::stats::{MAX_TRACKED_PEERS, RESET_SEQ_TRACKER, seq_drop_detection_enabled};
-#[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
-use heapless::LinearMap;
+#[cfg(feature = "statistics")]
+use crate::stats::{RESET_SEQ_TRACKER, record_loss, seq_drop_detection_enabled};
 
 /// Lock-free 32-slot MPMC ring used by the WiFi callback to deliver
-/// captured `CSIDataPacket`s to user code via
+/// captured `CsiPacket`s to user code via
 /// [`CSINodeClient::next_csi_packet`]. The producer is the WiFi-task
 /// callback, the consumer is one async task, and the queue is
 /// **lock-free** — no critical section on enqueue, so the WiFi-task
 /// hot path is never delayed.
 ///
-/// 32 × `sizeof(CSIDataPacket)` ≈ 20 KB BSS. Drop-on-full; drops are
-/// counted via `STATS.rx_drop_count`.
-static CSI_QUEUE: heapless::mpmc::Q32<CSIDataPacket> = heapless::mpmc::Q32::new();
+/// 32 × `sizeof(CsiPacket)` ≈ 23 KB BSS. What happens when it is full is the
+/// [`OverflowPolicy`]; either way the drop is counted as `queue_full`.
+static CSI_QUEUE: heapless::mpmc::Q32<CsiPacket> = heapless::mpmc::Q32::new();
+/// What the async queue does with a new measurement when it is full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum OverflowPolicy {
+    /// Keep what is queued and drop the new measurement (the default). The consumer sees an
+    /// unbroken run of older frames, then a gap.
+    DropNewest,
+    /// Drop the oldest queued measurement to make room. The consumer always sees the most recent
+    /// frames, which is what a live display or a threshold detector wants.
+    DropOldest,
+}
+
+static OVERFLOW_DROP_OLDEST: AtomicBool = AtomicBool::new(false);
+
+/// Choose what the async queue ([`CSINodeClient::next_csi_packet`]) does when it is full.
+pub fn set_csi_queue_overflow(policy: OverflowPolicy) {
+    OVERFLOW_DROP_OLDEST.store(policy == OverflowPolicy::DropOldest, Ordering::Relaxed);
+}
+
+/// The async queue's overflow policy.
+pub fn csi_queue_overflow() -> OverflowPolicy {
+    if OVERFLOW_DROP_OLDEST.load(Ordering::Relaxed) {
+        OverflowPolicy::DropOldest
+    } else {
+        OverflowPolicy::DropNewest
+    }
+}
+
 /// Single-slot waker for the CSI consumer. Registered by
 /// [`CSINodeClient::next_csi_packet`] and woken from the WiFi callback
 /// after a successful `CSI_QUEUE.enqueue`.
 static CSI_WAKER: AtomicWaker = AtomicWaker::new();
 
-/// Whether this node's collection mode currently in force is `Collector`.
+/// Whether the reporting policy currently in force reports at all (anything but `Never`).
 ///
 /// Set from the configured mode at the start of every run, and moved mid-run in one case only: a
 /// peripheral of the symmetric ESP-NOW exchange that hears a listening central promotes itself to
@@ -53,11 +79,11 @@ static CSI_WAKER: AtomicWaker = AtomicWaker::new();
 ///
 /// Deliberately NOT the same gate as `CSI_PUBLISH_ENABLED`. That one decides whether the WiFi
 /// callback builds a packet at all; this one drives the ESP-NOW responder/initiator behaviour.
-/// Conflating them silently breaks sniffer + Listener setups, where the user wants a passive node
+/// Conflating them silently breaks passive setups, where the user wants a node
 /// that still reads CSI.
 pub(crate) static IS_COLLECTOR: AtomicBool = AtomicBool::new(false);
 
-/// Signalled whenever [`set_runtime_collection_mode`] changes the gate, so an ESP-NOW task waiting
+/// Signalled whenever [`set_runtime_reporting`] changes the gate, so an ESP-NOW task waiting
 /// on a mode change wakes immediately instead of polling.
 pub(crate) static COLLECTION_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
@@ -73,7 +99,7 @@ pub(crate) static CSI_OUTPUT_ENABLED: AtomicBool = AtomicBool::new(true);
 static USER_PUBLISH_INTENT: AtomicBool = AtomicBool::new(false);
 
 // CSI publish gate. The WiFi callback checks this in a single relaxed load to decide whether to
-// build and emit a CSIDataPacket. It is a cached AND of the three inputs above, recomputed by
+// build and emit a CsiPacket. It is a cached AND of the three inputs above, recomputed by
 // `apply_publish_gate` whenever one of them moves — the hot path must not pay for three loads and
 // two branches per frame on `riscv32imc`.
 static CSI_PUBLISH_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -86,7 +112,7 @@ pub(crate) static CSI_OUTPUT_CHANGED: Signal<CriticalSectionRawMutex, ()> = Sign
 /// pay only for what they asked for:
 /// - `Off`: nothing past the publish gate (apart from seq-drop tracking).
 /// - `Callback`: dispatch to the `fn` stored in `CSI_CALLBACK` with a
-///   `&CSIDataPacket` borrow. Lowest latency, runs on the WiFi-task
+///   `&CsiPacket` borrow. Lowest latency, runs on the WiFi-task
 ///   hot path. **Picked by [`set_csi_callback`].**
 /// - `Async`: move the packet into the lock-free `CSI_QUEUE` and wake
 ///   the consumer registered via `CSI_WAKER`. Doesn't block the WiFi
@@ -124,7 +150,7 @@ static CSI_CALLBACK: core::sync::atomic::AtomicPtr<()> =
 
 /// Raw CSI fast-path callback registered via [`set_csi_raw_callback`]. When
 /// non-null, `capture_csi_info` invokes it and returns **before** building the
-/// ~640 B [`CSIDataPacket`] — the cheapest possible delivery path, used by the
+/// ~640 B [`CsiPacket`] — the cheapest possible delivery path, used by the
 /// CPU-comparison DUT to match the ESP-IDF reference's do-nothing `csi_cb`.
 /// Checked before [`CSI_DELIVERY_MODE`], so it overrides callback/async/off.
 static CSI_RAW_CALLBACK: core::sync::atomic::AtomicPtr<()> =
@@ -202,7 +228,7 @@ pub fn csi_delivery_mode() -> CsiDeliveryMode {
 /// Register a user callback invoked inline for every captured CSI packet.
 ///
 /// The callback runs in the WiFi task context (the same context that
-/// formats and writes CSI lines), with a borrow of the [`CSIDataPacket`]
+/// formats and writes CSI lines), with a borrow of the [`CsiPacket`]
 /// *before* it is consumed by the logging path. This is the supported
 /// path for **on-device CSI processing** — zero channel hops, lowest
 /// possible latency.
@@ -221,7 +247,7 @@ pub fn csi_delivery_mode() -> CsiDeliveryMode {
 ///
 /// Call [`clear_csi_callback`] to remove the hook and return to
 /// [`CsiDeliveryMode::Off`].
-pub fn set_csi_callback(cb: fn(&CSIDataPacket)) {
+pub fn set_csi_callback(cb: fn(&CsiPacket)) {
     // Store the fn pointer first so the WiFi callback never sees the
     // mode flipped to `Callback` while `CSI_CALLBACK` is still null.
     CSI_CALLBACK.store(cb as *mut (), core::sync::atomic::Ordering::Release);
@@ -245,7 +271,7 @@ pub fn clear_csi_callback() {
 /// Register a **raw** CSI fast-path callback (CPU-benchmark use).
 ///
 /// Unlike [`set_csi_callback`], the WiFi callback invokes `cb` and returns
-/// immediately, **without** building a [`CSIDataPacket`] — so the per-frame
+/// immediately, **without** building a [`CsiPacket`] — so the per-frame
 /// CSI cost is just the callback dispatch, matching the ESP-IDF reference's
 /// self-timing `csi_cb`. Intended for the like-for-like CPU comparison DUT;
 /// the callback receives no CSI data (it cannot, by design — that is the cost
@@ -356,7 +382,7 @@ pub fn csi_min_sig_mode() -> u8 {
 
 /// Whether a frame passes the attribution filters, judged from the raw `WifiCsiInfo`.
 ///
-/// Deliberately reads `info` rather than a built `CSIDataPacket`: both fields are available on the
+/// Deliberately reads `info` rather than a built `CsiPacket`: both fields are available on the
 /// raw callback argument, so a rejected frame costs one MAC compare instead of a 612-byte copy plus
 /// a format pass. On the classic MACs `packet_mode()` is the `sig_mode` field; on C5/C6 there is no
 /// such field, so the PHY half of the filter is a no-op there and only the MAC filter applies.
@@ -380,27 +406,38 @@ fn csi_passes_filter(info: &esp_radio::wifi::csi::WifiCsiInfo<'_>) -> bool {
     true
 }
 
-/// The collection mode currently **in force**, which is not always the one that was configured.
+/// The reporting policy currently **in force**, which is not always the one that was configured.
 ///
-/// A peripheral that hears a listening central promotes itself to
-/// [`CollectionMode::Collector`](crate::CollectionMode) mid-run so the pair still produces a
+/// A peripheral that hears a central reporting [`Never`](crate::ReportingPolicy::Never) promotes
+/// itself to [`Always`](crate::ReportingPolicy::Always) mid-run so the pair still produces a
 /// dataset. That promotion moves this value and deliberately does not rewrite the node's
-/// configuration, so [`CSINode::collection_mode`](crate::CSINode::collection_mode) keeps reporting
-/// what you asked for while this reports what is happening.
+/// configuration, so [`CSINode::reporting`](crate::CSINode::reporting) keeps reporting what you
+/// asked for while this reports what is happening.
 ///
-/// The gate is process-wide and is reset between runs, so before the first
-/// [`CSINode::run`](crate::CSINode::run) it reads `Listener` regardless of how the node was built.
+/// The policy is process-wide and is reset between runs, so before the first
+/// [`CSINode::run`](crate::CSINode::run) it reads `Never` regardless of how the node was built.
 /// Ask the node, not this function, if you want the configured value.
-pub fn runtime_collection_mode() -> crate::CollectionMode {
-    if IS_COLLECTOR.load(Ordering::Relaxed) {
-        crate::CollectionMode::Collector
-    } else {
-        crate::CollectionMode::Listener
+pub fn runtime_reporting() -> crate::ReportingPolicy {
+    match POLICY_KIND.load(Ordering::Relaxed) {
+        POLICY_ALWAYS => crate::ReportingPolicy::Always,
+        POLICY_THRESHOLD => crate::ReportingPolicy::Threshold(crate::Threshold {
+            level: POLICY_A.load(Ordering::Relaxed),
+            hold_ms: POLICY_B.load(Ordering::Relaxed),
+            variation_only: POLICY_VARIATION.load(Ordering::Relaxed),
+        }),
+        POLICY_DECIMATE => crate::ReportingPolicy::Decimate(POLICY_A.load(Ordering::Relaxed)),
+        _ => crate::ReportingPolicy::Never,
     }
 }
 
-/// Recompute the publish gate from its three inputs: a consumer is installed, the node is a
-/// collector, and output has not been switched off at runtime.
+/// The pre-0.12 name of [`runtime_reporting`].
+#[deprecated(since = "0.12.0", note = "renamed to `runtime_reporting`")]
+pub fn runtime_collection_mode() -> crate::ReportingPolicy {
+    runtime_reporting()
+}
+
+/// Recompute the publish gate from its three inputs: a consumer is installed, the node reports,
+/// and output has not been switched off at runtime.
 ///
 /// Called from every writer of those three rather than read three times per frame, because this is
 /// the gate the Wi-Fi callback loads on the hot path for every captured frame.
@@ -411,34 +448,128 @@ fn apply_publish_gate() {
     CSI_PUBLISH_ENABLED.store(open, Ordering::Release);
 }
 
-/// Change collection mode at runtime — e.g. a central signalling a peripheral to start or stop.
+const POLICY_NEVER: u8 = 0;
+const POLICY_ALWAYS: u8 = 1;
+const POLICY_THRESHOLD: u8 = 2;
+const POLICY_DECIMATE: u8 = 3;
+
+/// The policy in force, decomposed into atomics the CSI callback can read without a lock:
+/// its kind, `level` / decimation factor, `hold_ms`, and `variation_only`.
+static POLICY_KIND: portable_atomic::AtomicU8 = portable_atomic::AtomicU8::new(POLICY_NEVER);
+static POLICY_A: portable_atomic::AtomicU16 = portable_atomic::AtomicU16::new(0);
+static POLICY_B: portable_atomic::AtomicU16 = portable_atomic::AtomicU16::new(0);
+static POLICY_VARIATION: AtomicBool = AtomicBool::new(false);
+/// Set by every policy change; the callback resets its threshold/decimation state on seeing it.
+static POLICY_RESET: AtomicBool = AtomicBool::new(false);
+
+/// Change the reporting policy at runtime — e.g. a central signalling a peripheral to start or
+/// stop.
 ///
-/// Reopening the gate here is not optional. A peripheral paired with a listening central promotes
-/// itself to collector mid-run; without this the promoted node would capture in silence for the
-/// rest of the run, which is the failure the `Listener` gate is most likely to introduce.
-pub(crate) fn set_runtime_collection_mode(is_collector: bool) {
-    IS_COLLECTOR.store(is_collector, Ordering::Relaxed);
+/// Reopening the gate here is not optional. A peripheral paired with a silent central promotes
+/// itself mid-run; without this the promoted node would capture in silence for the rest of the
+/// run, which is the failure a `Never` gate is most likely to introduce.
+pub(crate) fn set_runtime_reporting(policy: crate::ReportingPolicy) {
+    let (kind, a, b, var) = match policy {
+        crate::ReportingPolicy::Always => (POLICY_ALWAYS, 0, 0, false),
+        crate::ReportingPolicy::Never => (POLICY_NEVER, 0, 0, false),
+        crate::ReportingPolicy::Threshold(t) => (POLICY_THRESHOLD, t.level, t.hold_ms, t.variation_only),
+        crate::ReportingPolicy::Decimate(n) => (POLICY_DECIMATE, n.max(1), 0, false),
+    };
+    POLICY_A.store(a, Ordering::Relaxed);
+    POLICY_B.store(b, Ordering::Relaxed);
+    POLICY_VARIATION.store(var, Ordering::Relaxed);
+    POLICY_RESET.store(true, Ordering::Relaxed);
+    POLICY_KIND.store(kind, Ordering::Release);
+    IS_COLLECTOR.store(policy.reports(), Ordering::Relaxed);
     apply_publish_gate();
     COLLECTION_MODE_CHANGED.signal(());
 }
 
-/// Set the collection mode from outside the crate, for a node that owns the radio directly.
+/// Set the reporting policy from outside the crate, for a node that owns the radio directly.
 ///
 /// `CSINode::run` does this for every mode it dispatches, but an out-of-tree node that drives the
-/// radio itself never passes through it, and the gate it sets is process-wide. A board left
-/// as a `Listener` by one run therefore stayed one across every later run that did not set it,
-/// capturing normally and delivering nothing until a reboot. Nothing upstream reports that: the
+/// radio itself never passes through it, and the policy it sets is process-wide. A board left
+/// reporting `Never` by one run therefore stayed silent across every later run that did not set
+/// it, capturing normally and delivering nothing until a reboot. Nothing upstream reports that: the
 /// capture counters climb, and the silence looks like a radio problem.
 ///
-/// So any node that bypasses `CSINode::run` must state its collection mode here. A mode that fixes
-/// the attribute states the fixed value — a node that only measures is a collector, an emitter a
-/// listener — rather than leaving the previous run's choice in place.
+/// So any node that bypasses `CSINode::run` must state its policy here. A mode that fixes the
+/// attribute states the fixed value — a node that only measures reports, an emitter does not —
+/// rather than leaving the previous run's choice in place.
 ///
-/// This is the collection mode, not the runtime output toggle: [`set_csi_output_enabled`] is the
+/// This is the reporting policy, not the runtime output toggle: [`set_csi_output_enabled`] is the
 /// separate user override, and delivery needs both. Nodes built with [`CSINode`](crate::CSINode)
-/// set the collection mode on their mode's config instead.
-pub fn set_collection_mode(mode: crate::CollectionMode) {
-    set_runtime_collection_mode(matches!(mode, crate::CollectionMode::Collector));
+/// set the policy on their mode's config instead.
+pub fn set_reporting(policy: crate::ReportingPolicy) {
+    set_runtime_reporting(policy);
+}
+
+/// The pre-0.12 name of [`set_reporting`].
+#[deprecated(since = "0.12.0", note = "renamed to `set_reporting`")]
+pub fn set_collection_mode(policy: crate::ReportingPolicy) {
+    set_runtime_reporting(policy);
+}
+
+/// Whether delivery is open at all: a consumer is installed, the node reports, output is on.
+pub(crate) fn publish_open() -> bool {
+    CSI_PUBLISH_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Apply the reporting policy to a measurement from any source. Threshold scoring needs a raw
+/// estimate, so a payload without one passes a threshold policy unscored.
+pub(crate) fn policy_admits_frame(frame: &mut crate::wire::CsiFrame) -> bool {
+    let kind = POLICY_KIND.load(Ordering::Relaxed);
+    if kind == POLICY_ALWAYS {
+        return true;
+    }
+    let buf: &[i8] = match &frame.payload {
+        crate::wire::CsiPayload::EspRaw { bytes, .. } => bytes,
+        _ if kind == POLICY_THRESHOLD => return true,
+        _ => &[],
+    };
+    let (keep, score) = policy_admits(buf, embassy_time::Instant::now().as_micros());
+    if !keep {
+        #[cfg(feature = "statistics")]
+        STATS.rx_policy_suppressed.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    if kind == POLICY_THRESHOLD && POLICY_VARIATION.load(Ordering::Relaxed) {
+        frame.payload = crate::wire::CsiPayload::Variation { value: score };
+    }
+    true
+}
+
+/// Apply the threshold / decimation policy to a captured buffer. `true` means deliver; for a
+/// threshold policy the score is returned too, for a variation-only report.
+///
+/// Runs in the CSI callback, its only caller, which is what makes the `static mut` state safe.
+#[inline]
+fn policy_admits(buf: &[i8], now_us: u64) -> (bool, u16) {
+    use super::policy::{Decimator, ThresholdState};
+    static mut THRESHOLD: ThresholdState = ThresholdState::new();
+    static mut DECIMATOR: Decimator = Decimator::new();
+    #[allow(static_mut_refs)]
+    // SAFETY: only the CSI callback calls this, and it does not re-enter.
+    unsafe {
+        if POLICY_RESET.swap(false, Ordering::Relaxed) {
+            THRESHOLD.reset();
+            DECIMATOR.reset();
+        }
+        match POLICY_KIND.load(Ordering::Relaxed) {
+            POLICY_THRESHOLD => {
+                let score = THRESHOLD.score(buf);
+                let keep = THRESHOLD.decide(
+                    score,
+                    POLICY_A.load(Ordering::Relaxed),
+                    POLICY_B.load(Ordering::Relaxed),
+                    now_us,
+                );
+                (keep, score)
+            }
+            POLICY_DECIMATE => (DECIMATOR.tick(POLICY_A.load(Ordering::Relaxed)), 0),
+            _ => (true, 0),
+        }
+    }
 }
 
 /// Reset the CSI delivery gates. Called by `reset_globals` between runs.
@@ -502,7 +633,7 @@ impl CSINodeClient {
     /// Awaiting `next_csi_packet` from two different tasks at once will
     /// cause one of them to miss wake-ups — register exactly one
     /// drainer task per node.
-    pub async fn next_csi_packet(&mut self) -> CSIDataPacket {
+    pub async fn next_csi_packet(&mut self) -> CsiPacket {
         // Conservative lazy init: only flip into `Async` mode if no
         // delivery path is currently active (`Off`). If the user has
         // already set `Callback` mode, we don't disrupt it — the
@@ -534,7 +665,7 @@ impl CSINodeClient {
 
     /// Back-compat alias for [`Self::next_csi_packet`]. Older code paths
     /// referred to this name.
-    pub async fn get_csi_data(&mut self) -> CSIDataPacket {
+    pub async fn get_csi_data(&mut self) -> CsiPacket {
         self.next_csi_packet().await
     }
 
@@ -571,13 +702,11 @@ pub(crate) fn build_csi_config(csi_config: &CsiConfiguration) -> CsiConfig {
         acquire_csi_ht20: csi_config.acquire_csi_ht20,
         acquire_csi_ht40: csi_config.acquire_csi_ht40,
         acquire_csi_vht: csi_config.acquire_csi_vht,
-        // Extended-acquisition modes default off; a radio profile may enable
-        // them via `RadioProfile::tune_csi_acquisition`.
-        acquire_csi_su: 0,
-        acquire_csi_mu: 0,
-        acquire_csi_dcm: 0,
-        acquire_csi_beamformed: 0,
-        acquire_csi_he_stbc: 0,
+        acquire_csi_su: csi_config.acquire_csi_su,
+        acquire_csi_mu: csi_config.acquire_csi_mu,
+        acquire_csi_dcm: csi_config.acquire_csi_dcm,
+        acquire_csi_beamformed: csi_config.acquire_csi_beamformed,
+        acquire_csi_he_stbc: csi_config.acquire_csi_he_stbc,
         val_scale_cfg: csi_config.val_scale_cfg,
         dump_ack_en: csi_config.dump_ack_en,
         reserved: csi_config.reserved,
@@ -591,13 +720,11 @@ pub(crate) fn build_csi_config(csi_config: &CsiConfiguration) -> CsiConfig {
         acquire_csi_legacy: csi_config.acquire_csi_legacy,
         acquire_csi_ht20: csi_config.acquire_csi_ht20,
         acquire_csi_ht40: csi_config.acquire_csi_ht40,
-        // Extended-acquisition modes default off; a radio profile may enable
-        // them via `RadioProfile::tune_csi_acquisition`.
-        acquire_csi_su: 0,
-        acquire_csi_mu: 0,
-        acquire_csi_dcm: 0,
-        acquire_csi_beamformed: 0,
-        acquire_csi_he_stbc: 0,
+        acquire_csi_su: csi_config.acquire_csi_su,
+        acquire_csi_mu: csi_config.acquire_csi_mu,
+        acquire_csi_dcm: csi_config.acquire_csi_dcm,
+        acquire_csi_beamformed: csi_config.acquire_csi_beamformed,
+        acquire_csi_he_stbc: csi_config.acquire_csi_he_stbc,
         val_scale_cfg: csi_config.val_scale_cfg,
         dump_ack_en: csi_config.dump_ack_en,
         reserved: csi_config.reserved,
@@ -628,93 +755,6 @@ pub(crate) fn set_csi(controller: &mut WifiController, config: CsiConfig) {
         .unwrap();
 }
 
-impl CSIDataPacket {
-    /// Build a `CSIDataPacket` from a raw `WifiCsiInfo`, copying the CSI byte
-    /// buffer and classifying the format via [`Self::csi_fmt_from_params`].
-    ///
-    /// Returns `None` if the CSI payload exceeds the fixed 612-byte capacity;
-    /// the caller does its own drop accounting. This is the single source of
-    /// truth for the `WifiCsiInfo` → `CSIDataPacket` mapping, shared by the
-    /// normal CSI callback (`capture_csi_info`) and any out-of-tree collector
-    /// that owns the radio directly, so both emit byte-identical frames.
-    pub fn from_wifi_csi_info(info: &esp_radio::wifi::csi::WifiCsiInfo<'_>) -> Option<Self> {
-        let mut csi_data = Vec::<i8, 612>::new();
-        let csi_slice = info.buf();
-        let csi_buf_len = csi_slice.len() as u16;
-        csi_data.extend_from_slice(csi_slice).ok()?;
-
-        let mac_arr = *info.mac();
-        let timestamp_us = info.timestamp().duration_since_epoch().as_micros() as u32;
-
-        #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
-        let mut csi_packet = CSIDataPacket {
-            sequence_number: info.rx_sequence(),
-            data_format: RxCSIFmt::Undefined,
-            date_time: None,
-            mac: mac_arr,
-            rssi: info.rssi() as i32,
-            bandwidth: info.cwb() as u32,
-            antenna: info.antenna() as u32,
-            rate: info.rate() as u32,
-            sig_mode: info.packet_mode() as u32,
-            mcs: info.modulation_coding_scheme() as u32,
-            smoothing: info.smoothing() as u32,
-            not_sounding: info.not_sounding() as u32,
-            aggregation: info.aggregation() as u32,
-            stbc: info.space_time_block_code() as u32,
-            fec_coding: info.forward_error_correction_coding() as u32,
-            sgi: info.short_guide_interval() as u32,
-            noise_floor: info.noise_floor() as i32,
-            ampdu_cnt: info.ampdu_count() as u32,
-            channel: info.channel() as u32,
-            secondary_channel: info.secondary_channel() as u32,
-            timestamp: timestamp_us,
-            rx_state: info.rx_state() as u32,
-            sig_len: info.signal_length() as u32,
-            csi_data_len: csi_buf_len,
-            csi_data,
-        };
-
-        #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
-        let mut csi_packet = CSIDataPacket {
-            mac: mac_arr,
-            rssi: info.rssi() as i32,
-            timestamp: timestamp_us,
-            rate: info.rate() as u32,
-            noise_floor: info.noise_floor() as i32,
-            sig_len: info.signal_length() as u32,
-            rx_state: info.rx_state() as u32,
-            dump_len: info.dump_length(),
-            #[cfg(feature = "esp32c6")]
-            sigb_len: info.he_sigb_length() as u32,
-            #[cfg(feature = "esp32c6")]
-            cur_single_mpdu: info.cur_single_mpdu() as u32,
-            cur_bb_format: info.cur_bb_format() as u32,
-            rx_channel_estimate_info_vld: info.rx_channel_estimate_info_valid() as u32,
-            rx_channel_estimate_len: info.rx_channel_estimate_length(),
-            second: info.secondary_channel() as u32,
-            channel: info.channel() as u32,
-            is_group: info.is_group() as u32,
-            rxend_state: info.rx_end_state() as u32,
-            rxmatch3: info.rx_match3() as u32,
-            rxmatch2: info.rx_match2() as u32,
-            rxmatch1: info.rx_match1() as u32,
-            #[cfg(feature = "esp32c6")]
-            rxmatch0: info.rx_match0() as u32,
-            date_time: None,
-            sequence_number: info.rx_sequence(),
-            data_format: RxCSIFmt::Undefined,
-            csi_data_len: csi_buf_len,
-            csi_data,
-        };
-
-        // Classify the frame format from captured metadata so consumers can tell
-        // a high-resolution capture from a fallback frame.
-        csi_packet.csi_fmt_from_params();
-        Some(csi_packet)
-    }
-}
-
 // Function to capture CSI info from callback and publish to channel
 fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
     // Count every CSI report regardless of mode so `rx_count` / `rx_rate_hz`
@@ -730,7 +770,7 @@ fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
     crate::stats::record_cur_bb_format(info.cur_bb_format() as u32);
 
     // Raw fast-path (CPU-benchmark DUT): if a raw callback is registered,
-    // invoke it and return before the ~640 B CSIDataPacket build. This makes
+    // invoke it and return before the ~640 B CsiPacket build. This makes
     // the per-frame CSI cost just the callback dispatch — the fair match to
     // the ESP-IDF reference's do-nothing `csi_cb`. See `set_csi_raw_callback`.
     let raw_cb_ptr = CSI_RAW_CALLBACK.load(Ordering::Relaxed);
@@ -742,7 +782,7 @@ fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
 
     // Single-atomic fast path: returns immediately when no consumer is
     // installed (no logger, callback, or CSINodeClient subscriber). Building the
-    // CSIDataPacket and calling publish_immediate acquires CriticalSectionRawMutex
+    // CsiPacket and calling publish_immediate acquires CriticalSectionRawMutex
     // and on `riscv32imc` every other atomic op also takes a critical section,
     // so additional gate atomics in the hot ISR path delay the Embassy timer ISR.
     if !CSI_PUBLISH_ENABLED.load(Ordering::Relaxed) {
@@ -755,56 +795,63 @@ fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
     // against delivered rows needs that difference to be visible rather than unexplained.
     if !csi_passes_filter(&info) {
         #[cfg(feature = "statistics")]
-        STATS.rx_drop_count.fetch_add(1, Ordering::Relaxed);
+        STATS.rx_filtered.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    // Reporting policy (threshold / decimation), judged on the raw buffer so a suppressed frame
+    // costs no packet build. `Always` returns at the first branch.
+    let (admitted, score) = if POLICY_KIND.load(Ordering::Relaxed) == POLICY_ALWAYS {
+        (true, 0)
+    } else {
+        policy_admits(info.buf(), embassy_time::Instant::now().as_micros())
+    };
+    if !admitted {
+        #[cfg(feature = "statistics")]
+        STATS.rx_policy_suppressed.fetch_add(1, Ordering::Relaxed);
         return;
     }
 
     // No CS-locked early-drop pre-check: the lock-free `CSI_QUEUE`
     // returns `Err` from `enqueue` when full, so we do drop accounting at
-    // the enqueue site below. The 640 B `CSIDataPacket` build still has
+    // the enqueue site below. The 640 B `CsiPacket` build still has
     // to run unconditionally — there's no cheaper way to know if the
     // packet is interesting until it's parsed.
 
     // Build the packet (copies the CSI buffer, classifies the format). `None`
     // means the payload overflowed the 612-byte cap — do drop accounting here.
-    let csi_packet = match CSIDataPacket::from_wifi_csi_info(&info) {
+    #[allow(unused_mut)]
+    let mut csi_packet = match CsiPacket::from_wifi_csi_info(&info) {
         Some(p) => p,
         None => {
             #[cfg(feature = "statistics")]
-            STATS.rx_drop_count.fetch_add(1, Ordering::Relaxed);
+            record_loss(&STATS.rx_oversize, 1);
             return;
         }
     };
-
-    #[cfg(all(feature = "statistics", not(feature = "esp32c5")))]
-    #[allow(static_mut_refs)] // single writer (WiFi callback) by construction
+    if POLICY_VARIATION.load(Ordering::Relaxed)
+        && POLICY_KIND.load(Ordering::Relaxed) == POLICY_THRESHOLD
     {
-        if seq_drop_detection_enabled() {
-            static mut PEER_SEQ_TRACKER: LinearMap<[u8; 6], u16, MAX_TRACKED_PEERS> =
-                LinearMap::new();
-            unsafe {
-                if RESET_SEQ_TRACKER.swap(false, Ordering::Relaxed) {
-                    PEER_SEQ_TRACKER.clear();
-                }
-                let current_seq = csi_packet.sequence_number;
-                if let Some(&last_seq) = PEER_SEQ_TRACKER.get(&csi_packet.mac) {
-                    let diff = (current_seq.wrapping_sub(last_seq)) & 0x0FFF;
-                    if diff > 1 {
-                        let lost = (diff - 1) as u32;
-                        if lost < 500 {
-                            STATS.rx_drop_count.fetch_add(lost, Ordering::Relaxed);
-                        }
-                    }
-                }
-                if PEER_SEQ_TRACKER
-                    .insert(csi_packet.mac, current_seq)
-                    .is_err()
-                {
-                    PEER_SEQ_TRACKER.clear();
-                    let _ = PEER_SEQ_TRACKER.insert(csi_packet.mac, current_seq);
-                }
-            }
-        }
+        csi_packet.frame.payload = crate::wire::CsiPayload::Variation { value: score };
+    }
+
+    deliver(csi_packet);
+}
+
+/// The source-independent half of delivery: per-transmitter statistics, then exactly one of the
+/// callback / async queue / inline-log paths. Every measurement source ends here — the ESP vendor
+/// callback above, and anything pushed through [`emit`](crate::csi::source::emit).
+pub(crate) fn deliver(csi_packet: CsiPacket) {
+    // Per-transmitter accounting and on-air loss. The C5's receive sequence number is not usable
+    // for gap counting, so it is recorded without one there.
+    #[cfg(feature = "statistics")]
+    if seq_drop_detection_enabled() {
+        #[cfg(not(feature = "esp32c5"))]
+        let seq = csi_packet.frame.meta.frame_seq;
+        #[cfg(feature = "esp32c5")]
+        let seq = None;
+        let retry = csi_packet.frame.header.map(|h| h.is_retry());
+        crate::stats::record_tx_frame(csi_packet.mac(), seq, retry);
     }
 
     // Single-atomic delivery dispatch. One relaxed load, one branch.
@@ -813,11 +860,11 @@ fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
     // the same packet. See `CsiDeliveryMode` for semantics.
     match CSI_DELIVERY_MODE.load(Ordering::Relaxed) {
         m if m == CsiDeliveryMode::Callback as u8 => {
-            // Inline callback: zero-copy `&CSIDataPacket` borrow.
+            // Inline callback: zero-copy `&CsiPacket` borrow.
             let cb_ptr = CSI_CALLBACK.load(core::sync::atomic::Ordering::Relaxed);
             if !cb_ptr.is_null() {
-                let cb: fn(&CSIDataPacket) =
-                    unsafe { core::mem::transmute::<*mut (), fn(&CSIDataPacket)>(cb_ptr) };
+                let cb: fn(&CsiPacket) =
+                    unsafe { core::mem::transmute::<*mut (), fn(&CsiPacket)>(cb_ptr) };
                 cb(&csi_packet);
             }
             return;
@@ -826,11 +873,21 @@ fn capture_csi_info(info: esp_radio::wifi::csi::WifiCsiInfo<'_>) {
             // Lock-free MPMC enqueue + wake. No critical section, no
             // IRQ disable — the WiFi-task hot path is never blocked by
             // the user's async drainer.
-            if CSI_QUEUE.enqueue(csi_packet).is_err() {
-                #[cfg(feature = "statistics")]
-                STATS.rx_drop_count.fetch_add(1, Ordering::Relaxed);
-            } else {
-                CSI_WAKER.wake();
+            match CSI_QUEUE.enqueue(csi_packet) {
+                Ok(()) => CSI_WAKER.wake(),
+                Err(packet) => {
+                    #[cfg(feature = "statistics")]
+                    record_loss(&STATS.rx_queue_full, 1);
+                    // Make room by discarding the oldest frame. If the consumer drained a slot in
+                    // the meantime the retry simply succeeds; if it still fails the new frame is
+                    // the one lost, and it was already counted.
+                    if OVERFLOW_DROP_OLDEST.load(Ordering::Relaxed) {
+                        let _ = CSI_QUEUE.dequeue();
+                        if CSI_QUEUE.enqueue(packet).is_ok() {
+                            CSI_WAKER.wake();
+                        }
+                    }
+                }
             }
             return;
         }
@@ -890,7 +947,6 @@ pub async fn run_process_csi_packet() {
                     last_rate_update = Instant::now();
                     last_rx_count = STATS.rx_count.load(Ordering::Relaxed);
                     last_tx_count = STATS.tx_count.load(Ordering::Relaxed);
-                    #[cfg(not(feature = "esp32c5"))]
                     RESET_SEQ_TRACKER.store(true, Ordering::Relaxed);
                 }
             }

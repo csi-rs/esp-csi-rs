@@ -30,7 +30,7 @@ use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, CollectionMode, EspNowConfig, NetworkRole, NodeHardware,
+    CSINode, CSINodeClient, ReportingPolicy, EspNowConfig, NetworkRole, NodeHardware,
     config::CsiConfig, install_static_espnow_recv, log_ln, set_csi_logging_enabled,
 };
 #[cfg(feature = "statistics")]
@@ -237,12 +237,10 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 60000);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+    let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
 
     install_static_espnow_recv();
@@ -251,7 +249,7 @@ async fn main(spawner: Spawner) -> ! {
     log_ln!("ESP-NOW bench — channel {}", CHANNEL);
 
     let mut node_handle = CSINodeClient::new();
-    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
+    let csi_hardware = NodeHardware::new(controller);
     let mut node = CSINode::esp_now(
         EspNowConfig::default()
             .with_channel(CHANNEL)
@@ -259,7 +257,7 @@ async fn main(spawner: Spawner) -> ! {
             .with_network_role(NETWORK_ROLE)
             // Acquisition cost without delivery cost. This is what the retired
             // `set_csi_output_enabled(false)` was reaching for.
-            .with_collection_mode(CollectionMode::Listener),
+            .with_reporting(ReportingPolicy::Never),
         Some(CsiConfig::default()),
         Some(TRAFFIC_HZ),
         csi_hardware,

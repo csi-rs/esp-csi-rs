@@ -4,7 +4,7 @@
 //! |---|---|
 //! | Operational mode | Wi-Fi station |
 //! | Network role | `NETWORK_ROLE` below — both are meaningful |
-//! | Collection mode | `COLLECTION_MODE` below — both are meaningful |
+//! | Reporting policy | `REPORTING` below — `Always`, `Never`, `Threshold` or `Decimate` |
 //! | Session role | Responder |
 //!
 //! A station is **central** when the uplink it generates is the traffic being measured — the usual
@@ -24,10 +24,10 @@
 
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
-use esp_csi_rs::csi::CSIDataPacket;
+use esp_csi_rs::csi::CsiPacket;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CollectionMode, NetworkRole, NodeHardware, WifiStationConfig, config::CsiConfig,
+    CSINode, ReportingPolicy, NetworkRole, NodeHardware, WifiStationConfig, config::CsiConfig,
     log_ln, set_csi_callback,
 };
 use esp_hal::clock::CpuClock;
@@ -50,7 +50,7 @@ const NETWORK_ROLE: NetworkRole = NetworkRole::Central;
 
 /// `Listener` keeps the link busy without reporting anything — useful when the AP is the collector
 /// and you want this node's delivery cost out of the measurement.
-const COLLECTION_MODE: CollectionMode = CollectionMode::Collector;
+const REPORTING: ReportingPolicy = ReportingPolicy::Always;
 
 /// Gateway ping rate (Hz) — the uplink an AP collector measures. Set `None` for a peripheral that
 /// generates no traffic of its own.
@@ -69,8 +69,8 @@ esp_bootloader_esp_idf::esp_app_desc!();
 static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
 static CSI_PKT_COUNT: AtomicU32 = AtomicU32::new(0);
 
-fn on_csi(packet: &CSIDataPacket) {
-    LATEST_RSSI.store(packet.rssi as i32, Ordering::Relaxed);
+fn on_csi(packet: &CsiPacket) {
+    LATEST_RSSI.store(packet.rssi() as i32, Ordering::Relaxed);
     CSI_PKT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -95,30 +95,28 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+    let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
     let _ = controller.set_power_saving(PowerSaveMode::None);
 
     let client_config = StationConfig::default()
-        .with_ssid(SSID)
-        .with_auth_method(esp_radio::wifi::AuthenticationMethod::None);
+        .with_ssid(SSID.try_into().expect("SSID longer than 32 bytes"))
+        .with_authentication(esp_radio::wifi::AuthenticationMethodConfig::Open);
 
     let mut station_config = WifiStationConfig::new(client_config)
         .with_network_role(NETWORK_ROLE)
-        .with_collection_mode(COLLECTION_MODE);
+        .with_reporting(REPORTING);
     if let Some(channel) = CHANNEL_HINT {
         station_config = station_config.with_channel_hint(channel);
     }
 
     log_ln!("Starting station on SSID {}", SSID);
 
-    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
+    let csi_hardware = NodeHardware::new(controller);
     let mut node = CSINode::station(
         station_config,
         Some(CsiConfig::default()),

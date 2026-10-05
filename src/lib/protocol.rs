@@ -16,8 +16,7 @@ pub(crate) static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
 /// In auto-pairing mode the serialized frame is prefixed with a 4-byte
 /// little-endian magic (see `serialize_with_magic` / `parse_with_magic`);
 /// in manual-pairing mode no magic is sent and the source-MAC filter is the
-/// discriminator. Both nodes must agree on the pairing mode (and on the
-/// `statistics` feature, which gates `sequence_number`) for frames to parse.
+/// discriminator. Both nodes must agree on the pairing mode for frames to parse.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ControlPacket {
     /// Whether the central's collection mode is currently
@@ -25,19 +24,20 @@ pub struct ControlPacket {
     /// promotes itself to collector so the pair still produces a dataset; a collecting central
     /// leaves the peripheral's own collection mode alone.
     pub is_collector: bool,
-    /// Monotonic sequence number used to detect drops/reordering. Only present
-    /// when the `statistics` feature is enabled, to keep the frame small.
-    #[cfg(feature = "statistics")]
+    /// Monotonic sounding counter. It numbers the central's soundings, which is what a measurement
+    /// frame's `Stimulus::Controlled { instance_id }` is taken from, and lets a peripheral detect
+    /// dropped or reordered control frames.
+    ///
+    /// Before 0.12 the field existed only under the `statistics` feature, so two nodes built with
+    /// different feature sets could not parse each other's frames.
     pub sequence_number: u32,
 }
 
 impl ControlPacket {
-    /// Create a new control packet with the collector flag (and, under the
-    /// `statistics` feature, a sequence number).
-    pub fn new(is_collector: bool, #[cfg(feature = "statistics")] sequence_number: u32) -> Self {
+    /// Create a new control packet with the collector flag and sounding counter.
+    pub fn new(is_collector: bool, sequence_number: u32) -> Self {
         Self {
             is_collector,
-            #[cfg(feature = "statistics")]
             sequence_number,
         }
     }
@@ -87,6 +87,21 @@ pub(crate) fn serialize_with_magic<'a, T: Serialize>(
         let len = body.len();
         Ok(&buf[..len])
     }
+}
+
+/// The sounding number of a central's control frame, found in a received frame's payload.
+///
+/// Called from the CSI callback, so the measurement of a control frame is labelled with that
+/// frame's own number instead of whichever one the ESP-NOW task processed last — the CSI callback
+/// fires before the ESP-NOW receive path has run. Finds the magic prefix anywhere in the payload
+/// (the ESP-NOW vendor element sits a few bytes into the action frame), so it only works in
+/// auto-pairing mode; manual pairing sends no magic and returns `None`.
+pub(crate) fn control_sequence_in(payload: &[u8]) -> Option<u32> {
+    let magic = CENTRAL_MAGIC_NUMBER.to_le_bytes();
+    let at = payload.windows(4).position(|w| w == magic)?;
+    postcard::take_from_bytes::<ControlPacket>(&payload[at + 4..])
+        .ok()
+        .map(|(p, _)| p.sequence_number)
 }
 
 /// Parse a frame produced by [`serialize_with_magic`]. When `expect_magic` is

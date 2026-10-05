@@ -37,7 +37,7 @@ const BEACON_BUF_LEN: usize = 16;
 
 /// Run the simplex peer end: sparse beacon → detect source → RX-only.
 pub async fn run_esp_now_fast_collector(
-    esp_now: &mut EspNow<'static>,
+    esp_now: &mut EspNow,
     config: &EspNowConfig,
     io_tasks: IOTaskConfig,
 ) {
@@ -56,7 +56,6 @@ pub async fn run_esp_now_fast_collector(
     // PHY wedges C5, and sparse beacons are rate-insensitive).
     log_ln!("esp-now version {}", esp_now.version().unwrap());
 
-    #[cfg(feature = "statistics")]
     let mut beacon_seq: u32 = 0;
     let mut tx_buf = [0u8; BEACON_BUF_LEN];
 
@@ -69,22 +68,16 @@ pub async fn run_esp_now_fast_collector(
         let mut beacon_at = Instant::now();
         loop {
             if io_tasks.tx_enabled && Instant::now() >= beacon_at {
-                let pkt = ControlPacket::new(
-                    true,
-                    #[cfg(feature = "statistics")]
-                    beacon_seq,
-                );
+                let pkt = ControlPacket::new(true, beacon_seq);
                 if let Ok(msg) =
                     serialize_with_magic(&pkt, CENTRAL_MAGIC_NUMBER, send_magic, &mut tx_buf)
                 {
                     // One send in flight, awaited to completion (driver has a
                     // single global completion flag).
                     let _ = esp_now.send_async(&BROADCAST_ADDRESS, msg).await;
+                    beacon_seq = beacon_seq.wrapping_add(1);
                     #[cfg(feature = "statistics")]
-                    {
-                        STATS.tx_count.fetch_add(1, Ordering::Relaxed);
-                        beacon_seq = beacon_seq.wrapping_add(1);
-                    }
+                    STATS.tx_count.fetch_add(1, Ordering::Relaxed);
                 }
                 beacon_at = Instant::now() + BEACON_PERIOD;
             }

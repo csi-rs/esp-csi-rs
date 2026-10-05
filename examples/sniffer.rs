@@ -32,7 +32,7 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::config::CsiConfig;
-use esp_csi_rs::csi::CSIDataPacket;
+use esp_csi_rs::csi::CsiPacket;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{CSINode, CSINodeClient, NodeHardware, WifiSnifferConfig, log_ln, set_csi_callback};
 use esp_hal::clock::CpuClock;
@@ -66,23 +66,23 @@ static SOURCES: Mutex<
     core::cell::RefCell<heapless::Vec<SourceTally, MAX_SOURCES>>,
 > = Mutex::new(core::cell::RefCell::new(heapless::Vec::new()));
 
-fn on_csi(packet: &CSIDataPacket) {
+fn on_csi(packet: &CsiPacket) {
     // Two `i8` samples per subcarrier, so this is the width of the capture.
     SUBCARRIERS.store(
-        (packet.csi_data_len / 2) as u32,
+        packet.subcarriers() as u32,
         core::sync::atomic::Ordering::Relaxed,
     );
     SOURCES.lock(|cell| {
         let mut list = cell.borrow_mut();
-        if let Some(entry) = list.iter_mut().find(|e| e.mac == packet.mac) {
+        if let Some(entry) = list.iter_mut().find(|e| e.mac == packet.mac()) {
             entry.count += 1;
-            entry.rssi = packet.rssi;
+            entry.rssi = packet.rssi() as i32;
             return;
         }
         let _ = list.push(SourceTally {
-            mac: packet.mac,
+            mac: packet.mac(),
             count: 1,
-            rssi: packet.rssi,
+            rssi: packet.rssi() as i32,
         });
     });
 }
@@ -136,19 +136,17 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+    let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     log_ln!("Starting sniffer (peripheral collector) on channel {}", CHANNEL);
 
     let mut node_handle = CSINodeClient::new();
-    let hardware = NodeHardware::new(&mut interfaces, controller);
+    let hardware = NodeHardware::new(controller);
     let mut node = CSINode::sniffer(
         WifiSnifferConfig::default().with_channel(CHANNEL),
         Some(CsiConfig::default()),
