@@ -24,7 +24,7 @@ pub const PROBE_FRAME_LEN: usize = 24 + 8;
 ///
 /// No DS bits are set, so the address layout is Addr1 = destination, Addr2 =
 /// source (the transmitter address a receiver's CSI callback reports as
-/// [`crate::csi::CSIDataPacket::mac`]), Addr3 = BSSID. Give each emitter a
+/// [`crate::csi::CsiPacket::mac`]), Addr3 = BSSID. Give each emitter a
 /// distinct `src_mac` — its own interface MAC is the obvious choice — and a
 /// single collector can separate emitters by that field.
 ///
@@ -62,7 +62,7 @@ pub fn build_probe_frame(src_mac: &[u8; 6], dst_mac: &[u8; 6], buf: &mut [u8]) -
 /// association required. `use_sta_if` selects the STA (`true`) or AP (`false`)
 /// interface and must match the interface the forced rate was applied to.
 pub fn inject_probe_once(
-    sniffer: &mut Sniffer<'_>,
+    sniffer: &mut Sniffer,
     use_sta_if: bool,
     frame: &[u8],
 ) -> Result<(), WifiError> {

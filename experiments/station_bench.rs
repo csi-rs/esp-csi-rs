@@ -21,7 +21,7 @@ use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, CollectionMode, NodeHardware, WifiStationConfig, config::CsiConfig,
+    CSINode, CSINodeClient, ReportingPolicy, NodeHardware, WifiStationConfig, config::CsiConfig,
     log_ln, set_csi_logging_enabled,
 };
 #[cfg(feature = "statistics")]
@@ -91,27 +91,25 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 60000);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+    let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
     let _ = controller.set_power_saving(PowerSaveMode::None);
 
     let client_config = StationConfig::default()
-        .with_ssid(SSID)
-        .with_auth_method(esp_radio::wifi::AuthenticationMethod::None);
+        .with_ssid(SSID.try_into().expect("SSID longer than 32 bytes"))
+        .with_authentication(esp_radio::wifi::AuthenticationMethodConfig::Open);
 
     log_ln!("Station bench — SSID {}", SSID);
 
     let mut node_handle = CSINodeClient::new();
-    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
+    let csi_hardware = NodeHardware::new(controller);
     let mut node = CSINode::station(
         // Acquisition cost without delivery cost.
-        WifiStationConfig::new(client_config).with_collection_mode(CollectionMode::Listener),
+        WifiStationConfig::new(client_config).with_reporting(ReportingPolicy::Never),
         Some(CsiConfig::default()),
         Some(PING_RATE_HZ),
         csi_hardware,

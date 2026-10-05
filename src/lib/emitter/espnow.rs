@@ -74,7 +74,7 @@ fn force_peer_ht(peer: &[u8; 6], forty: bool) -> i32 {
 /// a stopped interface, and `add_peer` rejects a Station-interface peer outright.
 pub fn bringup(
     controller: &mut WifiController<'_>,
-    esp_now: &EspNow<'_>,
+    esp_now: &EspNow,
     dst: &[u8; 6],
     channel: u8,
     forty: bool,
@@ -127,7 +127,7 @@ pub fn bringup(
 /// nothing, which is why this goes through the future rather than the raw symbol.
 ///
 /// `Pending` after that first poll is the success case: the frame is queued and in flight.
-pub fn send_once(esp_now: &mut EspNow<'_>, dst: &[u8; 6], payload: &[u8]) -> bool {
+pub fn send_once(esp_now: &mut EspNow, dst: &[u8; 6], payload: &[u8]) -> bool {
     use core::future::Future;
     use core::task::{Context, Poll, Waker};
 

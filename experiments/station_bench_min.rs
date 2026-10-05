@@ -3,7 +3,7 @@
 //! Binary-footprint counterpart to `station_bench`: identical platform
 //! boilerplate and a raw STA bring-up (config + associate at the controller
 //! level), but **without** the `CSINode` state machine, the embassy-net/smoltcp
-//! IP stack, DHCP, `sta_network_ops`, `set_csi`, or `CSIDataPacket` pipeline that
+//! IP stack, DHCP, `sta_network_ops`, `set_csi`, or `CsiPacket` pipeline that
 //! the full station mode pulls in. `full − min` exposes that whole stack; the
 //! per-library breakdown attributes it (smoltcp / embassy-net / esp_csi_rs).
 //! Built and measured, not run (Test 3).
@@ -13,7 +13,6 @@
 #![no_std]
 #![no_main]
 
-use crate::alloc::string::ToString;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::log_ln;
@@ -43,23 +42,27 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     log_ln!("Footprint min: Wi-Fi STA platform floor (no CSINode / net stack)");
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, _interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, config_radio).expect("Wi-Fi init failed");
+    let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio).expect("Wi-Fi init failed");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
+    // Claim the same radio handles `NodeHardware::new` claims, so the footprint difference
+    // against the full harness is only the CSINode machinery.
+    let _station = esp_radio::wifi::Interface::station();
+    let _access_point = esp_radio::wifi::Interface::access_point();
+    let _sniffer = controller.sniffer();
+    let _esp_now = controller.esp_now();
 
     // Raw STA bring-up: configure + associate at the controller level. No
     // embassy-net/smoltcp/DHCP, no CSINode — those are what `full − min` reveals.
     let client_config = StationConfig::default()
-        .with_ssid(WIFI_SSID)
-        .with_password(WIFI_PASS.to_string())
-        .with_auth_method(esp_radio::wifi::AuthenticationMethod::Wpa2Personal);
+        .with_ssid(WIFI_SSID.try_into().expect("SSID longer than 32 bytes"))
+        .with_authentication(esp_radio::wifi::AuthenticationMethodConfig::Wpa2Personal(
+            WIFI_PASS.try_into().expect("password longer than 64 bytes"),
+        ));
     let _ = controller.set_config(&Config::Station(client_config));
     let _ = controller.connect_async().await;
 

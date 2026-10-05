@@ -29,7 +29,8 @@
 //!
 //! ## Bandwidth
 //!
-//! [`HtBandwidth`] is plain 802.11n and works on every supported chip. HT40 needs room in the band:
+//! [`EmitterPhy`]'s HT20/HT40 are plain 802.11n and work on every supported chip; `EmitterPhy::He20`
+//! (802.11ax) needs an ESP32-C5 or C6, and its collectors should use `CsiConfig::he20()`. HT40 needs room in the band:
 //! `Ht40Above` on channel 7 occupies up to channel 11 and `Ht40Below` occupies down to channel 3, so
 //! a primary too close to the edge silently falls back. Confirm it engaged at the *collector*, not
 //! here: a subcarrier count >= 100 (commonly ~117) is HT40, ~53/~56 means fallback.
@@ -44,7 +45,7 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
-use esp_csi_rs::{CSINode, EmitterConfig, HtBandwidth, NodeHardware, log_ln};
+use esp_csi_rs::{CSINode, EmitterConfig, EmitterPhy, NodeHardware, log_ln};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -58,7 +59,7 @@ extern crate alloc;
 const CHANNEL: u8 = 7;
 
 /// `Ht20`, `Ht40Above` or `Ht40Below`. HT40 roughly doubles the subcarriers.
-const BANDWIDTH: HtBandwidth = HtBandwidth::Ht20;
+const PHY: EmitterPhy = EmitterPhy::Ht20;
 
 /// Delay between injected frames. 20 ms is ~50 frames/s.
 const PERIOD: Duration = Duration::from_millis(20);
@@ -83,16 +84,14 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+    let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    let mut emitter = EmitterConfig::new(CHANNEL, BANDWIDTH).with_period(PERIOD);
+    let mut emitter = EmitterConfig::new(CHANNEL, PHY).with_period(PERIOD);
     if let Some(mac) = DST_MAC {
         emitter = emitter.with_dst_mac(mac);
     }
@@ -103,7 +102,7 @@ async fn main(spawner: Spawner) -> ! {
         PERIOD.as_millis()
     );
 
-    let hardware = NodeHardware::new(&mut interfaces, controller);
+    let hardware = NodeHardware::new(controller);
     let mut node = CSINode::emitter(emitter, hardware);
 
     let started = Instant::now();

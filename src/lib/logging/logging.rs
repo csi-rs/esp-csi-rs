@@ -22,7 +22,6 @@ use esp_hal::peripherals::Peripherals;
 #[cfg(any(feature = "async-print", feature = "auto"))]
 use heapless::String;
 use portable_atomic::{AtomicBool, AtomicU8, Ordering};
-use postcard::experimental::max_size::MaxSize;
 
 #[cfg(all(
     feature = "defmt",
@@ -56,7 +55,7 @@ const UART_LOG_BAUDRATE: u32 = parse_u32(env!("UART_LOG_BAUDRATE"));
     any(feature = "async-print", feature = "auto")
 ))]
 mod csi_interface {
-    use crate::csi::CSIDataPacket;
+    use crate::csi::CsiPacket;
     use crate::logging::logging::CSI_LOG_CHANNEL_CAPACITY;
     use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
     #[cfg(feature = "statistics")]
@@ -65,7 +64,7 @@ mod csi_interface {
     /// async drainer task (consumer) on the async-print path.
     pub static CSI_CHANNEL: Channel<
         CriticalSectionRawMutex,
-        CSIDataPacket,
+        CsiPacket,
         CSI_LOG_CHANNEL_CAPACITY,
     > = Channel::new();
     /// Counter incremented when the WiFi callback fails to enqueue a CSI
@@ -437,7 +436,7 @@ mod logging_impl {
     #[cfg(any(feature = "uart", feature = "auto"))]
     use esp_hal::uart::{Config, Uart};
     #[cfg(all(any(feature = "jtag-serial", feature = "auto"), not(feature = "esp32")))]
-    use esp_hal::usb_serial_jtag::UsbSerialJtag;
+    use esp_hal::usb::usb_serial_jtag::UsbSerialJtag;
 
     #[cfg(any(feature = "uart", feature = "auto"))]
     use crate::logging::logging::UART_LOG_BAUDRATE;
@@ -674,12 +673,13 @@ macro_rules! log_raw {
     }};
 }
 
-use crate::csi::CSIDataPacket;
+use crate::csi::CsiPacket;
+use crate::csi::text_row::TextRow;
 
 /// Log a CSI packet according to the selected `LogMode`.
 ///
 /// In async mode this enqueues the packet; otherwise it prints immediately.
-pub fn log_csi(packet: CSIDataPacket) {
+pub fn log_csi(packet: CsiPacket) {
     #[cfg(any(feature = "async-print", feature = "auto"))]
     {
         if is_async_logging_active() {
@@ -869,37 +869,45 @@ pub fn set_log_mode(log_mode: LogMode) {
     ESP_CSI_TOOL_HEADER_PRINTED.store(false, Ordering::Relaxed);
 }
 
-#[cfg(any(feature = "async-print", feature = "auto"))]
-async fn write_serialized_packet_async(
-    packet: CSIDataPacket,
-    driver: &mut LogOutput,
-) -> Result<(), ()> {
-    const PACKET_MAX_SIZE: usize = CSIDataPacket::POSTCARD_MAX_SIZE;
-    const PACKET_BUF_SIZE: usize = PACKET_MAX_SIZE + (PACKET_MAX_SIZE / 254) + 1;
+/// Encode a packet as the wire contract's frames: the session announcement first when the packet
+/// carries one, then the measurement. Both share the packet's envelope. Calls `emit` per frame.
+#[cfg(any(not(feature = "async-print"), feature = "auto"))]
+fn encode_packet_frames(packet: CsiPacket, mut emit: impl FnMut(&[u8])) {
+    use crate::wire::{Body, MAX_ENCODED_LEN, encode_cobs};
+    let mut buf = [0u8; MAX_ENCODED_LEN];
+    if let Some(info) = packet.session
+        && let Ok(frame) = encode_cobs(&packet.envelope, &Body::Session(info), &mut buf)
+    {
+        emit(frame);
+    }
+    if let Ok(frame) = encode_cobs(&packet.envelope, &Body::Csi(packet.frame), &mut buf) {
+        emit(frame);
+    }
+}
 
-    let mut buf = [0u8; PACKET_BUF_SIZE];
-    match postcard::to_slice_cobs(&packet, &mut buf) {
-        Ok(cobs_slice) => match driver.write(cobs_slice).await {
-            Ok(_) => Ok(()),
-            Err(_) => Err(()),
-        },
+#[cfg(any(feature = "async-print", feature = "auto"))]
+async fn write_serialized_packet_async(packet: CsiPacket, driver: &mut LogOutput) -> Result<(), ()> {
+    use crate::wire::{Body, MAX_ENCODED_LEN, encode_cobs};
+    let mut buf = [0u8; MAX_ENCODED_LEN];
+    if let Some(info) = packet.session
+        && let Ok(frame) = encode_cobs(&packet.envelope, &Body::Session(info), &mut buf)
+    {
+        driver.write(frame).await.map_err(|_| ())?;
+    }
+    match encode_cobs(&packet.envelope, &Body::Csi(packet.frame), &mut buf) {
+        Ok(frame) => driver.write(frame).await.map(|_| ()).map_err(|_| ()),
         Err(_) => Err(()),
     }
 }
 
 #[cfg(any(not(feature = "async-print"), feature = "auto"))]
-fn write_serialized_packet_sync(packet: CSIDataPacket) {
-    const PACKET_MAX_SIZE: usize = CSIDataPacket::POSTCARD_MAX_SIZE;
-    const PACKET_BUF_SIZE: usize = PACKET_MAX_SIZE + (PACKET_MAX_SIZE / 254) + 1;
-
-    let mut buf = [0u8; PACKET_BUF_SIZE];
-    if let Ok(cobs_slice) = postcard::to_slice_cobs(&packet, &mut buf) {
-        let _ = cobs_slice;
+fn write_serialized_packet_sync(packet: CsiPacket) {
+    encode_packet_frames(packet, |frame| {
         #[cfg(not(feature = "defmt"))]
-        log_raw!(cobs_slice);
+        log_raw!(frame);
         #[cfg(feature = "defmt")]
-        defmt::println!("{=[u8]}", cobs_slice);
-    }
+        defmt::println!("{=[u8]}", frame);
+    });
 }
 
 /// Shared single-line scratch for the async formatters. Only the
@@ -913,7 +921,7 @@ static mut ASYNC_LOG_SCRATCH: [u8; 3328] = [0u8; 3328];
 
 #[cfg(any(feature = "async-print", feature = "auto"))]
 async fn write_text_array_packet_async(
-    packet: CSIDataPacket,
+    packet: CsiPacket,
     driver: &mut LogOutput,
 ) -> Result<(), ()> {
     // Format the whole line into the shared scratch, then emit it in a single
@@ -923,7 +931,7 @@ async fn write_text_array_packet_async(
     // `format_array_list_into` is shared with the sync path, so the bytes are
     // identical across transports and modes.
     let scratch = unsafe { &mut *core::ptr::addr_of_mut!(ASYNC_LOG_SCRATCH) };
-    let n = format_array_list_into(&packet, scratch);
+    let n = format_array_list_into(&TextRow::new(&packet), scratch);
     // `0` means the formatter refused the line rather than truncate it (see
     // `format_array_list_into`). Count it as a log drop and emit nothing — a partial row is worse
     // than a missing one, because a host cannot tell it from real data.
@@ -990,7 +998,7 @@ fn defmt_emit_line(bytes: &[u8]) {
 /// `docs/logging_formats_spec.md` §3. Shared by every emit path — sync
 /// (`println` / `defmt`) and the async drainer alike — so the on-wire content
 /// is byte-identical across transports and write modes.
-fn format_array_list_into(packet: &CSIDataPacket, buf: &mut [u8]) -> usize {
+fn format_array_list_into(packet: &TextRow<'_>, buf: &mut [u8]) -> usize {
     use core::fmt::Write as _;
     let mut w = SliceWriter { buf, pos: 0 };
     macro_rules! field {
@@ -1109,13 +1117,13 @@ fn format_array_list_into(packet: &CSIDataPacket, buf: &mut [u8]) -> usize {
 }
 
 #[cfg(any(not(feature = "async-print"), feature = "auto"))]
-fn write_text_array_packet_sync(packet: CSIDataPacket) {
+fn write_text_array_packet_sync(packet: CsiPacket) {
     // Single-consumer scratch: the sync write path runs only from the WiFi
     // callback (`node_task`), one packet at a time. A static avoids putting a
     // multi-KB buffer on the callback stack.
     static mut SCRATCH: [u8; 3328] = [0u8; 3328];
     let scratch = unsafe { &mut *core::ptr::addr_of_mut!(SCRATCH) };
-    let _n = format_array_list_into(&packet, scratch);
+    let _n = format_array_list_into(&TextRow::new(&packet), scratch);
     // See the async path: `0` is a refused line, not an empty one.
     if _n == 0 {
         record_log_drop();
@@ -1268,7 +1276,7 @@ fn write_slice(buf: &mut [u8], pos: &mut usize, s: &[u8]) {
 ///
 /// Worst-case line: 200 prefix + 612 i8 × 5 + 2 trailer = ~3060 B.
 /// Caller must pass a buffer of at least that size.
-fn format_csi_tool_into(packet: &CSIDataPacket, buf: &mut [u8]) -> usize {
+fn format_csi_tool_into(packet: &TextRow<'_>, buf: &mut [u8]) -> usize {
     let role = Role::from(ROLE.load(Ordering::Relaxed)).as_str();
     let real_time_set: u8 = if packet.date_time.is_some() { 1 } else { 0 };
     let real_secs = packet.timestamp / 1_000_000;
@@ -1421,7 +1429,7 @@ fn format_csi_tool_into(packet: &CSIDataPacket, buf: &mut [u8]) -> usize {
 
 #[cfg(any(feature = "async-print", feature = "auto"))]
 async fn write_csi_tool_packet_async(
-    packet: CSIDataPacket,
+    packet: CsiPacket,
     driver: &mut LogOutput,
 ) -> Result<(), ()> {
     if !ESP_CSI_TOOL_HEADER_PRINTED.swap(true, Ordering::Relaxed) {
@@ -1435,7 +1443,7 @@ async fn write_csi_tool_packet_async(
     // `logger_backend` calls this fn, one packet at a time, so no concurrent
     // access with the other async formatters.
     let scratch = unsafe { &mut *core::ptr::addr_of_mut!(ASYNC_LOG_SCRATCH) };
-    let n = format_csi_tool_into(&packet, scratch);
+    let n = format_csi_tool_into(&TextRow::new(&packet), scratch);
     driver.write(&scratch[..n]).await.map_err(|_| ())?;
     Ok(())
 }
@@ -1523,7 +1531,7 @@ pub static SYNC_WRITE_US: portable_atomic::AtomicU64 = portable_atomic::AtomicU6
 pub static SYNC_PKT_COUNT: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
 
 #[cfg(any(not(feature = "async-print"), feature = "auto"))]
-fn write_csi_tool_packet_sync(packet: CSIDataPacket) {
+fn write_csi_tool_packet_sync(packet: CsiPacket) {
     // Format + spin UART0 directly in the WiFi callback context. This is the
     // hot path that achieves baud-bound PPS — moving the spin out to a
     // separate embassy task introduces wake/schedule latency between lines
@@ -1556,7 +1564,7 @@ fn write_csi_tool_packet_sync(packet: CSIDataPacket) {
     }
 
     let t0 = embassy_time::Instant::now();
-    let _n = format_csi_tool_into(&packet, scratch);
+    let _n = format_csi_tool_into(&TextRow::new(&packet), scratch);
     let t1 = embassy_time::Instant::now();
 
     #[cfg(feature = "defmt")]
@@ -1580,7 +1588,9 @@ fn write_csi_tool_packet_sync(packet: CSIDataPacket) {
 }
 
 #[cfg(any(feature = "async-print", feature = "auto"))]
-async fn write_text_packet_async(packet: CSIDataPacket, driver: &mut LogOutput) -> Result<(), ()> {
+async fn write_text_packet_async(packet: CsiPacket, driver: &mut LogOutput) -> Result<(), ()> {
+    let row = TextRow::new(&packet);
+    let packet = &row;
     use core::fmt::Write as FmtWrite;
 
     // Build the whole metadata block into the shared scratch and emit it in a
@@ -1712,7 +1722,9 @@ async fn write_text_packet_async(packet: CSIDataPacket, driver: &mut LogOutput) 
 }
 
 #[cfg(any(not(feature = "async-print"), feature = "auto"))]
-fn write_text_packet_sync(packet: CSIDataPacket) {
+fn write_text_packet_sync(packet: CsiPacket) {
+    let row = TextRow::new(&packet);
+    let packet = &row;
     if let Some(dt) = &packet.date_time {
         log_ln!(
             "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
@@ -1792,7 +1804,7 @@ fn write_text_packet_sync(packet: CSIDataPacket) {
     #[cfg(not(feature = "defmt"))]
     log_ln!("csi raw data: [{:X?}]", packet.csi_data);
     #[cfg(feature = "defmt")]
-    log_ln!("csi raw data: [{=[?]}]", packet.csi_data.as_slice());
+    log_ln!("csi raw data: [{=[?]}]", packet.csi_data);
 }
 
 #[cfg(all(

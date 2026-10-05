@@ -35,7 +35,9 @@ use embassy_time::{Duration, Timer};
 
 use esp_radio::wifi::ap::AccessPointConfig;
 use esp_radio::wifi::sta::StationConfig;
-use esp_radio::wifi::{Config, Interfaces, SecondaryChannel, WifiController};
+use esp_radio::wifi::{Config, SecondaryChannel, WifiController};
+
+use crate::radio::RadioInterfaces;
 
 use crate::radio::apply_band_for_channel;
 use crate::{STOP_SIGNAL, log_ln};
@@ -54,29 +56,62 @@ const CPU_TEST_MAX_FRAME_LEN: usize = 1500;
 #[cfg(feature = "cpu-test-tx")]
 const _: () = assert!(CPU_TEST_MAX_FRAME_LEN >= PROBE_FRAME_LEN);
 
-/// Bandwidth and secondary-channel selection for an emitter.
+/// The TX PHY an emitter forces: format, bandwidth and secondary channel.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum HtBandwidth {
-    /// HT20 — 20 MHz, no secondary channel.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum EmitterPhy {
+    /// HT20 (802.11n) — 20 MHz, no secondary channel.
     Ht20,
-    /// HT40 — 40 MHz with the secondary channel above the primary.
+    /// HT40 (802.11n) — 40 MHz with the secondary channel above the primary.
     Ht40Above,
-    /// HT40 — 40 MHz with the secondary channel below the primary.
+    /// HT40 (802.11n) — 40 MHz with the secondary channel below the primary.
     Ht40Below,
+    /// HE20 (802.11ax SU) — 20 MHz. Needs an 802.11ax PHY: ESP32-C5 / C6 only.
+    /// Pair with a collector that requests HE-LTF acquisition
+    /// ([`phy::he20_csi_acquisition`]) to receive the full ~242-subcarrier estimate.
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+    He20,
 }
 
-impl HtBandwidth {
+/// Name of [`EmitterPhy`] before 0.12, when an emitter could only force HT.
+#[deprecated(since = "0.12.0", note = "renamed to `EmitterPhy`")]
+pub type HtBandwidth = EmitterPhy;
+
+impl EmitterPhy {
     /// Whether this is a 40 MHz configuration.
     pub fn is_forty(self) -> bool {
-        !matches!(self, HtBandwidth::Ht20)
+        matches!(self, EmitterPhy::Ht40Above | EmitterPhy::Ht40Below)
     }
 
-    /// The secondary-channel offset this bandwidth implies.
+    /// Whether this forces an 802.11ax (HE) PHY.
+    pub fn is_he(self) -> bool {
+        #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+        {
+            matches!(self, EmitterPhy::He20)
+        }
+        #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
+        {
+            false
+        }
+    }
+
+    /// The secondary-channel offset this PHY implies.
     pub fn secondary(self) -> SecondaryChannel {
         match self {
-            HtBandwidth::Ht20 => SecondaryChannel::None,
-            HtBandwidth::Ht40Above => SecondaryChannel::Above,
-            HtBandwidth::Ht40Below => SecondaryChannel::Below,
+            EmitterPhy::Ht40Above => SecondaryChannel::Above,
+            EmitterPhy::Ht40Below => SecondaryChannel::Below,
+            _ => SecondaryChannel::None,
+        }
+    }
+
+    /// ESP-IDF `wifi_phy_mode_t` value to force.
+    fn phymode(self) -> u32 {
+        match self {
+            EmitterPhy::Ht20 => phy::WIFI_PHY_MODE_HT20,
+            EmitterPhy::Ht40Above | EmitterPhy::Ht40Below => phy::WIFI_PHY_MODE_HT40,
+            #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+            EmitterPhy::He20 => phy::WIFI_PHY_MODE_HE20,
         }
     }
 }
@@ -86,8 +121,9 @@ impl HtBandwidth {
 pub struct EmitterConfig {
     /// Primary channel. Every node in a capture set must share it.
     pub channel: u8,
-    /// HT20, or HT40 with the secondary channel above/below the primary.
-    pub bandwidth: HtBandwidth,
+    /// The forced TX PHY: HT20, HT40 with the secondary channel above/below the
+    /// primary, or HE20 on the C5/C6.
+    pub phy: EmitterPhy,
     /// Destination address of injected frames (broadcast by default). Addressing
     /// a specific collector tends to raise that collector's CSI callback rate.
     pub dst_mac: [u8; 6],
@@ -98,12 +134,12 @@ pub struct EmitterConfig {
 }
 
 impl EmitterConfig {
-    /// New config on `channel` at `bandwidth`, broadcast destination, 20 ms
+    /// New config on `channel` forcing `phy`, broadcast destination, 20 ms
     /// period, STA interface.
-    pub fn new(channel: u8, bandwidth: HtBandwidth) -> Self {
+    pub fn new(channel: u8, phy: EmitterPhy) -> Self {
         Self {
             channel,
-            bandwidth,
+            phy,
             dst_mac: BROADCAST,
             period: Duration::from_millis(20),
             use_sta_if: true,
@@ -134,20 +170,20 @@ impl EmitterConfig {
         crate::NetworkRole::Central
     }
 
-    /// An emitter is always a [`Listener`](crate::CollectionMode::Listener): it captures nothing,
-    /// so it has nothing to report. There is no setter for this.
+    /// An emitter never reports ([`Never`](crate::ReportingPolicy::Never)): it captures nothing, so
+    /// it has nothing to report. There is no setter for this.
     ///
     /// This is the case the older two-role vocabulary could not express. "Emitter" was treated as a
     /// role opposite "collector", which left no name for a node that measures without reporting —
     /// and no name for the far more common thing an emitter actually is: a central that listens.
-    pub const fn collection_mode() -> crate::CollectionMode {
-        crate::CollectionMode::Listener
+    pub const fn reporting() -> crate::ReportingPolicy {
+        crate::ReportingPolicy::Never
     }
 }
 
 impl Default for EmitterConfig {
     fn default() -> Self {
-        Self::new(1, HtBandwidth::Ht20)
+        Self::new(1, EmitterPhy::Ht20)
     }
 }
 
@@ -156,9 +192,9 @@ impl defmt::Format for EmitterConfig {
     fn format(&self, fmt: defmt::Formatter<'_>) {
         defmt::write!(
             fmt,
-            "EmitterConfig {{ channel: {}, forty: {}, period_ms: {} }}",
+            "EmitterConfig {{ channel: {}, phy: {}, period_ms: {} }}",
             self.channel,
-            self.bandwidth.is_forty(),
+            self.phy,
             self.period.as_millis()
         );
     }
@@ -171,40 +207,30 @@ impl defmt::Format for EmitterConfig {
 /// starts the interface, and the bandwidth/protocol set has to be re-applied
 /// after, because `set_config` embeds its own defaults.
 fn bringup(controller: &mut WifiController<'_>, cfg: &EmitterConfig) {
-    let forty = cfg.bandwidth.is_forty();
+    let forty = cfg.phy.is_forty();
+    let phymode = cfg.phy.phymode();
+    let force = |sta: bool| {
+        if sta {
+            phy::force_tx_sta_before_start(phymode)
+        } else {
+            phy::force_tx_ap(phymode)
+        }
+    };
 
     // `set_config` only calls `esp_wifi_start()` when the *mode* changes, so the
     // forced rate has to be applied before it — hence the `_before_start` names.
     // The driver's status code is reported rather than discarded: a rate that was
     // never applied produces an emitter that looks healthy while transmitting in
     // the wrong format, or not at all.
-    let rc = if cfg.use_sta_if {
-        let rc = if forty {
-            phy::force_ht40_tx_sta_before_start()
-        } else {
-            phy::force_ht20_tx_sta_before_start()
-        };
-        if controller
-            .set_config(&Config::Station(StationConfig::default()))
-            .is_err()
-        {
-            log_ln!("emitter: set_config(Station) failed");
-        }
-        rc
+    let rc = force(cfg.use_sta_if);
+    let started = if cfg.use_sta_if {
+        controller.set_config(&Config::Station(StationConfig::default()))
     } else {
-        let rc = if forty {
-            phy::force_ht40_tx_ap_before_start()
-        } else {
-            phy::force_ht20_tx_ap_before_start()
-        };
-        if controller
-            .set_config(&Config::AccessPoint(AccessPointConfig::default()))
-            .is_err()
-        {
-            log_ln!("emitter: set_config(AccessPoint) failed");
-        }
-        rc
+        controller.set_config(&Config::AccessPoint(AccessPointConfig::default()))
     };
+    if started.is_err() {
+        log_ln!("emitter: set_config failed");
+    }
     if rc != 0 {
         log_ln!(
             "Emitter: forced TX PHY rejected (rc={}); frames will not use the requested format",
@@ -217,31 +243,21 @@ fn bringup(controller: &mut WifiController<'_>, cfg: &EmitterConfig) {
     // that was configured before it.
     apply_band_for_channel(controller, cfg.channel);
     phy::apply_ht_bandwidth(controller, forty);
-    phy::apply_ht_protocols(controller);
+    phy::apply_tx_protocols(controller, cfg.phy.is_he());
     if controller
-        .set_channel(cfg.channel, cfg.bandwidth.secondary())
+        .set_channel(cfg.channel, cfg.phy.secondary())
         .is_err()
     {
         log_ln!("emitter: set_channel failed");
     }
-    let rc_post = if cfg.use_sta_if {
-        if forty {
-            phy::force_ht40_tx_sta_before_start()
-        } else {
-            phy::force_ht20_tx_sta_before_start()
-        }
-    } else if forty {
-        phy::force_ht40_tx_ap_before_start()
-    } else {
-        phy::force_ht20_tx_ap_before_start()
-    };
+    let rc_post = force(cfg.use_sta_if);
     log_ln!("Emitter: forced TX PHY rc pre-start={} post-start={}", rc, rc_post);
 }
 
 /// Run the emitter: bring up the radio, then loop-inject until stopped.
-pub async fn run_emitter(
+pub(crate) async fn run_emitter(
     controller: &mut WifiController<'static>,
-    interfaces: &mut Interfaces<'static>,
+    interfaces: &mut RadioInterfaces,
     cfg: &EmitterConfig,
 ) {
     bringup(controller, cfg);
@@ -254,7 +270,7 @@ pub async fn run_emitter(
         &interfaces.esp_now,
         &cfg.dst_mac,
         cfg.channel,
-        cfg.bandwidth.is_forty(),
+        cfg.phy.is_forty(),
     );
 
     // Source address is the interface the frames actually leave from, so a
@@ -284,9 +300,9 @@ pub async fn run_emitter(
     }
 
     log_ln!(
-        "Emitter running: ch {}, {} MHz, {} ms period, src {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        "Emitter running: ch {}, {:?}, {} ms period, src {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         cfg.channel,
-        if cfg.bandwidth.is_forty() { 40 } else { 20 },
+        cfg.phy,
         cfg.period.as_millis(),
         src[0],
         src[1],

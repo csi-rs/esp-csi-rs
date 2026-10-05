@@ -32,7 +32,7 @@
 
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
-use esp_csi_rs::csi::CSIDataPacket;
+use esp_csi_rs::csi::CsiPacket;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
     CSINode, CSINodeClient, EspNowConfig, NodeHardware, config::CsiConfig,
@@ -76,8 +76,8 @@ esp_bootloader_esp_idf::esp_app_desc!();
 static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
 static CSI_PKT_COUNT: AtomicU32 = AtomicU32::new(0);
 
-fn on_csi(packet: &CSIDataPacket) {
-    LATEST_RSSI.store(packet.rssi as i32, Ordering::Relaxed);
+fn on_csi(packet: &CsiPacket) {
+    LATEST_RSSI.store(packet.rssi() as i32, Ordering::Relaxed);
     CSI_PKT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -106,19 +106,17 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+    let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
 
     install_static_espnow_recv();
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let mut node_handle = CSINodeClient::new();
-    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
+    let csi_hardware = NodeHardware::new(controller);
 
     let mut node = match END {
         End::Source => {

@@ -19,7 +19,7 @@ use esp_radio::esp_now::{
     Error as EspNowInnerError, EspNow, EspNowError, EspNowWifiInterface, PeerInfo, WifiPhyRate,
 };
 
-use crate::espnow_phy::with_espnow_recv_suspended;
+use crate::espnow_phy::{PeerPhy, with_espnow_recv_suspended};
 use crate::{
     CENTRAL_MAGIC_NUMBER, ControlPacket, EspNowConfig, IOTaskConfig, PERIPHERAL_MAGIC_NUMBER,
     PeripheralPacket, STOP_SIGNAL, apply_peer_espnow_phy, log_ln, parse_with_magic,
@@ -38,7 +38,7 @@ const PEER_HEALTHCHECK_PERIOD: u16 = 256;
 /// Flood-frame scratch buffer (4-byte magic + small postcard body).
 const FLOOD_BUF_LEN: usize = 16;
 
-fn add_collector_peer(esp_now: &EspNow<'static>, mac: &[u8; 6], channel: u8) -> bool {
+fn add_collector_peer(esp_now: &EspNow, mac: &[u8; 6], channel: u8) -> bool {
     if esp_now.peer_exists(mac) {
         return true;
     }
@@ -55,7 +55,7 @@ fn add_collector_peer(esp_now: &EspNow<'static>, mac: &[u8; 6], channel: u8) -> 
 
 /// Run the simplex source end: discover the peer → forced-PHY unicast flood.
 pub async fn run_esp_now_fast_source(
-    esp_now: &mut EspNow<'static>,
+    esp_now: &mut EspNow,
     config: &EspNowConfig,
     freq_hz: Option<u16>,
     _io_tasks: IOTaskConfig,
@@ -104,7 +104,7 @@ pub async fn run_esp_now_fast_source(
     // Register the collector as a unicast peer and force the PHY (recv-suspended,
     // C5-safe — per-peer rate config on a unicast peer works on all chips).
     add_collector_peer(esp_now, &collector_mac, config.channel);
-    apply_peer_espnow_phy(&collector_mac, rate, config.secondary_channel());
+    apply_peer_espnow_phy(esp_now, &collector_mac, PeerPhy { rate, ..config.peer_phy() });
     log_ln!(
         "ESP-NOW fast source: locked collector {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, unicast flood rate {:?}",
         collector_mac[0],
@@ -135,7 +135,6 @@ pub async fn run_esp_now_fast_source(
     // natural limiter as the radio frees TX buffers).
     let cap_interval_us = freq_hz.map(|f| 1_000_000u64 / (f.max(1) as u64));
     let mut next_tx_us = Instant::now().as_micros();
-    #[cfg(feature = "statistics")]
     let mut seq: u32 = 0;
     let mut tx_buf = [0u8; FLOOD_BUF_LEN];
     let mut healthcheck: u16 = 0;
@@ -153,14 +152,10 @@ pub async fn run_esp_now_fast_source(
         if (healthcheck & (PEER_HEALTHCHECK_PERIOD - 1)) == 0 && !esp_now.peer_exists(&collector_mac)
         {
             add_collector_peer(esp_now, &collector_mac, config.channel);
-            apply_peer_espnow_phy(&collector_mac, rate, config.secondary_channel());
+            apply_peer_espnow_phy(esp_now, &collector_mac, PeerPhy { rate, ..config.peer_phy() });
         }
 
-        let pkt = ControlPacket::new(
-            false,
-            #[cfg(feature = "statistics")]
-            seq,
-        );
+        let pkt = ControlPacket::new(false, seq);
         let msg = match serialize_with_magic(&pkt, CENTRAL_MAGIC_NUMBER, send_magic, &mut tx_buf) {
             Ok(m) => m,
             Err(_) => {
@@ -173,11 +168,9 @@ pub async fn run_esp_now_fast_source(
         // queue a second send first (the driver has one global completion flag).
         match esp_now.send_async(&collector_mac, msg).await {
             Ok(()) => {
+                seq = seq.wrapping_add(1);
                 #[cfg(feature = "statistics")]
-                {
-                    STATS.tx_count.fetch_add(1, Ordering::Relaxed);
-                    seq = seq.wrapping_add(1);
-                }
+                STATS.tx_count.fetch_add(1, Ordering::Relaxed);
             }
             Err(EspNowError::Error(EspNowInnerError::OutOfMemory) | EspNowError::SendFailed) => {
                 match select(STOP_SIGNAL.wait(), Timer::after_micros(TX_BACKOFF_US)).await {

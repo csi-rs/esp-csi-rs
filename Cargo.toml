@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-rs"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 authors = ["theembeddedrustacean", "stacks-of-data", "Abdullah-Alawad", "modatt"]
 description = "Wi-Fi Channel State Information (CSI) collection on ESP32, ESP32-C3, ESP32-C5, ESP32-C6 and ESP32-S3 for no_std Rust: sniffer, station, access point, emitter and ESP-NOW nodes"
@@ -11,7 +11,7 @@ homepage = "https://blog.theembeddedrustacean.com/"
 documentation = "https://docs.rs/esp-csi-rs"
 repository = "https://github.com/csi-rs/esp-csi-rs"
 license = "MIT OR Apache-2.0"
-exclude = ["target/debug/*", "assets/*"]
+exclude = ["target/debug/*", "assets/*", "wire-tests/*"]
 
 [lib]
 path = "src/lib/lib.rs"
@@ -58,6 +58,9 @@ uart = ["esp-println/uart"]
 no-print = ["esp-println/no-op"]
 ## Enable collection of runtime statistics (e.g., latency, dropped packets).
 statistics = []
+## A deterministic synthetic IEEE 802.11bf measurement source (`wire::synthetic::SyntheticBf`),
+## for driving the delivery pipeline and host tooling without sensing hardware.
+synthetic = []
 ## Non-blocking async logging.
 ## Without `auto` (or on the ESP32) this selects the async backend. With `auto` it
 ## no longer forces async: the backend still follows the transport detected at
@@ -156,15 +159,15 @@ esp32c5 = [
 
 [dependencies]
 # Core dependencies required for ESP HAL/RTOS, radio, and networking.
-esp-hal = { version = "~1.1", default-features = false, optional = false, features = [
+esp-hal = { version = "~1.2", default-features = false, optional = false, features = [
     "unstable",
 ] }
-esp-rtos = { version = "0.3.0", optional = false, features = [
+esp-rtos = { version = "0.4.0", optional = false, features = [
     "embassy",
     "esp-alloc",
     "esp-radio",
 ] }
-esp-bootloader-esp-idf = { version = "0.5.0", optional = false, features = [] }
+esp-bootloader-esp-idf = { version = "0.6.0", optional = false, features = [] }
 embassy-net = { version = "0.7.1", features = [
     "dhcpv4",
     "medium-ethernet",
@@ -173,15 +176,15 @@ embassy-net = { version = "0.7.1", features = [
     "raw",
 ] }
 embedded-io-async = { version = "0.7.0", optional = false }
-esp-alloc = { version = "0.10.0", optional = false }
-esp-backtrace = { version = "0.19.0", optional = false, features = [
+esp-alloc = { version = "0.11.0", optional = false }
+esp-backtrace = { version = "0.20.0", optional = false, features = [
     "panic-handler",
 ] }
-esp-println = { version = "0.17.0", optional = false, default-features = false, features = [
+esp-println = { version = "0.18.0", optional = false, default-features = false, features = [
 ] }
 embassy-executor = { version = "0.10.0", optional = false }
 embassy-time = { version = "0.5.0", optional = false }
-esp-radio = { version = "0.18.0", default-features = false, optional = false, features = [
+esp-radio = { version = "=1.0.0-beta.1", default-features = false, optional = false, features = [
     "wifi",
     "sniffer",
     "esp-alloc",
@@ -216,6 +219,8 @@ log = { version = "0.4.29", optional = true }
 
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 postcard = { version = "1.1.3", features = ["experimental-derive", "heapless"] }
+# COBS framing for the wire contract's decoder (`wire::decode_cobs`). Already in the tree via postcard.
+cobs = { version = "0.3", default-features = false }
 
 portable-atomic = { version = "1.13.0", default-features = false }
 
@@ -311,3 +316,8 @@ path = "experiments/station_bench_min.rs"
 # `experiments/cpu_test_schedule.rs` is deliberately NOT a target: it is the shared phase schedule
 # that `esp_now_bench` includes with `#[path]` under `cpu-test-tx`, so the DUT and the traffic
 # generator march through identical phases without a control channel between them.
+
+[[example]]
+name = "hw_check"
+path = "experiments/hw_check.rs"
+required-features = ["statistics"]

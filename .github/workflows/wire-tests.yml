@@ -1,0 +1,37 @@
+name: Wire contract
+
+# Host tests for `src/lib/wire` (the serialized frame format, the subcarrier layout tables, the
+# measurement setup and the synthetic 802.11bf source) and `src/lib/csi/policy.rs` (the reporting
+# policy). `wire-tests/` compiles those files by path, so these tests exercise exactly what the
+# firmware builds — on the host, with no Espressif toolchain.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ["src/lib/wire/**", "src/lib/csi/policy.rs", "wire-tests/**", ".github/workflows/wire-tests.yml"]
+  push:
+    branches: [main]
+    paths: ["src/lib/wire/**", "src/lib/csi/policy.rs", "wire-tests/**", ".github/workflows/wire-tests.yml"]
+
+concurrency:
+  group: wire-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test (host)
+    runs-on: ubuntu-latest
+    env:
+      # `rust-toolchain.toml` pins the `esp` toolchain for the firmware, and rustup applies it to
+      # every directory below it. Stable also ignores the parent `.cargo/config.toml`'s
+      # `[unstable] build-std`, which would otherwise rebuild `core` for the host and collide with
+      # the prebuilt standard library.
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wire-tests
+      - name: Test
+        run: cargo test --manifest-path wire-tests/Cargo.toml

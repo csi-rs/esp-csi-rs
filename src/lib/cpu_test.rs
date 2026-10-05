@@ -2,7 +2,7 @@
 //!
 //! The CPU-utilization experiment drives the emitter's TX loop from a schedule
 //! that changes the injection rate and on-air frame size every phase, and goes
-//! silent during baseline phases. [`crate::emitter::run_emitter`] reads these
+//! silent during baseline phases. The emitter run loop ([`CSINode::emitter`](crate::CSINode::emitter)) reads these
 //! atomics each iteration so the experiment's schedule driver can steer the
 //! *real* library TX path without re-running `node.run()` per phase. The whole
 //! module is gated so production builds carry none of this.

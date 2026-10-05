@@ -24,7 +24,7 @@ use crate::log_ln;
 use crate::parse_with_magic;
 use crate::serialize_with_magic;
 #[cfg(feature = "cpu-test-tx")]
-use esp_radio::esp_now::ESP_NOW_MAX_DATA_LEN;
+use esp_radio::esp_now::ESP_NOW_MAX_DATA_LEN_V1 as ESP_NOW_MAX_DATA_LEN;
 use esp_radio::esp_now::{
     BROADCAST_ADDRESS, Error as EspNowInnerError, EspNow, EspNowError, PeerInfo,
 };
@@ -96,7 +96,7 @@ fn hz_to_interval_us(hz: u64) -> u64 {
 }
 
 fn handle_peripheral_packet(
-    esp_now: &mut EspNow<'static>,
+    esp_now: &mut EspNow,
     r: PoolFrame,
     config: &EspNowConfig,
     peer_mac: Option<[u8; 6]>,
@@ -137,11 +137,7 @@ fn handle_peripheral_packet(
         // which is the same reason the peripheral defers it to
         // `apply_central_peer_phy`.
         if config.force_phy() {
-            crate::apply_peer_espnow_phy(
-                &r.info.src_address,
-                *config.phy_rate(),
-                config.secondary_channel(),
-            );
+            crate::apply_peer_espnow_phy(esp_now, &r.info.src_address, config.peer_phy());
         }
 
         if known_peers.insert(r.info.src_address, ()).is_err() {
@@ -185,7 +181,7 @@ fn downlink_target(
 /// frequency, processes `PeripheralPacket` replies, and updates statistics
 /// when the `statistics` feature is enabled.
 pub async fn run_esp_now_central(
-    esp_now: &mut EspNow<'static>, // Borrow the hardware
+    esp_now: &mut EspNow, // Borrow the hardware
     _mac_addr: [u8; 6],
     config: &EspNowConfig,
     frequency_hz: Option<u16>,
@@ -195,7 +191,6 @@ pub async fn run_esp_now_central(
     #[cfg(any(feature = "statistics", feature = "cpu-test-tx"))]
     reset_tx_diagnostics();
 
-    #[cfg(feature = "statistics")]
     let mut control_sequence: u32 = 0;
     let peer_mac = config.peer_mac();
     let send_magic = peer_mac.is_none();
@@ -214,7 +209,7 @@ pub async fn run_esp_now_central(
     // handle_interrupts). HT40 broadcast is also skipped — see below.
     #[cfg(not(feature = "esp32c5"))]
     if config.force_phy() && config.secondary_channel().is_none() {
-        crate::set_peer_espnow_phy(&tx_target, *config.phy_rate(), config.secondary_channel());
+        crate::set_peer_espnow_phy(esp_now, &tx_target, config.peer_phy());
     }
     // Manual pairing (unicast): ensure the configured peer exists before TX
     // starts, otherwise `esp_now.send` will fail with NotFound and TX stalls.
@@ -248,7 +243,7 @@ pub async fn run_esp_now_central(
         && config.force_phy()
         && esp_now.peer_exists(&mac)
     {
-        crate::apply_peer_espnow_phy(&mac, *config.phy_rate(), config.secondary_channel());
+        crate::apply_peer_espnow_phy(esp_now, &mac, config.peer_phy());
         log_ln!(
             "ESP-NOW central: applied peer PHY to {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} rate={:?} secondary={:?}",
             mac[0],
@@ -360,11 +355,7 @@ pub async fn run_esp_now_central(
             while now_us >= next_tx_us && burst_budget > 0 {
                 burst_budget = burst_budget.saturating_sub(1);
 
-                let control_packet = ControlPacket::new(
-                    is_collector,
-                    #[cfg(feature = "statistics")]
-                    control_sequence,
-                );
+                let control_packet = ControlPacket::new(is_collector, control_sequence);
                 let body_len = match serialize_with_magic(
                     &control_packet,
                     CENTRAL_MAGIC_NUMBER,
@@ -402,16 +393,20 @@ pub async fn run_esp_now_central(
                 // Keep exactly one send in flight and await it to completion;
                 // dropping this future or queueing another send first can corrupt
                 // the driver's completion state and freeze later sends.
+                // Replies to this frame are measured under the number it carries — the same one
+                // the peripheral reads off it. Set before sending: a reply can be measured before
+                // this task resumes from the send.
+                crate::csi::session::set_sounding_instance(control_sequence);
                 match esp_now.send_async(&tx_target, message).await {
                     Ok(()) => {
                             send_succeeded = true;
                         #[cfg(any(feature = "statistics", feature = "cpu-test-tx"))]
                         TX_QUEUED_COUNT.fetch_add(1, Ordering::Relaxed);
+                            control_sequence = control_sequence.wrapping_add(1);
                             #[cfg(feature = "statistics")]
                             {
                                 STATS.tx_count.fetch_add(1, Ordering::Relaxed);
-                            TX_CONFIRMED_COUNT.fetch_add(1, Ordering::Relaxed);
-                            control_sequence = control_sequence.wrapping_add(1);
+                                TX_CONFIRMED_COUNT.fetch_add(1, Ordering::Relaxed);
                             }
 
                             if adaptive_pacing_enabled {

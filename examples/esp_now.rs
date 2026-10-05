@@ -4,7 +4,7 @@
 //! |---|---|
 //! | Operational mode | ESP-NOW |
 //! | Network role | `NETWORK_ROLE` below — both are meaningful |
-//! | Collection mode | `COLLECTION_MODE` below — both are meaningful |
+//! | Reporting policy | `REPORTING` below — `Always`, `Never`, `Threshold` or `Decimate` |
 //! | Session role | Responder |
 //!
 //! This is the one mode where **every** combination of the two attributes is meaningful, because
@@ -18,9 +18,8 @@
 //!
 //! A listening central announces itself on the wire (`ControlPacket::is_collector`), and a
 //! peripheral that hears one **promotes itself to collector** so the pair still produces a dataset.
-//! That promotion does not rewrite this node's configuration, so `node.collection_mode()` keeps
-//! reporting what you set here while `esp_csi_rs::runtime_collection_mode()` reports what is in
-//! force.
+//! That promotion does not rewrite this node's configuration, so `node.reporting()` keeps
+//! reporting what you set here while `esp_csi_rs::runtime_reporting()` reports what is in force.
 //!
 //! ## Forcing the PHY
 //!
@@ -46,10 +45,10 @@
 
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
-use esp_csi_rs::csi::CSIDataPacket;
+use esp_csi_rs::csi::CsiPacket;
 use esp_csi_rs::logging::logging::{LogMode, auto_log_backend_label, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, CollectionMode, EspNowConfig, IOTaskConfig, NetworkRole, NodeHardware,
+    CSINode, CSINodeClient, ReportingPolicy, EspNowConfig, IOTaskConfig, NetworkRole, NodeHardware,
     config::CsiConfig, install_static_espnow_recv, log_ln, set_csi_callback,
 };
 #[cfg(feature = "statistics")]
@@ -70,7 +69,7 @@ const NETWORK_ROLE: NetworkRole = NetworkRole::Central;
 
 /// `Listener` keeps the exchange running without reporting. A listening *central* tells its
 /// peripheral so, and the peripheral promotes itself.
-const COLLECTION_MODE: CollectionMode = CollectionMode::Collector;
+const REPORTING: ReportingPolicy = ReportingPolicy::Always;
 
 /// Both ends must agree. On the ESP32-C5, `>= 36` selects 5 GHz.
 const CHANNEL: u8 = 6;
@@ -108,9 +107,9 @@ static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
 static CSI_PKT_COUNT: AtomicU32 = AtomicU32::new(0);
 static SUBCARRIERS: AtomicU32 = AtomicU32::new(0);
 
-fn on_csi(packet: &CSIDataPacket) {
-    LATEST_RSSI.store(packet.rssi as i32, Ordering::Relaxed);
-    SUBCARRIERS.store((packet.csi_data_len / 2) as u32, Ordering::Relaxed);
+fn on_csi(packet: &CsiPacket) {
+    LATEST_RSSI.store(packet.rssi() as i32, Ordering::Relaxed);
+    SUBCARRIERS.store(packet.subcarriers() as u32, Ordering::Relaxed);
     CSI_PKT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -148,12 +147,10 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+    let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
 
     // Replace esp-radio's heap recv queue before any peer traffic can arrive.
@@ -164,7 +161,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut espnow_cfg = EspNowConfig::default()
         .with_channel(CHANNEL)
         .with_network_role(NETWORK_ROLE)
-        .with_collection_mode(COLLECTION_MODE);
+        .with_reporting(REPORTING);
     if let Some(rate) = PHY_RATE {
         espnow_cfg = espnow_cfg.with_phy_rate(rate);
     }
@@ -180,16 +177,16 @@ async fn main(spawner: Spawner) -> ! {
         CHANNEL,
         match NETWORK_ROLE {
             NetworkRole::Central => "central",
-            NetworkRole::Peripheral => "peripheral",
+            _ => "peripheral",
         },
-        match COLLECTION_MODE {
-            CollectionMode::Collector => "collector",
-            CollectionMode::Listener => "listener",
+        match REPORTING {
+            ReportingPolicy::Never => "listener",
+            _ => "collector",
         },
     );
 
     let mut node_handle = CSINodeClient::new();
-    let csi_hardware = NodeHardware::new(&mut interfaces, controller);
+    let csi_hardware = NodeHardware::new(controller);
     let mut node = CSINode::esp_now(
         espnow_cfg,
         Some(CsiConfig::default()),

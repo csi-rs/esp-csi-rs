@@ -93,12 +93,12 @@ struct IpInfo {
 
 /// Initialize the station interface and return the network stack and runner.
 pub fn sta_init<'a>(
-    interfaces: &'a mut Interface<'static>,
+    interfaces: &'a mut Interface,
     config: &WifiStationConfig,
     controller: &mut WifiController<'static>,
     profile: &dyn RadioProfile,
     bringup: bool,
-) -> (Stack<'a>, Runner<'a, &'a mut Interface<'static>>) {
+) -> (Stack<'a>, Runner<'a, &'a mut Interface>) {
     let sta_ip_config = embassy_net::Config::dhcpv4(Default::default());
     let seed = 123456_u64;
 
@@ -136,7 +136,7 @@ pub async fn run_sta_connect(
     controller: &mut WifiController<'_>,
     freq: Option<u16>,
     sta_stack: Stack<'_>,
-    sta_runner: Runner<'_, &mut Interface<'_>>,
+    sta_runner: Runner<'_, &mut Interface>,
     csi_config: CsiConfig,
     io_tasks: IOTaskConfig,
 ) {
@@ -239,7 +239,7 @@ pub async fn run_sta_connect(
 }
 
 /// Run the embassy-net runner until a stop signal is received.
-pub(crate) async fn run_net_task(mut sta_runner: Runner<'_, &mut Interface<'_>>) {
+pub(crate) async fn run_net_task(mut sta_runner: Runner<'_, &mut Interface>) {
     loop {
         match select(STOP_SIGNAL.wait(), sta_runner.run()).await {
             Either::First(_) => {
@@ -488,7 +488,7 @@ pub(crate) async fn run_icmp_flood(
     let mut tx_meta = [PacketMetadata::EMPTY; ICMP_FLOOD_TX_SLOTS];
     let mut tx_buffer = [0u8; 128 * ICMP_FLOOD_TX_SLOTS];
 
-    let raw_socket = RawSocket::new::<Interface<'_>>(
+    let raw_socket = RawSocket::new::<Interface>(
         stack,
         IpVersion::Ipv4,
         IpProtocol::Icmp,
@@ -651,7 +651,7 @@ pub(crate) async fn run_icmp_flood_multi(
     let mut tx_meta = [PacketMetadata::EMPTY; ICMP_FLOOD_TX_SLOTS];
     let mut tx_buffer = [0u8; 128 * ICMP_FLOOD_TX_SLOTS];
 
-    let raw_socket = RawSocket::new::<Interface<'_>>(
+    let raw_socket = RawSocket::new::<Interface>(
         stack,
         IpVersion::Ipv4,
         IpProtocol::Icmp,
@@ -798,7 +798,7 @@ pub(crate) async fn run_icmp_flood_burst(
     let mut tx_meta = [PacketMetadata::EMPTY; ICMP_FLOOD_TX_SLOTS];
     let mut tx_buffer = [0u8; 128 * ICMP_FLOOD_TX_SLOTS];
 
-    let raw_socket = RawSocket::new::<Interface<'_>>(
+    let raw_socket = RawSocket::new::<Interface>(
         stack,
         IpVersion::Ipv4,
         IpProtocol::Icmp,

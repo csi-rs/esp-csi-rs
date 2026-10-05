@@ -47,40 +47,46 @@
 //! ## Using the Crate
 //!
 //! Each ESP device is one node in a **CSI collection network**, described by four independent
-//! attributes: what it contributes to the network, whether its measurements leave it, how it
-//! reaches the channel, and what part it plays in the session. [`crate::model`] is the normative
+//! attributes: what it contributes to the network, whether and how often its measurements leave
+//! it, how it reaches the channel, and what part it plays in the session. [`crate::model`] is the normative
 //! description and the only place it is written down — this page does not restate it.
 //!
 //! In practice you pick a mode and the rest follows, because each mode offers only the attributes
 //! it admits:
 //!
-//! | Constructor | Operational mode | Network role | Collection mode |
-//! |---|---|---|---|
-//! | [`CSINode::sniffer`] | Wi-Fi sniffer | peripheral | collector |
-//! | [`CSINode::station`] | Wi-Fi station | either | either |
-//! | [`CSINode::access_point`] | Wi-Fi access point | central | either |
-//! | [`CSINode::emitter`] | Emitter (transmit-only sounding) | central | listener |
-//! | [`CSINode::esp_now`] | ESP-NOW | either | either |
-//! | [`CSINode::esp_now_simplex_source`] | ESP-NOW simplex | central | listener |
-//! | [`CSINode::esp_now_simplex_peer`] | ESP-NOW simplex | peripheral | collector |
+//! | Constructor | Operational mode | Mode role | Network role | Reporting policy |
+//! |---|---|---|---|---|
+//! | [`CSINode::sniffer`] | Wi-Fi sniffer | observer | peripheral | always, threshold or decimate |
+//! | [`CSINode::station`] | Wi-Fi station | central or peripheral | either | any |
+//! | [`CSINode::access_point`] | Wi-Fi access point | central | central | any |
+//! | [`CSINode::emitter`] | Emitter (transmit-only sounding) | sounder | central | never |
+//! | [`CSINode::esp_now`] | ESP-NOW | central or peripheral | either | any |
+//! | [`CSINode::esp_now_simplex_source`] | ESP-NOW simplex | source | central | never |
+//! | [`CSINode::esp_now_simplex_peer`] | ESP-NOW simplex | peer | peripheral | always |
 //!
-//! Where an attribute is fixed there is no setter to call, so a central sniffer or a collecting
-//! emitter cannot be built. Where it is free, set it on the mode's config:
+//! Where an attribute is fixed there is no setter to call, so a central sniffer, a silent sniffer
+//! or a reporting emitter cannot be built. Where it is free, set it on the mode's config:
 //!
 //! - [`EspNowConfig`] and [`WifiStationConfig`] carry both setters,
 //!   [`with_network_role`](EspNowConfig::with_network_role) and
-//!   [`with_collection_mode`](EspNowConfig::with_collection_mode);
-//! - [`WifiApConfig`] carries only [`with_collection_mode`](WifiApConfig::with_collection_mode),
+//!   [`with_reporting`](EspNowConfig::with_reporting);
+//! - [`WifiApConfig`] carries only [`with_reporting`](WifiApConfig::with_reporting),
 //!   because an access point is always a central;
-//! - the sniffer, emitter and simplex configs carry neither.
+//! - [`WifiSnifferConfig`] offers [`with_threshold`](WifiSnifferConfig::with_threshold) and
+//!   [`with_decimation`](WifiSnifferConfig::with_decimation), and no way to report `Never`;
+//! - the emitter and simplex configs carry neither.
 //!
-//! Every node here is a session **responder**: the run starts when something calls
-//! [`CSINode::run`] and stops when something calls [`CSINodeClient::send_stop`]. See
-//! [`SessionRole`] for why that is not a field.
+//! The run is started and stopped by its **controller** — whatever calls [`CSINode::run`] and
+//! [`CSINodeClient::send_stop`] — which is never a node. No mode here runs an IEEE 802.11bf sensing
+//! session, so no node has an initiator or responder role; see [`SessionRole`].
 //!
-//! ## Bandwidth
-//! An emitter transmits HT20 or HT40 ([`HtBandwidth`]) — plain 802.11n, supported on every chip
-//! listed above. 40 MHz needs a secondary channel above or below the primary, and every node in a
+//! ## Bandwidth and PHY
+//! An emitter transmits HT20 or HT40 ([`EmitterPhy`]) — plain 802.11n, supported on every chip
+//! listed above — or, on the ESP32-C5 and C6, HE20 (802.11ax SU). An HE20 capture needs HE-LTF
+//! acquisition at the measuring node (`CsiConfig::he20()` on those chips); the full HE
+//! estimate is ~242 subcarriers where the legacy L-LTF one is 53. Associated stations and access
+//! points reach HE20 with `CSINode::set_protocol(Protocol::AX)`, and ESP-NOW with
+//! `EspNowConfig::with_he20`. 40 MHz needs a secondary channel above or below the primary, and every node in a
 //! capture set must agree on the primary channel. Confirm it engaged at the measuring node: a subcarrier
 //! count >= 100 (commonly ~117) is HT40, ~53/~56 means it fell back.
 //!
@@ -92,7 +98,8 @@
 //! ```text
 //! [3916,-93,11,157,1,1815804,256,0,260,2,0,1,1,128,0,1,1,0,1,0,0,0,256,128,[...]]
 //! ```
-//! The array fields map to the [`csi::CSIDataPacket`] struct fields in the following order:
+//! The array fields are, in order (unchanged since 0.11, so existing parsers keep working;
+//! `timestamp` is the low 32 bits of [`wire::RxMeta::timestamp_us`]):
 //!
 //! | Index | Field | Description |
 //! |-------|-------|-------------|
@@ -151,7 +158,13 @@
 //! data length: 128
 //! csi raw data: [0, 0, 0, 0, 0, 0, 0, 0, -6, 0, 6, 0, -24, 10, -23, 9, -23, 8, -23, 7, -22, 6, -22, 5, -22, 6, -23, 5, -22, 6, -22, 6, -22, 7, -20, 7, -19, 9, -19, 10, -19, 12, -19, 12, -18, 14, -19, 14, -19, 16, -20, 17, -21, 18, -20, 18, -19, 18, -16, 18, -14, 19, -13, 18, 0, 0, -19, 22, -20, 22, -20, 22, -20, 21, -21, 19, -22, 18, -20, 16, -18, 16, -17, 15, -16, 15, -14, 15, -13, 13, -12, 13, -9, 13, -7, 14, -6, 14, -5, 13, -3, 12, 0, 13, 2, 12, 3, 12, 5, 12, 7, 13, 8, 13, 10, 13, 12, 14, 9, 1, -5, -4, 0, 0, 0, 0, 0, 0]
 //! ```
-//! - **LogMode::Serialized**: This mode serializes the `CSIDataPacket` structure and prints it in a serialized COBS format. This is a compact binary format that can be parsed by any serde-compatible crate like [postcard](https://crates.io/crates/postcard). It is not human-readable but is efficient for logging large amounts of CSI data on the host without overwhelming the console output. Log lines written while this mode is active are COBS-delimited too, so they occupy a frame of their own instead of corrupting the packet that follows.
+//! - **LogMode::Serialized**: Each packet goes out as the [`wire`] contract: a postcard-encoded
+//!   [`wire::Envelope`] followed by a [`wire::Body`], in one COBS frame. The envelope carries the
+//!   format version, node id, session id, source kind and a per-run frame counter, and is encoded
+//!   first so a decoder checks the version before it reads the body ([`wire::decode_cobs`] does
+//!   exactly that). The first frame of each run is a [`wire::SessionInfo`] announcement. Log lines
+//!   written while this mode is active are COBS-delimited too, so they occupy a frame of their own
+//!   instead of corrupting the packet that follows.
 //! - **LogMode::EspCsiTool**: One `CSI_DATA,...` CSV line per packet in the
 //!   [ESP32-CSI-Tool](https://github.com/StevenMHernandez/ESP32-CSI-Tool) layout, with its header
 //!   line printed once at startup, so existing tooling for that format reads it unchanged. The 26
@@ -168,7 +181,7 @@
 //!
 //! ### On-Device CSI Processing
 //!
-//! Register a `fn(&CSIDataPacket)` with [`set_csi_callback`] to process
+//! Register a `fn(&CsiPacket)` with [`set_csi_callback`] to process
 //! every captured CSI packet inline in the WiFi-task callback. Zero
 //! channel hops, lowest possible latency. The callback runs on the WiFi
 //! hot path so it must be fast and non-blocking — no heap allocation,
@@ -177,9 +190,9 @@
 //! a queue. See `examples/csi_callback.rs` for a working demo.
 //!
 //! ```rust,ignore
-//! use esp_csi_rs::{set_csi_callback, csi::CSIDataPacket};
+//! use esp_csi_rs::{set_csi_callback, csi::CsiPacket};
 //!
-//! fn on_csi(packet: &CSIDataPacket) {
+//! fn on_csi(packet: &CsiPacket) {
 //! // your processing — keep it fast
 //! }
 //!
@@ -195,26 +208,27 @@
 //! ```
 //! #### Step 2: Create a Hardware Instance for the CSI Node
 //! ```rust,ignore
-//! // `controller` is a `&mut WifiController<'static>`: the one `esp_radio::wifi::new` returns, in a `StaticCell`.
-//! let csi_hardware = NodeHardware::new(&mut interfaces, controller);
+//! // `controller` is a `&mut WifiController<'static>` from `WifiController::new`, in a `StaticCell`.
+//! // The hardware bundle claims the station/AP interfaces, the sniffer and ESP-NOW from it.
+//! let csi_hardware = NodeHardware::new(controller);
 //! ```
 //! #### Step 3: Create a Station Configuration
 //! ```rust,ignore
 //! use esp_radio::wifi::sta::StationConfig;
-//! use esp_radio::wifi::AuthenticationMethod;
+//! use esp_radio::wifi::AuthenticationMethodConfig;
 //!
 //! let client_config = StationConfig::default()
-//!     .with_ssid("SSID")
-//!     .with_password("PASS".into())
-//!     .with_auth_method(AuthenticationMethod::Wpa2Personal);
+//!     .with_ssid("SSID".try_into().unwrap())
+//!     .with_authentication(AuthenticationMethodConfig::Wpa2Personal("PASS".try_into().unwrap()));
 //!
 //! // `WifiStationConfig` carries the two attributes this mode admits; both default as shown.
 //! let station_config = WifiStationConfig::new(client_config)
 //!     .with_network_role(esp_csi_rs::NetworkRole::Central)
-//!     .with_collection_mode(esp_csi_rs::CollectionMode::Collector);
+//!     .with_reporting(esp_csi_rs::ReportingPolicy::Always);
 //! ```
 //!
-//! `StationConfig` was renamed from `ClientConfig`, and `AuthMethod` was renamed to `AuthenticationMethod` in `esp-radio` 0.18. `with_ssid` takes `impl Into<Ssid>`, so a `&str` literal works directly; `with_password` takes an owned `String`.
+//! In esp-radio 1.0 `with_ssid` takes an `Ssid` (fallibly converted from a `&str` of at most 32 bytes),
+//! and the password travels inside the `AuthenticationMethodConfig` variant.
 //! #### Step 4: Create a CSI Collection Node Instance with the Desired Configuration
 //! ```rust,ignore
 //! let mut node = CSINode::station(
@@ -251,11 +265,11 @@
 //!
 //! | Example | What it does |
 //! |---|---|
-//! | `sniffer` | Peripheral collector — locks a channel and measures every frame overheard |
-//! | `emitter` | Central listener — unassociated sounding at HT20 or HT40; pair with `sniffer` |
+//! | `sniffer` | Observer — locks a channel and measures every frame overheard |
+//! | `emitter` | Sounder — unassociated sounding at HT20, HT40 or (C5/C6) HE20; pair with `sniffer` |
 //! | `station` | Associates to an AP or router; central or peripheral |
 //! | `access_point` | Self-contained softAP with DHCP; associated stations generate the uplink |
-//! | `esp_now` | The symmetric pair — both roles, both collection modes, HT20/HT40 |
+//! | `esp_now` | The symmetric pair — both roles, any reporting policy, HT20/HT40/HE20 |
 //! | `esp_now_simplex` | The asymmetric pair — the highest CSI rate of any pairing |
 //! | `csi_callback` | The two CSI delivery paths — inline callback vs. queued |
 //! | `runtime_config` | Reconfiguring one node between runs without reflashing |
@@ -315,6 +329,7 @@ pub(crate) mod radio;
 pub use esp_radio;
 pub mod stats;
 pub mod time;
+pub mod wire;
 
 #[cfg(feature = "cpu-test-tx")]
 pub mod cpu_test;
@@ -324,49 +339,52 @@ pub mod cpu_test;
 // in-tree examples (`esp_csi_rs::CSINode`, `esp_csi_rs::set_csi_callback`, …)
 // continue to resolve unchanged after the split.
 // ---------------------------------------------------------------------------
+pub use crate::csi::CsiPacket;
+pub use crate::csi::source::{EspVendorSource, MeasurementSource, emit};
+pub use crate::csi::session::{
+    header_digest_enabled, node_id, session_id, set_header_digest_enabled, set_session,
+};
 pub use crate::csi::delivery::{
     CSINodeClient, CsiDeliveryMode, clear_csi_callback, csi_delivery_mode, csi_logging_enabled,
     csi_min_sig_mode, csi_output_enabled, csi_peer_filter, run_process_csi_packet,
     set_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled, set_csi_min_sig_mode,
-    set_collection_mode, set_csi_output_enabled, set_csi_peer_filter, set_csi_raw_callback,
+    set_csi_output_enabled, set_csi_peer_filter, set_csi_raw_callback,
+    OverflowPolicy, csi_queue_overflow, set_csi_queue_overflow, set_reporting, runtime_reporting,
 };
 pub use crate::emitter::frame::{
     BROADCAST, PROBE_FRAME_LEN, build_probe_frame, inject_probe_once,
 };
-pub use crate::emitter::{EmitterConfig, HtBandwidth};
+#[allow(deprecated)]
+pub use crate::emitter::{EmitterConfig, EmitterPhy, HtBandwidth};
 pub use crate::node::{
     CSINode, IOTaskConfig, NodeHardware, WifiApConfig, WifiSnifferConfig, WifiStationConfig,
 };
-/// The retired taxonomy, kept for one release so callers written against 0.10 keep compiling.
-/// Convert with `OperationalMode::from(role)`; see [`crate::model`] for what replaced it.
-#[allow(deprecated)]
-#[deprecated(since = "0.11.0", note = "see `esp_csi_rs::model`")]
-pub use crate::node::{CollectorMode, NodeRole};
-/// The node model's four attributes. [`OperationalMode`] is the enum; the other three are read back
-/// from it, because a mode that fixes an attribute has no field for it and therefore no way to
-/// disagree with itself.
+/// The node model's attributes. [`OperationalMode`] is the enum; the others are read back from it,
+/// because a mode that fixes an attribute has no field for it and therefore no way to disagree with
+/// itself.
 pub use crate::model::{
-    CollectionMode, NetworkRole, NodeView, OperationalMode, SessionRole, SimplexConfig,
+    ModeRole, NetworkRole, NodeView, OperationalMode, ReportingPolicy, SessionRole, SimplexConfig,
+    SimplexEnd, Threshold,
 };
+/// The pre-0.12 name of [`ReportingPolicy`].
+#[allow(deprecated)]
+pub use crate::model::CollectionMode;
 /// The configuration of both ESP-NOW operational modes.
 pub use crate::central_peripheral::EspNowConfig;
-/// The pre-0.11 ESP-NOW enums, kept for one release so callers written against 0.10 keep compiling.
-/// Deprecated and removed in 0.12; see [`OperationalMode::EspNow`] and
-/// [`OperationalMode::EspNowSimplex`] for what replaced them.
-#[allow(deprecated)]
-pub use crate::central_peripheral::{CentralOpMode, Node, PeripheralOpMode};
 /// Pre-0.10 name for [`NodeHardware`]. An alias, not a second type to keep in step.
+#[deprecated(since = "0.12.0", note = "renamed to `NodeHardware`")]
 pub type CSINodeHardware<'a> = crate::node::NodeHardware<'a>;
 pub use crate::esp_now_pool::set_raw_recv_callback;
 pub use crate::espnow_phy::{
-    apply_peer_espnow_phy, install_static_espnow_recv, set_peer_espnow_phy,
+    PeerPhy, apply_peer_espnow_phy, install_static_espnow_recv, set_peer_espnow_phy,
 };
 pub use crate::peripheral::esp_now::set_raw_listen;
 pub use crate::protocol::{ControlPacket, PeripheralPacket};
 // The wire constants and codec are crate-private: they are an implementation detail of the ESP-NOW
 // exchange, and `pub use` on a `pub(crate)` item is an error rather than a widening.
-pub(crate) use crate::csi::delivery::{IS_COLLECTOR, set_runtime_collection_mode};
-pub use crate::csi::delivery::runtime_collection_mode;
+pub(crate) use crate::csi::delivery::{IS_COLLECTOR, set_runtime_reporting};
+#[allow(deprecated)]
+pub use crate::csi::delivery::{runtime_collection_mode, set_collection_mode};
 /// Feature-gated exactly as before: the ESP-NOW drivers only touch the counters when `statistics`
 /// is on, so re-exporting unconditionally would make the symbol dead in every other build.
 #[cfg(feature = "statistics")]
@@ -392,9 +410,10 @@ pub use crate::logging::logging::{LogMode, init_logger};
 
 #[cfg(feature = "statistics")]
 pub use crate::stats::{
-    get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_rx_rate_hz, get_total_rx_packets,
-    get_total_tx_packets, get_tx_rate_hz, record_collector_rx, record_collector_rx_drop,
-    record_emitter_tx, snapshot_bb_format_histogram, stats_begin_run,
+    DropBreakdown, MAX_TRACKED_TX, TxStats, get_drop_breakdown, get_dropped_packets_rx, get_pps_rx,
+    get_pps_tx, get_rx_rate_hz, get_total_rx_packets, get_total_tx_packets, get_tx_rate_hz,
+    record_collector_rx, record_collector_rx_drop, record_emitter_tx, snapshot_bb_format_histogram,
+    snapshot_tx_stats, stats_begin_run,
 };
 
 #[cfg(feature = "cpu-test-tx")]

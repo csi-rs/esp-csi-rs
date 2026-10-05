@@ -11,9 +11,8 @@ use embassy_futures::select::{Either, select};
 use embassy_net::{Ipv4Address, Runner, Stack, StaticConfigV4};
 use embassy_time::{Duration, Timer};
 use esp_radio::wifi::csi::CsiConfig;
-use esp_radio::wifi::{
-    AccessPointStationEventInfo, Config, Interface, WifiController,
-};
+use esp_radio::wifi::ap::EventInfo as AccessPointStationEventInfo;
+use esp_radio::wifi::{Config, Interface, WifiController};
 use embassy_net::udp::{PacketMetadata as UdpPacketMetadata, UdpSocket};
 use smoltcp::wire::{DhcpMessageType, DhcpPacket, DhcpRepr};
 
@@ -134,12 +133,12 @@ fn dhcp_assign_ip(
 /// Initialize the AP interface: build a static-IP embassy-net stack and apply
 /// the access-point configuration to the controller (which restarts the radio).
 pub fn ap_init<'a>(
-    interface: &'a mut Interface<'static>,
+    interface: &'a mut Interface,
     config: &WifiApConfig,
     controller: &mut WifiController<'static>,
     profile: &dyn RadioProfile,
     bringup: bool,
-) -> (Stack<'a>, Runner<'a, &'a mut Interface<'static>>) {
+) -> (Stack<'a>, Runner<'a, &'a mut Interface>) {
     let ip_config = embassy_net::Config::ipv4_static(StaticConfigV4 {
         address: embassy_net::Ipv4Cidr::new(config.ap_ipv4, 24),
         gateway: Some(config.ap_ipv4),
@@ -171,7 +170,7 @@ pub fn ap_init<'a>(
 pub async fn run_ap(
     controller: &mut WifiController<'_>,
     ap_stack: Stack<'_>,
-    ap_runner: Runner<'_, &mut Interface<'_>>,
+    ap_runner: Runner<'_, &mut Interface>,
     config: &WifiApConfig,
     csi_config: CsiConfig,
     io_tasks: IOTaskConfig,

@@ -9,7 +9,7 @@
 //! This example used to demonstrate `set_csi_output_enabled(false)` as the way
 //! to keep capturing without delivering. That method never worked: it wrote a
 //! flag no CSI path read. The attribute it was reaching for is
-//! `CollectionMode::Listener`, which is set on the mode's config — see
+//! `ReportingPolicy::Never`, which is set on the mode's config — see
 //! `esp_now.rs`, where a listening node is one line.
 
 #![no_std]
@@ -95,19 +95,17 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     log_ln!("Embassy initialized!");
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, mut interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+    let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let mut node_handle = CSINodeClient::new();
-    let hardware = NodeHardware::new(&mut interfaces, controller);
+    let hardware = NodeHardware::new(controller);
     let mut node = CSINode::sniffer(
         WifiSnifferConfig::default().with_channel(CHANNEL_A),
         Some(CsiConfig::default()),
