@@ -9,6 +9,10 @@ works is not the same on every part.
 | ESP32-C5, ESP32-C6 | Raw injection (`esp_wifi_80211_tx`) | **Verified** — roughly 90 CSI reports/s at a 10 ms period, measured at a paired collector |
 | ESP32, ESP32-C3, ESP32-S3 | ESP-NOW broadcast | Works; broadcast frames are never ACKed, so the offered rate stays flat whether or not anyone is listening |
 
+Every chip can force HT20 or HT40. The C5 and C6 can also force **HE20** (802.11ax SU) with
+`EmitterPhy::He20`. Collectors for an HE20 emitter should use `CsiConfig::he20()`; see
+[`bandwidth.md`](bandwidth.md#he20-80211ax-on-the-esp32-c5-and-c6).
+
 ## Why raw injection is not offered everywhere
 
 **On the ESP32-S3 raw injection does not radiate.** `esp_wifi_80211_tx` returns success for every

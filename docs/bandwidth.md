@@ -10,7 +10,7 @@ Select it on the emitter:
 
 ```rust
 // Secondary channel above the primary: the 40 MHz block spans channels 7–11.
-let emitter = EmitterConfig::new(7, HtBandwidth::Ht40Above);
+let emitter = EmitterConfig::new(7, EmitterPhy::Ht40Above);
 ```
 
 ## Two things that are easy to get wrong
@@ -61,3 +61,25 @@ let csi_cfg = CsiConfig {
 The classic ESP32 / C3 / S3 parts expose different controls — `lltf_en` / `htltf_en` /
 `ltf_merge_en` rather than `acquire_csi_*` — so use `ht_csi_acquisition` for one call that works
 everywhere.
+
+## HE20 (802.11ax) on the ESP32-C5 and C6
+
+The C5 and C6 have an 802.11ax PHY, and an HE20 PPDU carries an HE-LTF of **~242 subcarriers** in
+the same 20 MHz that a legacy L-LTF spreads over 53. Each mode has its own way to request HE20:
+
+| Mode | How |
+|---|---|
+| Emitter | `EmitterConfig::new(ch, EmitterPhy::He20)` |
+| ESP-NOW | `EspNowConfig::default().with_phy_rate(rate).with_he20()` |
+| Station, access point, sniffer | `node.set_protocol(Protocol::AX)` |
+
+The receiver must also ask for HE-LTF, or it keeps reporting the L-LTF estimate. `CsiConfig::he20()`
+does that and turns off the legacy, HT, VHT and ACK paths, so short frames do not dilute the stream:
+
+```rust
+let node = CSINode::sniffer(sniffer_config, Some(CsiConfig::he20()), hardware);
+```
+
+On the C5/C6 the CSI packet's raw `cur_bb_format` is `4` for an HE SU PPDU and `5` for HE MU.
+HE20 is a 20 MHz PHY. An HT40 secondary channel and HE20 cannot be combined, and `with_he20`
+clears one that was set.

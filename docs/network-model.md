@@ -20,15 +20,15 @@ redundant. It is not, for three reasons developed in §4: the standard's subject
 session between stations rather than the configuration of a measurement deployment; no collector the
 field uses implements its procedures, since CSI reaches these tools through vendor-specific paths;
 and it stops at the device boundary, saying nothing about whether a node's measurements leave it.
-Where the two describe the same thing — who starts a measurement session — this model takes the
-standard's terms unchanged rather than inventing its own.
+Where the two describe the same thing — the two ends of a sensing session — this model takes the
+standard's terms unchanged rather than inventing its own, and it keeps them free for that meaning.
 
 ## 2. Definition
 
 A **CSI collection network** is a set of nodes sharing a channel and a measurement session in which
 traffic excites the channel and at least one node reports CSI. A node is described by four
-attributes: what it contributes to the network, whether its measurements leave it, how it reaches
-the channel, and what part it plays in the session.
+attributes: what it contributes to the network, whether and how often its measurements leave it,
+how it reaches the channel, and what part it plays in the session.
 
 ### 2.1 Network role — who sources the traffic
 
@@ -47,21 +47,27 @@ The traffic need not come from inside the network: a commercial access point or 
 the channel excites it just as well, and such a network simply has no central. That is the sniffer
 deployment, and admitting it is what keeps ambient measurement and controlled sounding in one model.
 
-### 2.2 Collection mode — who reports
+### 2.2 Reporting policy — whether, and how often, a node reports
 
-| Mode | Captures CSI | Reports CSI | Purpose |
+| Policy | Captures CSI | Reports CSI | Purpose |
 |---|---|---|---|
-| **Collector** | yes | yes — its own, and any reported to it by peers | Produces the dataset |
-| **Listener** | yes | no | Participates in channel and capture without contributing data or delivery cost |
+| **Always** | yes | every measurement — its own, and any reported to it by peers | Produces the dataset: a *collector* |
+| **Never** | yes | nothing | Participates in channel and capture without contributing data or delivery cost: a *listener* |
+| **Threshold** | yes | only while the channel is moving | Reports change, not steady state; IEEE 802.11bf's threshold-based reporting |
+| **Decimate(n)** | yes | every *n*th measurement | Thins a steady stream to what the link can carry |
 
 A listener is not an idle node: it is one that must exist for the measurement to happen but
 contributes no data — the peripheral a central needs something to transmit to, a node that keeps
 traffic on the channel while another node collects, or a collector with its output switched off to
 separate acquisition cost from delivery cost.
 
-Two values are enough. A node that only generates traffic is a **central listener**; whether its
-radio has capture enabled internally is invisible to every other node, so it is not a network-level
-attribute. The test an attribute has to pass is whether another node can tell the difference.
+A node that only generates traffic is a **central listener**; whether its radio has capture enabled
+internally is invisible to every other node, so it is not a network-level attribute. The test an
+attribute has to pass is whether another node can tell the difference — and a node reporting only on
+motion, or one frame in ten, is one another node can tell apart.
+
+Before 0.12 this attribute was the *collection mode* with two values, collector and listener. They
+are `Always` and `Never`.
 
 ### 2.3 Operational mode — how the node reaches the channel
 
@@ -80,51 +86,62 @@ radio entirely. `esp-csi-rs` supplies six:
 | **Wi-Fi access point** | self-contained softAP with DHCP; associated stations generate the uplink that is measured |
 | **Emitter** | transmit-only sounding (raw injection or ESP-NOW broadcast, by chip): unassociated, no peer and no handshake |
 
-### 2.4 Session role — who starts and stops the measurement
+Each mode also names the part a node plays **within** it, in its own vocabulary: central or
+peripheral for ESP-NOW and the station; source or peer for the simplex ends; *observer* for the
+sniffer, which neither originates nor answers anything, so "central or peripheral" means nothing for
+it; *sounder* for the emitter. The vocabulary belongs to the mode rather than to the model, which is
+what lets a future 802.11bf mode call its ends initiator and responder — and let a receiver initiate,
+or change roles per session — without touching any other mode.
+
+### 2.4 Session role — who controls the run, and who senses with whom
 
 | Session role | Definition |
 |---|---|
-| **Initiator** | Starts and stops the measurement session and requests the measurements that constitute it. Exactly one per session. |
-| **Responder** | Takes part in a session started by an initiator. |
+| **Controller** | Starts and stops the run and decides what it measures. Not a node. |
+| **Initiator** | IEEE 802.11bf sensing initiator: requests the measurements that constitute a sensing session. |
+| **Responder** | IEEE 802.11bf sensing responder: takes part in a sensing session an initiator set up. |
 
-The names are taken from IEEE 802.11bf, which defines a sensing session as an agreement between a
-sensing initiator and a sensing responder to take part in a sensing procedure. Borrowing the
-standard's terms rather than inventing new ones is deliberate: this attribute is the one place the
-model and the standard describe the same thing.
+Before 0.12 this table had only *initiator* and *responder*, and it used "initiator" for the host
+that starts a run. That was the standard's word for a different thing: an 802.11bf initiator is a
+station that negotiates a sensing session with another station, inside the WLAN. The host-tier role
+is now the **controller**, and *initiator* and *responder* keep their 802.11bf meaning.
 
-**Initiating a session is not originating traffic.** The two verbs are distinct and only one of them
-defines a role: traffic origination *is* the central (§2.1), while session initiation is control —
-deciding when a run starts, stops and what it measures.
+**Controlling a run is not originating traffic.** The two verbs are distinct and only one of them
+defines a role: traffic origination *is* the central (§2.1), while control is deciding when a run
+starts, stops and what it measures. In this stack the controller is **always the host tier**: the run
+begins when something calls `CSINode::run` and ends when something calls `CSINodeClient::send_stop`,
+and that something is the serial console for `esp-csi-cli-rs`, the on-device UI task for
+`esp-csi-litetui-rs`, the HTTP control route for `csi-webserver`, or your own application when the
+crate is used as a library.
 
-In this stack the initiator is **always the host tier**, and no node ever initiates a session on
-another node. Every node `esp-csi-rs` builds is a responder: the run begins when something calls
-`CSINode::run` and ends when something calls `CSINodeClient::send_stop`, and that something is the
-serial console for `esp-csi-cli-rs`, the on-device UI task for `esp-csi-litetui-rs`, the HTTP control
-route for `csi-webserver`, or your own application when the crate is used as a library.
+**No operational mode today runs an 802.11bf session**, so no node built by `esp-csi-rs` has an
+initiator or responder role; the crate reports `None`. An 802.11bf mode will report one of the two,
+per session.
 
 Discovery is not initiation. An ESP-NOW central broadcasting for peers, or a simplex peer beaconing
 to be found, settles *who* is in the network, not *when* the measurement runs.
 
 ## 3. What each mode admits
 
-The role and the collection mode are independent attributes, but not every mode can express every
+The role and the reporting policy are independent attributes, but not every mode can express every
 combination — a sniffer never transmits, so it cannot be a central. **Rather than document the
 invalid combinations as a rule to observe, the crate does not offer them**: each operational mode
 exposes only the configurations it admits, so an illegal node cannot be built.
 
-| Operational mode | Network role | Collection mode | Why the rest is not offered |
-|---|---|---|---|
-| ESP-NOW | either | either | symmetric exchange: every combination is meaningful |
-| ESP-NOW simplex | fixed by the end | fixed by the end | the asymmetry fixes the assignment |
-| Wi-Fi sniffer | peripheral | collector | it never transmits, so it cannot be central; and a sniffer that does not report observes nothing |
-| Wi-Fi station | either | either | central when the uplink it generates is the traffic being measured |
-| Wi-Fi access point | central | either | beacons and DHCP make it a traffic source by construction |
-| Emitter | central | listener | the sounding frames are the network's traffic, and it captures nothing |
+| Operational mode | Mode role | Network role | Reporting policy | Why the rest is not offered |
+|---|---|---|---|---|
+| ESP-NOW | central or peripheral | either | any | symmetric exchange: every combination is meaningful |
+| ESP-NOW simplex | source or peer | fixed by the end | fixed by the end | the asymmetry fixes the assignment |
+| Wi-Fi sniffer | observer | peripheral | always, threshold or decimate | it never transmits, so it cannot be central; and a sniffer that never reports observes nothing |
+| Wi-Fi station | central or peripheral | either | any | central when the uplink it generates is the traffic being measured |
+| Wi-Fi access point | central | central | any | beacons and DHCP make it a traffic source by construction |
+| Emitter | sounder | central | never | the sounding frames are the network's traffic, and it captures nothing |
 
 In the code this is structural rather than documentary. `EspNowConfig` and `WifiStationConfig` carry
-`with_network_role` and `with_collection_mode`; `WifiApConfig` carries only the second; the sniffer
-and emitter configs expose `const` accessors and no setter at all. There is nothing to call that
-would build a central sniffer.
+`with_network_role` and `with_reporting`; `WifiApConfig` carries only the second; the sniffer offers
+`with_threshold` and `with_decimation` and no way to say `Never`; the emitter exposes a `const`
+accessor and no setter at all. There is nothing to call that would build a central sniffer or a
+silent one.
 
 Cardinality: at most one central per peripheral, any number of peripherals per central, no
 peripheral-to-peripheral association. The familiar deployment shapes follow from the cardinality
@@ -140,7 +157,7 @@ network-wide view. They are conventions the host tier can check and the node can
 - **Cardinality.** ESP-NOW pairing is magic-prefix or MAC-filter based and an access point hands out
   N leases with no role attached. Two centrals on one channel is physically constructible, and no
   node can notice.
-- **Exactly one initiator (§2.4).** A node only knows that something called `run()`.
+- **Exactly one controller (§2.4).** A node only knows that something called `run()`.
 
 The type system delivers the per-node table in §3. It does not, and cannot, deliver these.
 
@@ -166,8 +183,10 @@ the sensing initiator, a sensing-by-proxy procedure in which an AP senses on a s
 a MAC service interface through which layers above the MAC request and retrieve sensing
 measurements. What it does not describe — because it is not a WLAN concern — is what happens after
 that: whether a node's measurements leave it at all, and over what link, encoding and storage. That
-is what the collector/listener distinction settles, and why the listener has no counterpart in the
-standard's vocabulary.
+is what the reporting policy settles, and why a node that never reports has no counterpart in the
+standard's vocabulary. (The threshold policy does: 802.11bf lets a responder report only when the
+channel has changed by more than a threshold, and `Threshold` is the same idea applied at the device
+boundary.)
 
 ### 4.1 Mapping
 
@@ -180,9 +199,17 @@ attributes, and the two vocabularies line up without conflict:
 |---|---|
 | Central (sources the traffic) | sensing transmitter — transmits the PPDUs used for sensing measurements |
 | Peripheral (sources none) | a station that is not a sensing transmitter in the procedure; a sensing receiver where it measures |
-| Collector (measures, reports) | sensing receiver that performs the measurement, plus feedback or sensing-by-proxy reporting |
-| Listener (measures, no report) | sensing receiver that performs the measurement; no reporting counterpart |
+| Always (measures, reports) | sensing receiver that performs the measurement, plus feedback or sensing-by-proxy reporting |
+| Threshold | threshold-based sensing measurement reporting |
+| Never (measures, no report) | sensing receiver that performs the measurement; no reporting counterpart |
 | Initiator / Responder (§2.4) | sensing initiator / sensing responder — same attribute, same names |
+| Controller (§2.4) | the layer above the MAC that requests measurements through its service interface; not a WLAN role |
+
+The measurement records follow the same mapping. A frame's *stimulus* says what excited the channel:
+a **controlled** sounding carries a measurement-setup id and an instance id, as an 802.11bf
+measurement does (an ESP-NOW exchange numbers its soundings the same way today); **ambient** traffic
+carries only its transmitter; and an **observed** sounding is someone else's — the NDP that followed
+an NDPA, overheard by a sniffer that never joined the session.
 
 Three of the four attributes describe something the standard does not: which node supplies the
 traffic for a deployment, whether a node's measurements leave the device, and over which link it
