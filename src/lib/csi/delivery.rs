@@ -745,8 +745,47 @@ pub(crate) fn build_csi_config(csi_config: &CsiConfiguration) -> CsiConfig {
     }
 }
 
+/// Compensate for esp-radio 1.0.0-beta.1 packing the ESP32-C5's CSI acquisition config in the
+/// ESP32-C6's field order.
+///
+/// The C5's `wifi_csi_acquire_config_t` has 15 bitfield slots — `enable, legacy, force_lltf, ht20,
+/// ht40, vht, su, mu, dcm, beamformed, he_stbc_mode, val_scale_cfg, dump_ack_en, lltf_bit_mode,
+/// reserved` — but esp-radio's `From<CsiConfig>` passes the C6's 12 fields, in the C6's order:
+/// `enable, legacy, ht20, ht40, su, mu, dcm, beamformed, he_stbc, val_scale_cfg, dump_ack_en,
+/// reserved`, then three zeros. Every flag after `legacy` lands one or two slots late, and the
+/// config's own `acquire_csi_force_lltf` / `acquire_csi_vht` are never read. Uncorrected, a default
+/// config forces L-LTF because `ht20` lands in `force_lltf`, an HT-only config falls back to L-LTF
+/// for the same reason, and `val_scale_cfg` is always 0.
+///
+/// So each field is pre-placed where esp-radio will move it to the slot it belongs in. Two slots
+/// cannot be reached: `dump_ack_en` and `lltf_bit_mode` always arrive as 0, so ACK frames are not
+/// dumped on the C5. Applied last, after any [`RadioProfile`](crate::RadioProfile) has tuned the
+/// config by field name. Remove once esp-radio packs the C5 layout correctly.
+#[cfg(feature = "esp32c5")]
+fn c5_bitfield_workaround(want: CsiConfig) -> CsiConfig {
+    CsiConfig {
+        enable: want.enable,
+        acquire_csi_legacy: want.acquire_csi_legacy,
+        acquire_csi_ht20: want.acquire_csi_force_lltf as u32,
+        acquire_csi_ht40: want.acquire_csi_ht20,
+        acquire_csi_su: want.acquire_csi_ht40,
+        acquire_csi_mu: want.acquire_csi_vht as u32,
+        acquire_csi_dcm: want.acquire_csi_su,
+        acquire_csi_beamformed: want.acquire_csi_mu,
+        acquire_csi_he_stbc: want.acquire_csi_dcm,
+        val_scale_cfg: want.acquire_csi_beamformed,
+        dump_ack_en: want.acquire_csi_he_stbc,
+        reserved: want.val_scale_cfg,
+        // Not read by esp-radio's C5 conversion.
+        acquire_csi_force_lltf: false,
+        acquire_csi_vht: false,
+    }
+}
+
 /// Sets CSI Configuration.
 pub(crate) fn set_csi(controller: &mut WifiController, config: CsiConfig) {
+    #[cfg(feature = "esp32c5")]
+    let config = c5_bitfield_workaround(config);
     // Set CSI Configuration with callback
     controller
         .set_csi(config, |info: esp_radio::wifi::csi::WifiCsiInfo<'_>| {

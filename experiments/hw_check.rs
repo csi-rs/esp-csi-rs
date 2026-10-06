@@ -9,7 +9,7 @@
 //! | `HW_CH` | primary channel, default `6` |
 //! | `HW_PHY` | `ht20`, `he20` — emitter / ESP-NOW forced PHY |
 //! | `HW_REPORT` | `always`, `never`, `decim4`, `thr`, `thrvar` |
-//! | `HW_CSI` | `default`, `he20` |
+//! | `HW_CSI` | `default`, `he20`, `ht` (HT-LTF only), `nolltf` (default without forced L-LTF, C5) |
 //! | `HW_PROTO` | unset, or `ax` — `set_protocol(AX)` (sniffer HE bring-up) |
 //! | `HW_HZ` | traffic rate in Hz, default `100` |
 //! | `HW_SETUP` | unset, or `1` — apply a `MeasurementSetup` (id 5) to an ESP-NOW central |
@@ -82,6 +82,10 @@ const CH: u8 = num(option_env!("HW_CH"), 6) as u8;
 const HZ: u16 = num(option_env!("HW_HZ"), 100) as u16;
 const HE: bool = matches!(option_env!("HW_PHY"), Some(p) if eq(p, "he20"));
 const CSI_HE: bool = matches!(option_env!("HW_CSI"), Some(p) if eq(p, "he20"));
+#[allow(dead_code)]
+const CSI_HT: bool = matches!(option_env!("HW_CSI"), Some(p) if eq(p, "ht"));
+#[allow(dead_code)]
+const CSI_NOLLTF: bool = matches!(option_env!("HW_CSI"), Some(p) if eq(p, "nolltf"));
 const PROTO_AX: bool = matches!(option_env!("HW_PROTO"), Some(p) if eq(p, "ax"));
 const SETUP: bool = option_env!("HW_SETUP").is_some();
 const EPOCH: Option<&str> = option_env!("HW_EPOCH");
@@ -110,8 +114,32 @@ const fn reporting() -> ReportingPolicy {
 fn csi_config() -> CsiConfig {
     // HE-LTF acquisition and the HE PHY exist only on the 802.11ax parts.
     #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
-    if CSI_HE {
-        return CsiConfig::he20();
+    {
+        if CSI_HE {
+            return CsiConfig::he20();
+        }
+        if CSI_HT {
+            let mut c = CsiConfig::default();
+            c.acquire_csi_legacy = 0;
+            c.acquire_csi_ht40 = 0;
+            c.acquire_csi_su = 0;
+            c.acquire_csi_mu = 0;
+            c.acquire_csi_dcm = 0;
+            c.acquire_csi_beamformed = 0;
+            c.dump_ack_en = 0;
+            #[cfg(feature = "esp32c5")]
+            {
+                c.acquire_csi_force_lltf = false;
+                c.acquire_csi_vht = false;
+            }
+            return c;
+        }
+        #[cfg(feature = "esp32c5")]
+        if CSI_NOLLTF {
+            let mut c = CsiConfig::default();
+            c.acquire_csi_force_lltf = false;
+            return c;
+        }
     }
     CsiConfig::default()
 }

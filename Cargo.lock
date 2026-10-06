@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "esp-csi-rs"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "cobs",
  "defmt 1.1.1",
