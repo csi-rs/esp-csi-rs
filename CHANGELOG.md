@@ -4,6 +4,18 @@ All notable changes to `esp-csi-rs` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: a minor bump may break).
 
+## [0.12.1]
+
+### Fixed
+
+- **ESP32-C5: the CSI acquisition config now reaches the radio as configured.** esp-radio
+  1.0.0-beta.1 packs the C5's acquisition bitfield in the C6's field order. That shifted every flag
+  after `acquire_csi_legacy`, ignored `acquire_csi_force_lltf` / `acquire_csi_vht`, and zeroed
+  `val_scale_cfg`. An HT-only capture fell back to L-LTF; default and HE-only captures only behaved
+  by coincidence. The crate now pre-arranges the fields to compensate. Measured on four C5s:
+  HT-only gives HT-LTF (114 bytes), HE-only gives HE-LTF (490 bytes), and forced L-LTF gives L-LTF
+  (106 bytes). `dump_ack_en` cannot be set on the C5 until esp-radio is fixed.
+
 ## [0.12.0] — unreleased
 
 0.12 makes the crate ready for IEEE 802.11bf without waiting for the hardware. The ESP callback
@@ -250,6 +262,7 @@ All of these are removed in 0.12.
 
 - The sync UART writer compiles under `auto` + `async-print`, and the docs CI job is fixed.
 
-[0.12.0]: https://github.com/csi-rs/esp-csi-rs/compare/d860363...HEAD
+[0.12.1]: https://github.com/csi-rs/esp-csi-rs/compare/0.12.0...HEAD
+[0.12.0]: https://github.com/csi-rs/esp-csi-rs/compare/d860363...0.12.0
 [0.11.0]: https://github.com/csi-rs/esp-csi-rs/compare/d3dbd70...d860363
 [0.10.1]: https://github.com/csi-rs/esp-csi-rs/commit/d3dbd70
