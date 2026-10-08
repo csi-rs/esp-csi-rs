@@ -45,17 +45,39 @@ an attribute is fixed there is no setter to call.
 [`docs/network-model.md`](docs/network-model.md) is the normative description, including how the
 model maps onto IEEE 802.11bf.
 
+## Architecture
+
+```text
+  ESP CSI callback        any MeasurementSource (emit)
+         └──────────────┬──────────────┘
+                        ▼
+                 ReportingPolicy          always · never · threshold · decimate
+                        ▼
+                    CsiPacket             Envelope + CsiFrame
+                        ▼
+        callback · CSINodeClient · logger
+                        ▼
+              host: wire::decode_cobs
+```
+
+| Abstraction | Role |
+|---|---|
+| `OperationalMode`, `CSINode` | How the node reaches the channel; one constructor per mode |
+| `ReportingPolicy` | Whether, and how often, measurements leave the node |
+| `CsiPacket` → `Envelope` | Format version, node id, session id, source kind, per-run frame counter |
+| `CsiPacket` → `CsiFrame` | Normalised `RxMeta`, the `Stimulus` that excited the channel, an optional `HeaderDigest`, and a `CsiPayload` (`EspRaw` tagged with its `LayoutId`, `Grouped`, `Variation`) |
+| `wire` | The frame format itself: `no_std`, radio-neutral and free of `esp-*` imports, so hosts decode with the same types |
+| `MeasurementSource`, `emit` | Feed frames from any source through the same policy, statistics and delivery |
+| `MeasurementSetup` | An IEEE 802.11bf-style setup (periodicity, bandwidth, responders) mapped onto the mode |
+| `RadioProfile` | Seam for custom Wi-Fi bring-up |
+| `get_drop_breakdown`, `snapshot_tx_stats` | Drops per cause and per-transmitter counters (`statistics` feature) |
+
 ## Features
 
 - **Devices:** ESP32, ESP32-C3, ESP32-C5 (dual-band 2.4/5 GHz), ESP32-C6, ESP32-S3.
 - **PHYs:** HT20 and HT40 on every chip; HE20 (802.11ax) on the ESP32-C5 and C6.
-- **Wire format:** versioned, radio-neutral frames with session and node identity, per-frame
-  stimulus, an optional MAC-header digest and the CSI buffer tagged with its subcarrier layout.
 - **Output:** postcard/COBS frames, plain text, a compact array format, the ESP32-CSI-Tool CSV
   layout, or `defmt`.
-- **Reporting policies:** report every measurement, every *n*th, or only while the channel changes.
-- **Measurement setups:** configure a node in IEEE 802.11bf terms (periodicity, bandwidth,
-  responders).
 - **On-device processing:** register a `fn(&CsiPacket)` to process CSI inline in the Wi-Fi
   callback.
 
@@ -80,6 +102,29 @@ let mut node = CSINode::sniffer(
     NodeHardware::new(controller),
 );
 node.run().await;
+```
+
+`controller` is the `WifiController` from `esp_radio::wifi::WifiController::new`; `NodeHardware`
+claims its interfaces, sniffer and ESP-NOW handle.
+
+Reading measurements, naming the session and reporting only on change:
+
+```rust
+use esp_csi_rs::csi::CsiPacket;
+use esp_csi_rs::wire::{Bandwidth, MeasurementSetup, StimulusParams};
+use esp_csi_rs::{Threshold, WifiSnifferConfig, set_csi_callback, set_session};
+
+fn on_csi(packet: &CsiPacket) {
+    let meta = packet.meta();
+    let _ = (packet.mac(), meta.timestamp_us, meta.ppdu, packet.csi_data());
+}
+
+set_csi_callback(on_csi);
+set_session(0x1013, Some(unix_time_us));
+let sniffer = WifiSnifferConfig::default().with_threshold(Threshold::new(6000, 200));
+
+let setup = MeasurementSetup::new(1).with_stimulus(StimulusParams::new(10_000, Bandwidth::Mhz20));
+central_node.apply_measurement_setup(&setup)?;
 ```
 
 And an emitter for it to measure:
@@ -121,6 +166,7 @@ Replace `esp32c3` with `esp32`, `esp32c5`, `esp32c6` or `esp32s3`. Measurement h
 | [`docs/bandwidth.md`](docs/bandwidth.md) | HT20, HT40 and HE20, and filtering legacy/ACK CSI |
 | [`docs/emitter-support.md`](docs/emitter-support.md) | Which transport each chip's emitter uses |
 | [`docs/defmt.md`](docs/defmt.md) | Logging backends and using `defmt` |
+| [`wire` on docs.rs](https://docs.rs/esp-csi-rs/latest/esp_csi_rs/wire/) | The frame format, subcarrier layouts and measurement setup |
 | [docs.rs](https://docs.rs/esp-csi-rs) | Full API documentation |
 
 ## License
