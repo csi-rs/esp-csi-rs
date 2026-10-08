@@ -47,18 +47,11 @@ model maps onto IEEE 802.11bf.
 
 ## Architecture
 
-```text
-  ESP CSI callback        any MeasurementSource (emit)
-         └──────────────┬──────────────┘
-                        ▼
-                 ReportingPolicy          always · never · threshold · decimate
-                        ▼
-                    CsiPacket             Envelope + CsiFrame
-                        ▼
-        callback · CSINodeClient · logger
-                        ▼
-              host: wire::decode_cobs
-```
+<div align="center">
+
+![Data path from the radio to the host](https://raw.githubusercontent.com/csi-rs/esp-csi-rs/main/assets/data-path.png)
+
+</div>
 
 | Abstraction | Role |
 |---|---|
