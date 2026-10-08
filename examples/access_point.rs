@@ -5,7 +5,7 @@
 //! | Operational mode | Wi-Fi access point |
 //! | Network role | Central — beacons and DHCP make it a traffic source by construction |
 //! | Reporting policy | `REPORTING` below — `Always`, `Never`, `Threshold` or `Decimate` |
-//! | Session role | Responder |
+//! | Session role | none — the run's controller is whatever calls `run()` |
 //!
 //! The network role is not settable, so there is no way to build a peripheral access point.
 //!
@@ -51,7 +51,7 @@ const SSID: &str = "esp-csi-ap";
 /// Primary channel. On the dual-band ESP32-C5, `>= 36` selects 5 GHz.
 const CHANNEL: u8 = 6;
 
-/// `Listener` keeps the flood on air without reporting — the AP half of a measurement whose data
+/// `Never` keeps the flood on air without reporting — the AP half of a measurement whose data
 /// comes from the stations.
 const REPORTING: ReportingPolicy = ReportingPolicy::Always;
 

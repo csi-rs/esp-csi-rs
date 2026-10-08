@@ -23,6 +23,12 @@
 //!
 //! Runs in WiFi-sniffer mode so no peer is required.
 //!
+//! What a packet carries: `packet.envelope` names the node, the session and the frame's place in
+//! the run (`stream_seq`, so a gap is a lost frame); `packet.meta()` is the normalised receive
+//! metadata (`timestamp_us` never wraps); and `packet.frame.payload` is the CSI itself, tagged with
+//! the `LayoutId` that maps each `(imag, real)` pair to a subcarrier index. With the `statistics`
+//! feature the stats line also breaks drops down by cause and lists the transmitters heard.
+//!
 //! Constraints:
 //!   - Inline callback runs on the WiFi task hot path. **Keep it fast.**
 //!     No heap allocation, no `Mutex` locks, no UART writes.
@@ -38,6 +44,7 @@ use embassy_executor::Spawner;
 use embassy_futures::join::{join, join3};
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CsiPacket;
+use esp_csi_rs::wire::CsiPayload;
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{config::CsiConfig, CsiDeliveryMode, CSINode, logging::logging::init_logger, WifiSnifferConfig};
 use esp_csi_rs::{CSINodeClient, log_ln, NodeHardware, set_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled};
@@ -72,6 +79,12 @@ static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
 /// don't wrap.
 static LATEST_TONE_ENERGY: AtomicU64 = AtomicU64::new(0);
 static LATEST_TONE_COUNT: AtomicU32 = AtomicU32::new(0);
+/// The envelope's per-run frame counter and the 64-bit receive time of the latest packet.
+static LATEST_STREAM_SEQ: AtomicU32 = AtomicU32::new(0);
+static LATEST_TIMESTAMP_US: AtomicU64 = AtomicU64::new(0);
+/// Subcarriers the latest drained packet's layout maps, and its lowest subcarrier index.
+static LATEST_MAPPED: AtomicU32 = AtomicU32::new(0);
+static LATEST_LOWEST_SC: AtomicI32 = AtomicI32::new(0);
 
 /// Counter incremented from the async drainer task. The delta between
 /// `CSI_CB_COUNT` (inline) and `CSI_DRAIN_COUNT` (async) measures
@@ -91,6 +104,8 @@ static LATEST_DRAIN_ENERGY: AtomicU64 = AtomicU64::new(0);
 /// to atomics or stack memory.
 fn on_csi(packet: &CsiPacket) {
     LATEST_RSSI.store(packet.rssi() as i32, Ordering::Relaxed);
+    LATEST_STREAM_SEQ.store(packet.envelope.stream_seq, Ordering::Relaxed);
+    LATEST_TIMESTAMP_US.store(packet.meta().timestamp_us, Ordering::Relaxed);
     CSI_CB_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // Demonstrate bounded inline math: sum |I| + |Q| across all CSI tones.
@@ -126,6 +141,21 @@ async fn csi_drainer(client: &mut CSINodeClient) {
             energy = energy.wrapping_add((*sample as i32).unsigned_abs() as u64);
         }
         LATEST_DRAIN_ENERGY.store(energy, Ordering::Relaxed);
+        LATEST_STREAM_SEQ.store(packet.envelope.stream_seq, Ordering::Relaxed);
+        LATEST_TIMESTAMP_US.store(packet.meta().timestamp_us, Ordering::Relaxed);
+
+        // Map the buffer onto subcarriers. `Unknown` means the layout has no published table or
+        // a training field was disabled; the bytes are still delivered, just not mapped.
+        if let CsiPayload::EspRaw { layout, .. } = &packet.frame.payload {
+            let mut mapped = 0u32;
+            let mut lowest = i16::MAX;
+            for (_, index) in layout.indices() {
+                mapped += 1;
+                lowest = lowest.min(index);
+            }
+            LATEST_MAPPED.store(mapped, Ordering::Relaxed);
+            LATEST_LOWEST_SC.store(if mapped > 0 { lowest as i32 } else { 0 }, Ordering::Relaxed);
+        }
     }
 }
 
@@ -148,6 +178,34 @@ async fn stats_task() {
         let dropped = get_dropped_packets_rx();
         #[cfg(not(feature = "statistics"))]
         let dropped = 0u32;
+        log_ln!(
+            "stream_seq: {}, timestamp_us: {}, layout maps {} subcarriers from {}",
+            LATEST_STREAM_SEQ.load(Ordering::Relaxed),
+            LATEST_TIMESTAMP_US.load(Ordering::Relaxed),
+            LATEST_MAPPED.load(Ordering::Relaxed),
+            LATEST_LOWEST_SC.load(Ordering::Relaxed),
+        );
+        #[cfg(feature = "statistics")]
+        {
+            let d = esp_csi_rs::get_drop_breakdown();
+            log_ln!(
+                "drops: queue full {}, oversize {}, on-air gaps {}; withheld: filtered {}, policy {}",
+                d.queue_full,
+                d.oversize,
+                d.seq_gap,
+                d.filtered,
+                d.policy_suppressed,
+            );
+            let mut tx = [esp_csi_rs::TxStats::default(); 4];
+            let n = esp_csi_rs::snapshot_tx_stats(&mut tx);
+            for t in &tx[..n] {
+                log_ln!(
+                    "  tx {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} frames {} gaps {} retries {}",
+                    t.mac[0], t.mac[1], t.mac[2], t.mac[3], t.mac[4], t.mac[5],
+                    t.frames, t.seq_gaps, t.retries
+                );
+            }
+        }
         log_ln!(
             "mode={:?} cb/sec: {}, drain/sec: {}, dropped: {}, RSSI: {} dBm, tones: {}, cb_energy: {}, drain_energy: {}",
             esp_csi_rs::csi_delivery_mode(),

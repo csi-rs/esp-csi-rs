@@ -142,6 +142,7 @@ let mut node = CSINode::emitter(emitter, hardware);
 | `esp_now_simplex` | The asymmetric pair — the highest CSI rate of any pairing |
 | `csi_callback` | Inline callback vs. queued delivery |
 | `runtime_config` | Reconfiguring one node between runs |
+| `synthetic_source` | A non-radio `MeasurementSource` feeding 802.11bf-shaped reports through `emit` (`synthetic` feature) |
 
 ```sh
 cargo esp32c3 --example sniffer          # println

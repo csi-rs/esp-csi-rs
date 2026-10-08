@@ -273,6 +273,7 @@
 //! | `esp_now_simplex` | The asymmetric pair — the highest CSI rate of any pairing |
 //! | `csi_callback` | The two CSI delivery paths — inline callback vs. queued |
 //! | `runtime_config` | Reconfiguring one node between runs without reflashing |
+//! | `synthetic_source` | A non-radio `MeasurementSource` feeding 802.11bf-shaped reports through `emit` |
 //!
 //! Measurement and characterization harnesses live separately under `experiments/`, documented in
 //! `experiments/README.md`.

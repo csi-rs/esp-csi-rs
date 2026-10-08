@@ -172,17 +172,18 @@ jobs:
           fi
 
           # The feature sweeps above pass --no-dev-deps, which is right (a powerset
-          # that also builds 14 examples would be enormous) but means they never
-          # compile an example. That is how an engine-side rename could break all 14
-          # targets (8 in examples/, 6 in experiments/) invisibly. One check per chip,
+          # that also builds 16 examples would be enormous) but means they never
+          # compile an example. That is how an engine-side rename could break all 16
+          # targets (9 in examples/, 7 in experiments/) invisibly. One check per chip,
           # at the baseline feature set, closes that gap cheaply. `statistics` is
-          # required by three experiments; `cpu-test-tx`/`cpu-trace` are on so the
-          # code `esp_now_bench` gates on them is compiled too.
+          # required by four experiments, `synthetic` by `synthetic_source`, and
+          # `cpu-test-tx`/`cpu-trace` are on so the code `esp_now_bench` gates on
+          # them is compiled too.
           cargo check \
             --target "${target}" \
             --examples \
             --no-default-features \
-            --features "${chip},no-std,println,auto,statistics,cpu-trace,cpu-test-tx"
+            --features "${chip},no-std,println,auto,statistics,cpu-trace,cpu-test-tx,synthetic"
 
   cargo-build-defmt:
     name: build (defmt, ${{ matrix.chip }})

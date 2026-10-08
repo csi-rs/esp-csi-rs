@@ -321,3 +321,8 @@ path = "experiments/station_bench_min.rs"
 name = "hw_check"
 path = "experiments/hw_check.rs"
 required-features = ["statistics"]
+
+[[example]]
+name = "synthetic_source"
+path = "examples/synthetic_source.rs"
+required-features = ["synthetic"]
