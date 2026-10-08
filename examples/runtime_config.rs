@@ -4,7 +4,7 @@
 //! a sniffer on `CHANNEL_A`, then `set_operational_mode` to a sniffer on
 //! `CHANNEL_B`. Anything the model admits can be swapped in this way — a station
 //! for an access point, a central for a peripheral — because the operational
-//! mode carries its own network role and collection mode with it.
+//! mode carries its own network role and reporting policy with it.
 //!
 //! This example used to demonstrate `set_csi_output_enabled(false)` as the way
 //! to keep capturing without delivering. That method never worked: it wrote a

@@ -4,8 +4,8 @@
 //! |---|---|---|
 //! | Operational mode | ESP-NOW simplex | ESP-NOW simplex |
 //! | Network role | **Central** — it owns all transmit airtime | **Peripheral** — it sources nothing |
-//! | Collection mode | **Listener** — it captures nothing | **Collector** |
-//! | Session role | Responder | Responder |
+//! | Reporting policy | **Never** — it captures nothing | **Always** |
+//! | Session role | none — the run's controller is whatever calls `run()` | same |
 //!
 //! Neither attribute is settable: the asymmetry fixes both. The source floods, the peer measures.
 //! Leaving the channel to a single transmitter is exactly why this sustains a markedly higher
@@ -15,14 +15,6 @@
 //! source; the source learns its MAC, registers it as a unicast peer with a forced PHY, sends one
 //! hello so the peer stops beaconing, and then unicasts continuously. After that the peer is purely
 //! receive-only.
-//!
-//! ## The roles changed sides in 0.11
-//!
-//! This pairing used to be spelled the other way around — the flooding end was a
-//! `PeripheralOpMode::EspNowFastSource` and the receive-only end a
-//! `CentralOpMode::EspNowFastCollector` — so the only node transmitting was the one called
-//! "peripheral". The network role follows the traffic in every other mode, and now it does here
-//! too. Nothing about what either node does on air changed; only the names.
 //!
 //! Build / run (both ends on the same channel, `END` flipped between them):
 //!   cargo esp32c6 --example esp_now_simplex

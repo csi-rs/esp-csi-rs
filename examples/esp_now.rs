@@ -5,7 +5,7 @@
 //! | Operational mode | ESP-NOW |
 //! | Network role | `NETWORK_ROLE` below — both are meaningful |
 //! | Reporting policy | `REPORTING` below — `Always`, `Never`, `Threshold` or `Decimate` |
-//! | Session role | Responder |
+//! | Session role | none — the run's controller is whatever calls `run()` |
 //!
 //! This is the one mode where **every** combination of the two attributes is meaningful, because
 //! the exchange is symmetric: the central originates the control traffic, the peripheral answers
@@ -36,6 +36,16 @@
 //! HT40; ~53/~56 means it fell back. 2.4 GHz HT40 is finicky on some chips — if it stays narrow,
 //! try a different primary/secondary pair (ch 1 Above, ch 11 Below) or accept HT20.
 //!
+//! ## Sessions and measurement setups
+//!
+//! Every measurement here is a *controlled* stimulus: `Stimulus::Controlled` carries the
+//! measurement-setup id and the sounding instance — the number of the central's control frame that
+//! produced it — so the two ends' measurements of one sounding line up. `SESSION_ID` names the run
+//! on every frame's envelope. `SETUP_ID` applies an IEEE 802.11bf-style `MeasurementSetup` to the
+//! central: its periodicity becomes the control-packet rate and its id is stamped on each frame.
+//!
+//! `HE20` (ESP32-C5 / C6) forces HE20 instead of HT20 and captures the full HE-LTF.
+//!
 //! Build / run (both ends on the same channel):
 //!   cargo esp32c6 --example esp_now
 //!   cargo esp32c5 --example esp_now   # set CHANNEL = 149 for the 5 GHz 149+153 HT40 pair
@@ -46,6 +56,7 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CsiPacket;
+use esp_csi_rs::wire::{Bandwidth, MeasurementSetup, Stimulus, StimulusParams};
 use esp_csi_rs::logging::logging::{LogMode, auto_log_backend_label, init_logger};
 use esp_csi_rs::{
     CSINode, CSINodeClient, ReportingPolicy, EspNowConfig, IOTaskConfig, NetworkRole, NodeHardware,
@@ -67,8 +78,8 @@ extern crate alloc;
 /// Which end of the exchange this board is. Flash the same binary to both, changing only this.
 const NETWORK_ROLE: NetworkRole = NetworkRole::Central;
 
-/// `Listener` keeps the exchange running without reporting. A listening *central* tells its
-/// peripheral so, and the peripheral promotes itself.
+/// `Never` keeps the exchange running without reporting. A central that reports nothing tells its
+/// peripheral so, and the peripheral promotes itself to `Always`.
 const REPORTING: ReportingPolicy = ReportingPolicy::Always;
 
 /// Both ends must agree. On the ESP32-C5, `>= 36` selects 5 GHz.
@@ -86,6 +97,15 @@ const PEER_MAC: Option<[u8; 6]> = None;
 
 /// Control-packet rate (Hz) on the central.
 const TRAFFIC_HZ: u16 = 1000;
+
+/// Force HE20 (802.11ax) on the ESP32-C5 / C6 instead of HT20. Both ends must agree.
+const HE20: bool = false;
+
+/// Name the run on every frame's envelope. `None` draws a random id per run.
+const SESSION_ID: Option<u32> = None;
+
+/// Apply a `MeasurementSetup` with this id to the central, sounding at `TRAFFIC_HZ`.
+const SETUP_ID: Option<u8> = None;
 
 /// Prune a task subtree entirely: a TX-only central plus an RX-only peripheral is the lowest-
 /// overhead one-directional pairing the mode offers.
@@ -106,11 +126,35 @@ esp_bootloader_esp_idf::esp_app_desc!();
 static LATEST_RSSI: AtomicI32 = AtomicI32::new(0);
 static CSI_PKT_COUNT: AtomicU32 = AtomicU32::new(0);
 static SUBCARRIERS: AtomicU32 = AtomicU32::new(0);
+/// Setup id and sounding instance of the latest measurement.
+static LATEST_SETUP: AtomicU32 = AtomicU32::new(0);
+static LATEST_INSTANCE: AtomicU32 = AtomicU32::new(0);
 
 fn on_csi(packet: &CsiPacket) {
     LATEST_RSSI.store(packet.rssi() as i32, Ordering::Relaxed);
     SUBCARRIERS.store(packet.subcarriers() as u32, Ordering::Relaxed);
+    if let Stimulus::Controlled { setup_id, instance_id, .. } = packet.frame.stimulus {
+        LATEST_SETUP.store(setup_id as u32, Ordering::Relaxed);
+        LATEST_INSTANCE.store(instance_id as u32, Ordering::Relaxed);
+    }
     CSI_PKT_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// HE20 needs an 802.11ax PHY.
+fn with_he20(cfg: EspNowConfig) -> EspNowConfig {
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+    if HE20 {
+        return cfg.with_he20();
+    }
+    cfg
+}
+
+fn csi_config() -> CsiConfig {
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+    if HE20 {
+        return CsiConfig::he20();
+    }
+    CsiConfig::default()
 }
 
 #[embassy_executor::task]
@@ -133,6 +177,12 @@ async fn stats_task() {
             CSI_PKT_COUNT.load(Ordering::Relaxed),
             SUBCARRIERS.load(Ordering::Relaxed),
             LATEST_RSSI.load(Ordering::Relaxed),
+        );
+        log_ln!(
+            "session {:#010x}, setup {}, sounding instance {}",
+            esp_csi_rs::session_id(),
+            LATEST_SETUP.load(Ordering::Relaxed),
+            LATEST_INSTANCE.load(Ordering::Relaxed),
         );
     }
 }
@@ -171,6 +221,10 @@ async fn main(spawner: Spawner) -> ! {
     if let Some(mac) = PEER_MAC {
         espnow_cfg = espnow_cfg.with_peer_mac(mac);
     }
+    let espnow_cfg = with_he20(espnow_cfg);
+    if let Some(id) = SESSION_ID {
+        esp_csi_rs::set_session(id, None);
+    }
 
     log_ln!(
         "Starting ESP-NOW node on channel {} — role {}, collection {}",
@@ -187,13 +241,21 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut node_handle = CSINodeClient::new();
     let csi_hardware = NodeHardware::new(controller);
-    let mut node = CSINode::esp_now(
-        espnow_cfg,
-        Some(CsiConfig::default()),
-        Some(TRAFFIC_HZ),
-        csi_hardware,
-    );
-    node.set_protocol(esp_radio::wifi::Protocol::N);
+    let mut node = CSINode::esp_now(espnow_cfg, Some(csi_config()), Some(TRAFFIC_HZ), csi_hardware);
+    node.set_protocol(if HE20 {
+        esp_radio::wifi::Protocol::AX
+    } else {
+        esp_radio::wifi::Protocol::N
+    });
+    if let (Some(id), NetworkRole::Central) = (SETUP_ID, NETWORK_ROLE) {
+        let setup = MeasurementSetup::new(id).with_stimulus(StimulusParams::new(
+            1_000_000 / TRAFFIC_HZ as u32,
+            Bandwidth::Mhz20,
+        ));
+        if node.apply_measurement_setup(&setup).is_err() {
+            log_ln!("Measurement setup refused by this mode");
+        }
+    }
     node.set_io_tasks(IOTaskConfig {
         tx_enabled: TX_ENABLED,
         rx_enabled: RX_ENABLED,

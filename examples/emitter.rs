@@ -4,8 +4,8 @@
 //! |---|---|
 //! | Operational mode | Emitter (raw sounding) |
 //! | Network role | Central — the sounding frames *are* the network's traffic |
-//! | Collection mode | Listener — it captures nothing, so it has nothing to report |
-//! | Session role | Responder |
+//! | Reporting policy | Never — it captures nothing, so it has nothing to report |
+//! | Session role | none — the run's controller is whatever calls `run()` |
 //!
 //! Neither role is settable, so `CSINode::emitter` takes no role arguments and no CSI config.
 //!
@@ -29,8 +29,9 @@
 //!
 //! ## Bandwidth
 //!
-//! [`EmitterPhy`]'s HT20/HT40 are plain 802.11n and work on every supported chip; `EmitterPhy::He20`
-//! (802.11ax) needs an ESP32-C5 or C6, and its collectors should use `CsiConfig::he20()`. HT40 needs room in the band:
+//! [`EmitterPhy`]'s HT20/HT40 are plain 802.11n and work on every supported chip. On the ESP32-C5
+//! and C6, `HE20` forces 802.11ax HE20 instead; pair it with a `sniffer` built with `HE20 = true`,
+//! which captures the ~242-subcarrier HE-LTF. HT40 needs room in the band:
 //! `Ht40Above` on channel 7 occupies up to channel 11 and `Ht40Below` occupies down to channel 3, so
 //! a primary too close to the edge silently falls back. Confirm it engaged at the *collector*, not
 //! here: a subcarrier count >= 100 (commonly ~117) is HT40, ~53/~56 means fallback.
@@ -60,6 +61,18 @@ const CHANNEL: u8 = 7;
 
 /// `Ht20`, `Ht40Above` or `Ht40Below`. HT40 roughly doubles the subcarriers.
 const PHY: EmitterPhy = EmitterPhy::Ht20;
+
+/// Force HE20 (802.11ax) instead of `PHY`. ESP32-C5 / C6 only; ignored elsewhere.
+const HE20: bool = false;
+
+fn phy() -> EmitterPhy {
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+    if HE20 {
+        return EmitterPhy::He20;
+    }
+    let _ = HE20;
+    PHY
+}
 
 /// Delay between injected frames. 20 ms is ~50 frames/s.
 const PERIOD: Duration = Duration::from_millis(20);
@@ -91,7 +104,7 @@ async fn main(spawner: Spawner) -> ! {
         .expect("Failed to initialize Wi-Fi controller");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    let mut emitter = EmitterConfig::new(CHANNEL, PHY).with_period(PERIOD);
+    let mut emitter = EmitterConfig::new(CHANNEL, phy()).with_period(PERIOD);
     if let Some(mac) = DST_MAC {
         emitter = emitter.with_dst_mac(mac);
     }

@@ -5,7 +5,7 @@
 //! | Operational mode | Wi-Fi station |
 //! | Network role | `NETWORK_ROLE` below — both are meaningful |
 //! | Reporting policy | `REPORTING` below — `Always`, `Never`, `Threshold` or `Decimate` |
-//! | Session role | Responder |
+//! | Session role | none — the run's controller is whatever calls `run()` |
 //!
 //! A station is **central** when the uplink it generates is the traffic being measured — the usual
 //! case here, where it pings its gateway at `PING_RATE_HZ` so the AP has something to measure. It
@@ -48,7 +48,7 @@ const SSID: &str = "esp-csi-ap";
 /// link someone else keeps busy.
 const NETWORK_ROLE: NetworkRole = NetworkRole::Central;
 
-/// `Listener` keeps the link busy without reporting anything — useful when the AP is the collector
+/// `Never` keeps the link busy without reporting anything — useful when the AP is the collector
 /// and you want this node's delivery cost out of the measurement.
 const REPORTING: ReportingPolicy = ReportingPolicy::Always;
 
