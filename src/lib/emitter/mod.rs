@@ -231,12 +231,6 @@ fn bringup(controller: &mut WifiController<'_>, cfg: &EmitterConfig) {
     if started.is_err() {
         log_ln!("emitter: set_config failed");
     }
-    if rc != 0 {
-        log_ln!(
-            "Emitter: forced TX PHY rejected (rc={}); frames will not use the requested format",
-            rc
-        );
-    }
 
     // Re-apply after `set_config`, which embeds its own defaults, then re-force the
     // rate: `set_config` may stop/start the interface, and a restart drops a rate
@@ -251,7 +245,15 @@ fn bringup(controller: &mut WifiController<'_>, cfg: &EmitterConfig) {
         log_ln!("emitter: set_channel failed");
     }
     let rc_post = force(cfg.use_sta_if);
-    log_ln!("Emitter: forced TX PHY rc pre-start={} post-start={}", rc, rc_post);
+    // The pre-start attempt can fail while the interface is not yet up; only the post-start result
+    // decides the format frames go out in.
+    if rc_post != 0 {
+        log_ln!(
+            "Emitter: forced TX PHY rejected (pre-start rc={}, post-start rc={}); frames will not use the requested format",
+            rc,
+            rc_post
+        );
+    }
 }
 
 /// Run the emitter: bring up the radio, then loop-inject until stopped.
