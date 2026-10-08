@@ -48,7 +48,7 @@ use crate::csi::delivery::{
     CSINodeClient, build_csi_config, run_process_csi_packet, set_csi,
 };
 use crate::log_ln;
-use crate::radio::{apply_ht40_channel, suppress_espnow_rx};
+use crate::radio::{apply_ht40_channel, idle_station_for_espnow, suppress_espnow_rx};
 #[cfg(feature = "esp32c5")]
 use crate::radio::{apply_band_auto, apply_band_for_channel};
 use crate::stats::set_seq_drop_detection;
@@ -1012,6 +1012,7 @@ impl<'a> CSINode<'a> {
             OperationalMode::EspNow(_) | OperationalMode::EspNowSimplex(_)
         ) {
             crate::esp_now_pool::install();
+            idle_station_for_espnow(controller).await;
         } else {
             suppress_espnow_rx();
         }
