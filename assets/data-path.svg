@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="566" viewBox="0 0 1180 566" font-family="Helvetica,Arial,sans-serif">
+<rect width="1180" height="566" fill="#ffffff"/>
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#1c1c1c"/></marker></defs>
+<text x="28" y="40" font-size="21" font-weight="700" fill="#1c1c1c">Data path — from the radio to the host</text>
+<text x="28" y="63" font-size="13" fill="#5a5a5a">Every measurement source feeds the same policy, packet and delivery. Purple is outside this crate; dashed means the policy reports nothing.</text>
+
+<!-- Sources -->
+<rect x="28" y="88" width="190" height="292" rx="9" fill="#fbfbfb" stroke="#d6d6d6"/>
+<text x="44" y="113" font-size="14" font-weight="700" fill="#1c1c1c">Source</text>
+<text x="44" y="131" font-size="11.5" fill="#5a5a5a">Where it comes from</text>
+<rect x="44" y="150" width="158" height="62" rx="9" fill="#9ec9f0" stroke="#2f6fa8" stroke-width="2.4"/>
+<text x="123" y="176" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">ESP CSI callback</text>
+<text x="123" y="195" font-size="10.5" text-anchor="middle" fill="#5a5a5a">EspVendorSource</text>
+<rect x="44" y="232" width="158" height="62" rx="9" fill="#d9d2e9" stroke="#7d6ca8" stroke-width="2.4"/>
+<text x="123" y="258" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">MeasurementSource</text>
+<text x="123" y="277" font-size="10.5" text-anchor="middle" fill="#5a5a5a">emit(&amp;source, frame)</text>
+<text x="123" y="322" font-size="11" text-anchor="middle" fill="#5a5a5a">synthetic · out-of-tree</text>
+<text x="123" y="339" font-size="11" text-anchor="middle" fill="#5a5a5a">IEEE 802.11bf</text>
+
+<!-- Reporting policy -->
+<rect x="246" y="88" width="170" height="292" rx="9" fill="#fbfbfb" stroke="#d6d6d6"/>
+<text x="262" y="113" font-size="14" font-weight="700" fill="#1c1c1c">ReportingPolicy</text>
+<text x="262" y="131" font-size="11.5" fill="#5a5a5a">Whether it leaves the node</text>
+<rect x="262" y="150" width="138" height="34" rx="7" fill="#ffffff" stroke="#1c1c1c" stroke-width="2"/>
+<text x="331" y="172" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">Always</text>
+<rect x="262" y="194" width="138" height="34" rx="7" fill="#ffffff" stroke="#1c1c1c" stroke-width="2" stroke-dasharray="5 3"/>
+<text x="331" y="216" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">Never</text>
+<rect x="262" y="238" width="138" height="34" rx="7" fill="#ffffff" stroke="#1c1c1c" stroke-width="2"/>
+<text x="331" y="260" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">Threshold</text>
+<rect x="262" y="282" width="138" height="34" rx="7" fill="#ffffff" stroke="#1c1c1c" stroke-width="2"/>
+<text x="331" y="304" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">Decimate(n)</text>
+<text x="331" y="343" font-size="11" text-anchor="middle" fill="#5a5a5a">judged on the raw buffer,</text>
+<text x="331" y="359" font-size="11" text-anchor="middle" fill="#5a5a5a">before a packet is built</text>
+
+<!-- CsiPacket -->
+<rect x="444" y="88" width="300" height="292" rx="9" fill="#fbfbfb" stroke="#d6d6d6"/>
+<text x="460" y="113" font-size="14" font-weight="700" fill="#1c1c1c">CsiPacket</text>
+<text x="460" y="131" font-size="11.5" fill="#5a5a5a">The wire contract, defined in src/lib/wire</text>
+<rect x="460" y="150" width="268" height="58" rx="9" fill="#f6c453" stroke="#b8860b" stroke-width="2.4"/>
+<text x="476" y="172" font-size="12" font-weight="700" fill="#1c1c1c">Envelope</text>
+<text x="476" y="191" font-size="10.5" fill="#1c1c1c">version · node_id · session_id · source · stream_seq</text>
+<rect x="460" y="218" width="268" height="146" rx="9" fill="#9ec9f0" stroke="#2f6fa8" stroke-width="2.4"/>
+<text x="476" y="240" font-size="12" font-weight="700" fill="#1c1c1c">CsiFrame</text>
+<text x="476" y="263" font-size="11" font-weight="700" fill="#1c1c1c">RxMeta</text>
+<text x="560" y="263" font-size="10.5" fill="#1c1c1c">timestamp_us · ppdu · bandwidth</text>
+<text x="476" y="286" font-size="11" font-weight="700" fill="#1c1c1c">Stimulus</text>
+<text x="560" y="286" font-size="10.5" fill="#1c1c1c">controlled · ambient · observed</text>
+<text x="476" y="309" font-size="11" font-weight="700" fill="#1c1c1c">HeaderDigest</text>
+<text x="560" y="309" font-size="10.5" fill="#1c1c1c">FC · addr1/2/3 · seq · retry</text>
+<text x="476" y="332" font-size="11" font-weight="700" fill="#1c1c1c">CsiPayload</text>
+<text x="560" y="332" font-size="10.5" fill="#1c1c1c">EspRaw + LayoutId · Grouped</text>
+<text x="560" y="350" font-size="10.5" fill="#1c1c1c">Variation</text>
+
+<!-- Delivery -->
+<rect x="772" y="88" width="170" height="292" rx="9" fill="#fbfbfb" stroke="#d6d6d6"/>
+<text x="788" y="113" font-size="14" font-weight="700" fill="#1c1c1c">Delivery</text>
+<text x="788" y="131" font-size="11.5" fill="#5a5a5a">Exactly one path per packet</text>
+<rect x="788" y="150" width="138" height="58" rx="9" fill="#ffffff" stroke="#1c1c1c" stroke-width="2"/>
+<text x="857" y="174" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">Callback</text>
+<text x="857" y="193" font-size="10.5" text-anchor="middle" fill="#5a5a5a">fn(&amp;CsiPacket)</text>
+<rect x="788" y="220" width="138" height="58" rx="9" fill="#ffffff" stroke="#1c1c1c" stroke-width="2"/>
+<text x="857" y="244" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">CSINodeClient</text>
+<text x="857" y="263" font-size="10.5" text-anchor="middle" fill="#5a5a5a">async queue</text>
+<rect x="788" y="290" width="138" height="58" rx="9" fill="#ffffff" stroke="#1c1c1c" stroke-width="2"/>
+<text x="857" y="314" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">Logger</text>
+<text x="857" y="333" font-size="10.5" text-anchor="middle" fill="#5a5a5a">COBS frames · text</text>
+
+<!-- Host -->
+<rect x="970" y="88" width="182" height="292" rx="9" fill="#fbfbfb" stroke="#d6d6d6"/>
+<text x="986" y="113" font-size="14" font-weight="700" fill="#1c1c1c">Host</text>
+<text x="986" y="131" font-size="11.5" fill="#5a5a5a">Same types, no hand mirror</text>
+<rect x="986" y="150" width="150" height="62" rx="9" fill="#d9d2e9" stroke="#7d6ca8" stroke-width="2.4"/>
+<text x="1061" y="176" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">wire::decode_cobs</text>
+<text x="1061" y="195" font-size="10.5" text-anchor="middle" fill="#5a5a5a">version checked first</text>
+<rect x="986" y="242" width="150" height="62" rx="9" fill="#d9d2e9" stroke="#7d6ca8" stroke-width="2.4"/>
+<text x="1061" y="268" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">csi-webserver-core</text>
+<text x="1061" y="287" font-size="10.5" text-anchor="middle" fill="#5a5a5a">Parquet · WebSocket</text>
+<line x1="1061" y1="213" x2="1061" y2="238" stroke="#1c1c1c" stroke-width="2" marker-end="url(#ar)"/>
+<text x="1061" y="334" font-size="11" text-anchor="middle" fill="#5a5a5a">LayoutId → subcarrier</text>
+<text x="1061" y="351" font-size="11" text-anchor="middle" fill="#5a5a5a">index and frequency</text>
+
+<!-- flow arrows -->
+<line x1="220" y1="234" x2="243" y2="234" stroke="#1c1c1c" stroke-width="2" marker-end="url(#ar)"/>
+<line x1="418" y1="234" x2="441" y2="234" stroke="#1c1c1c" stroke-width="2" marker-end="url(#ar)"/>
+<line x1="746" y1="234" x2="769" y2="234" stroke="#1c1c1c" stroke-width="2" marker-end="url(#ar)"/>
+<line x1="944" y1="234" x2="967" y2="234" stroke="#1c1c1c" stroke-width="2" marker-end="url(#ar)"/>
+
+<!-- Control & observability -->
+<rect x="28" y="400" width="1124" height="122" rx="9" fill="#fbfbfb" stroke="#d6d6d6"/>
+<text x="44" y="425" font-size="14" font-weight="700" fill="#1c1c1c">Configuration and observability</text>
+<text x="44" y="443" font-size="11.5" fill="#5a5a5a">Set by the controller — whatever starts and stops the run.</text>
+<rect x="44" y="456" width="196" height="52" rx="9" fill="#ffffff" stroke="#1c1c1c" stroke-width="2"/>
+<text x="142" y="478" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">MeasurementSetup</text>
+<text x="142" y="496" font-size="10.5" text-anchor="middle" fill="#5a5a5a">periodicity · bandwidth · responders</text>
+<rect x="276" y="456" width="196" height="52" rx="9" fill="#9ec9f0" stroke="#2f6fa8" stroke-width="2.4"/>
+<text x="374" y="478" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">CSINode</text>
+<text x="374" y="496" font-size="10.5" text-anchor="middle" fill="#5a5a5a">OperationalMode · ModeRole</text>
+<line x1="241" y1="482" x2="273" y2="482" stroke="#1c1c1c" stroke-width="2" marker-end="url(#ar)"/>
+<rect x="508" y="456" width="196" height="52" rx="9" fill="#ffffff" stroke="#1c1c1c" stroke-width="2"/>
+<text x="606" y="478" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">RadioProfile</text>
+<text x="606" y="496" font-size="10.5" text-anchor="middle" fill="#5a5a5a">Wi-Fi bring-up seam</text>
+<rect x="740" y="456" width="196" height="52" rx="9" fill="#ffffff" stroke="#1c1c1c" stroke-width="2"/>
+<text x="838" y="478" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">Session</text>
+<text x="838" y="496" font-size="10.5" text-anchor="middle" fill="#5a5a5a">set_session · node_id</text>
+<rect x="956" y="456" width="180" height="52" rx="9" fill="#ffffff" stroke="#1c1c1c" stroke-width="2"/>
+<text x="1046" y="478" font-size="12" font-weight="700" text-anchor="middle" fill="#1c1c1c">Statistics</text>
+<text x="1046" y="496" font-size="10.5" text-anchor="middle" fill="#5a5a5a">drops per cause · per transmitter</text>
+
+<text x="28" y="550" font-size="12" fill="#5a5a5a">src/lib/wire is no_std and free of esp-* imports, so host tooling decodes frames with the firmware's own definitions.</text>
+</svg>
