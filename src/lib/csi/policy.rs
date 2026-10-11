@@ -1,5 +1,5 @@
-//! The state behind [`ReportingPolicy::Threshold`](crate::ReportingPolicy::Threshold) and
-//! [`ReportingPolicy::Decimate`](crate::ReportingPolicy::Decimate).
+//! The state behind [`Reporting::ThresholdBased`](crate::Reporting::ThresholdBased) and
+//! [`Reporting::Decimate`](crate::Reporting::Decimate).
 //!
 //! Pure integer arithmetic with no `esp-*` imports: it runs inside the Wi-Fi CSI callback, and the
 //! host test crate compiles this file directly to test it.

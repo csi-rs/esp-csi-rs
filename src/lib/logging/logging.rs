@@ -110,7 +110,7 @@ pub fn auto_log_backend_label() -> &'static str {
 /// 460800 baud, sniffer mode picks up a mix of 11b / 11n / HT-LTF frames
 /// whose CSI lengths vary, blowing line size past the UART ceiling.
 /// Capping to 128 keeps every line at ~475B and lets sniffer hit the
-/// same PPS as a peripheral seeing only one PHY type.
+/// same PPS as a receiver seeing only one PHY type.
 ///
 /// Scope is deliberately EspCsiTool-ONLY, and this is NOT a general throughput knob. Truncating a
 /// payload discards subcarriers the radio already spent airtime capturing, and an arbitrary cap cuts
@@ -118,7 +118,7 @@ pub fn auto_log_backend_label() -> &'static str {
 /// want — `CsiConfig`'s per-LTF flags, driven from a CLI as `set-csi --htltf=off --stbc-htltf=off`.
 /// Measured on an ESP32 at 115200, that beat truncating to the same 128 bytes: 23.9 vs 21.0 CSI/s
 /// delivered, and 506 vs 446 frames captured, because the radio does less work per frame. This cap
-/// exists only to reproduce ESP32-CSI-Tool's column-25/26 semantics for collectors expecting them.
+/// exists only to reproduce ESP32-CSI-Tool's column-25/26 semantics for consumers expecting them.
 ///
 /// Default 0 = no cap (emit full `csi_data`).
 static CSI_TOOL_EMIT_CAP: portable_atomic::AtomicU16 = portable_atomic::AtomicU16::new(0);
@@ -137,7 +137,7 @@ pub fn set_csi_tool_emit_cap(cap: u16) {
 ///
 /// This is that tool's column vocabulary, kept so its parsers read the output unchanged. It is a
 /// label chosen by the caller, not one of this crate's node attributes: nothing reads it back, and
-/// it is not derived from the node's operational mode or network role (see [`crate::model`]).
+/// it is not derived from the node's mode or roles (see [`crate::model`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     /// `STA` — conventionally, a Wi-Fi station node.
@@ -749,7 +749,7 @@ pub fn init_logger(spawner: embassy_executor::Spawner, log_mode: LogMode) {
     // `async-print` used to force this true, which is the bug: `auto` decides the console at boot
     // from a one-shot USB-SOF read, and a board that lands on UART was then run through the ASYNC
     // backend — a 32-slot drop-newest channel against ~11 KB/s of UART, versus the ~48 KB/s a
-    // collector produces. Measured on the bench 2026-08-20 with an emitter running: `RX Total
+    // receiver produces. Measured on the bench 2026-08-20 with an emitter running: `RX Total
     // Packets: 897`, `Log Dropped Pkts: 801`, and **zero bytes** on the port in both `serialized`
     // and `array-list`. The board attached, verified, answered every command and reported its rate,
     // because the CLI console is on USB either way — it simply never delivered CSI. Four boards

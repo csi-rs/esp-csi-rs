@@ -1,19 +1,14 @@
-//! [`EspNowConfig`], the configuration of both ESP-NOW operational modes.
+//! [`EspNowConfig`], the configuration of both ESP-NOW modes.
 //!
-//! `EspNowConfig` carries what the symmetric exchange ([`OperationalMode::EspNow`]) admits —
-//! channel, forced TX PHY (HT20, HT40 or HE20), an explicit peer MAC, and the node's network role
-//! and reporting policy — and is the inner config of both ends of the asymmetric one
-//! ([`OperationalMode::EspNowSimplex`], built through [`SimplexConfig`]). What those attributes
-//! mean is in [`crate::model`].
+//! `EspNowConfig` carries what the symmetric exchange ([`Mode::EspNow`]) admits — channel, forced
+//! TX PHY (HT20, HT40 or HE20), an explicit peer MAC, and the node's session role and reporting —
+//! and is the inner config of both ends of the asymmetric one ([`Mode::EspNowSimplex`], built
+//! through [`SimplexConfig`]). What those attributes mean is in [`crate::model`].
 //!
-//! The pre-0.11 `CentralOpMode`, `PeripheralOpMode` and `Node` enums that used to wrap this config
-//! were removed in 0.12.
+//! Station and access-point measurement are not here: they live in [`crate::wifi`].
 //!
-//! Station and access-point collection are not here: they live in [`crate::collector`], which
-//! [`crate::central`] re-exports rather than duplicates.
-//!
-//! [`OperationalMode::EspNow`]: crate::OperationalMode::EspNow
-//! [`OperationalMode::EspNowSimplex`]: crate::OperationalMode::EspNowSimplex
+//! [`Mode::EspNow`]: crate::Mode::EspNow
+//! [`Mode::EspNowSimplex`]: crate::Mode::EspNowSimplex
 //! [`SimplexConfig`]: crate::SimplexConfig
 
 // `WifiPhyRate` moved from `wifi` to `esp_now` in esp-radio 0.18 — it only ever described the
@@ -21,10 +16,10 @@
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::SecondaryChannel;
 
-/// Configuration for the ESP-NOW operational modes.
+/// Configuration for the ESP-NOW modes.
 ///
-/// Both ends of the symmetric exchange take one, and it is where their network role and collection
-/// mode are set; the simplex source end takes one through
+/// Both ends of the symmetric exchange take one, and it is where their session role and reporting
+/// are set; the simplex source end takes one through
 /// [`SimplexConfig::source`](crate::SimplexConfig::source). Construct with
 /// `EspNowConfig::default()` then chain `with_channel` / `with_phy_rate` to override defaults —
 /// both nodes must agree on the channel for ESP-NOW frames to be received.
@@ -50,13 +45,13 @@ pub struct EspNowConfig {
     /// Send forced MCS rates as HE20 instead of HT20. Set by `with_he20`.
     he20: bool,
     /// Which end of the exchange this node is. ESP-NOW is the one mode that admits both, because
-    /// the exchange is symmetric: the central originates the control traffic and the peripheral
+    /// the exchange is symmetric: the initiator originates the control traffic and the responder
     /// answers it, and either end can measure.
-    network_role: crate::NetworkRole,
-    /// Whether, and how often, this node reports the CSI it captures. A central announces whether
-    /// it reports at all on the wire, so a peripheral paired with a silent central can promote
-    /// itself.
-    reporting: crate::ReportingPolicy,
+    session: crate::SessionRole,
+    /// Whether, and how often, this node reports the CSI it captures. An initiator announces
+    /// whether it reports at all on the wire, so a responder paired with a silent initiator can
+    /// promote itself.
+    reporting: crate::Reporting,
 }
 
 impl Default for EspNowConfig {
@@ -72,8 +67,8 @@ impl Default for EspNowConfig {
             secondary_channel: None,
             force_phy: false,
             he20: false,
-            network_role: crate::NetworkRole::Central,
-            reporting: crate::ReportingPolicy::Always,
+            session: crate::SessionRole::Initiator,
+            reporting: crate::Reporting::HOST,
         }
     }
 }
@@ -82,7 +77,7 @@ impl EspNowConfig {
     /// Recommended base config for the source end of the asymmetric ESP-NOW simplex exchange:
     /// forces HT20 at MCS7 Long-GI for maximum CSI packets/sec at the peer. Chain `with_channel` /
     /// `with_ht40` to override. Pass it to [`SimplexConfig::source`](crate::SimplexConfig::source)
-    /// or [`CSINode::esp_now_simplex_source`](crate::CSINode::esp_now_simplex_source); the peer end
+    /// or [`CsiNode::esp_now_simplex_source`](crate::CsiNode::esp_now_simplex_source); the peer end
     /// takes only a channel.
     pub fn fast_default() -> Self {
         Self::default().with_phy_rate(WifiPhyRate::RateMcs7Lgi)
@@ -116,8 +111,8 @@ impl EspNowConfig {
     ///
     /// Switches off automatic magic-prefix pairing: no magic is sent, and each
     /// node accepts frames only from the configured peer MAC (source-MAC
-    /// filtering applies from the first frame). The central must be given the
-    /// peripheral's MAC and vice-versa, and both nodes must use the same
+    /// filtering applies from the first frame). The initiator must be given the
+    /// responder's MAC and vice-versa, and both nodes must use the same
     /// pairing mode for frames to parse.
     pub fn with_peer_mac(mut self, peer_mac: [u8; 6]) -> Self {
         self.peer_mac = Some(peer_mac);
@@ -195,42 +190,34 @@ impl EspNowConfig {
         self.force_phy
     }
 
-    /// Set which end of the exchange this node is. Defaults to
-    /// [`Central`](crate::NetworkRole::Central).
-    pub fn with_network_role(mut self, role: crate::NetworkRole) -> Self {
-        self.network_role = role;
+    /// Set which end of the exchange this node is: the [`Initiator`](crate::SessionRole::Initiator)
+    /// originates the control traffic, a [`Responder`](crate::SessionRole::Responder) answers it.
+    /// Defaults to `Initiator`.
+    pub fn session(mut self, role: crate::SessionRole) -> Self {
+        self.session = role;
         self
     }
 
     /// Set whether, and how often, this node reports its CSI. Defaults to
-    /// [`Always`](crate::ReportingPolicy::Always).
-    pub fn with_reporting(mut self, policy: crate::ReportingPolicy) -> Self {
-        self.reporting = policy;
+    /// [`Reporting::HOST`](crate::Reporting::HOST).
+    pub fn reporting(mut self, reporting: crate::Reporting) -> Self {
+        self.reporting = reporting;
         self
     }
 
-    /// The pre-0.12 name of [`with_reporting`](Self::with_reporting).
-    #[deprecated(since = "0.12.0", note = "renamed to `with_reporting`")]
-    pub fn with_collection_mode(self, policy: crate::ReportingPolicy) -> Self {
-        self.with_reporting(policy)
-    }
-
     /// Which end of the exchange this node is.
-    pub fn network_role(&self) -> crate::NetworkRole {
-        self.network_role
+    pub fn session_role(&self) -> crate::SessionRole {
+        self.session
     }
 
-    /// Whether, and how often, this node reports the CSI it captures.
-    pub fn reporting(&self) -> crate::ReportingPolicy {
-        self.reporting
+    /// Both ends of the symmetric exchange transmit and measure:
+    /// [`TransmitterReceiver`](crate::SensingRole::TransmitterReceiver), always.
+    pub const fn sensing_role(&self) -> crate::SensingRole {
+        crate::SensingRole::TransmitterReceiver
     }
 
-    /// The pre-0.12 name of [`reporting`](Self::reporting).
-    #[deprecated(since = "0.12.0", note = "renamed to `reporting`")]
-    pub fn collection_mode(&self) -> crate::ReportingPolicy {
+    /// Whether, and how often, this node reports the CSI it captures, as configured.
+    pub fn get_reporting(&self) -> crate::Reporting {
         self.reporting
     }
 }
-// `ReportingPolicy` lives in `crate::model`, beside the other attributes of the node model instead of
-// beside the ESP-NOW transport that happens to put it on the wire.
-pub use crate::model::ReportingPolicy;

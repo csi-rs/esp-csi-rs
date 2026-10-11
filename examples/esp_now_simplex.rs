@@ -2,12 +2,12 @@
 //!
 //! | Attribute | `END = Source` | `END = Peer` |
 //! |---|---|---|
-//! | Operational mode | ESP-NOW simplex | ESP-NOW simplex |
-//! | Network role | **Central** — it owns all transmit airtime | **Peripheral** — it sources nothing |
-//! | Reporting policy | **Never** — it captures nothing | **Always** |
-//! | Session role | none — the run's controller is whatever calls `run()` | same |
+//! | Mode | ESP-NOW simplex | ESP-NOW simplex |
+//! | Session role | **Initiator** — it originates the flood | **Responder** |
+//! | Sensing role | **Transmitter** — it owns all transmit airtime | **Receiver** |
+//! | Reporting | **None** — it measures nothing | **Report** (to the host) |
 //!
-//! Neither attribute is settable: the asymmetry fixes both. The source floods, the peer measures.
+//! None of these is settable: the asymmetry fixes them all. The source floods, the peer measures.
 //! Leaving the channel to a single transmitter is exactly why this sustains a markedly higher
 //! sample rate than the symmetric `esp_now` pairing.
 //!
@@ -27,7 +27,7 @@ use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CsiPacket;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, EspNowConfig, NodeHardware, config::CsiConfig,
+    CsiConfig, CsiNode, CsiNodeClient, EspNowConfig, MeasurementSetup, NodeHardware,
     install_static_espnow_recv, log_ln, set_csi_callback,
 };
 use esp_hal::clock::CpuClock;
@@ -43,9 +43,9 @@ extern crate alloc;
 
 #[derive(PartialEq, Eq)]
 enum End {
-    /// Floods. Central listener.
+    /// Floods: initiator, sensing transmitter, reports nothing.
     Source,
-    /// Measures. Peripheral collector.
+    /// Measures: responder, sensing receiver, reports everything.
     Peer,
 }
 
@@ -107,23 +107,28 @@ async fn main(spawner: Spawner) -> ! {
     install_static_espnow_recv();
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    let mut node_handle = CSINodeClient::new();
+    let mut node_handle = CsiNodeClient::new();
     let csi_hardware = NodeHardware::new(controller);
 
     let mut node = match END {
         End::Source => {
-            log_ln!("Starting simplex source (central listener) on channel {}", CHANNEL);
-            CSINode::esp_now_simplex_source(
+            log_ln!("Starting simplex source (initiator, transmitter) on channel {}", CHANNEL);
+            // No periodicity: the source floods as fast as the radio sends.
+            CsiNode::esp_now_simplex_source(
                 EspNowConfig::default()
                     .with_channel(CHANNEL)
                     .with_phy_rate(PHY_RATE),
-                None,
+                MeasurementSetup::new(),
                 csi_hardware,
             )
         }
         End::Peer => {
-            log_ln!("Starting simplex peer (peripheral collector) on channel {}", CHANNEL);
-            CSINode::esp_now_simplex_peer(CHANNEL, Some(CsiConfig::default()), csi_hardware)
+            log_ln!("Starting simplex peer (responder, receiver) on channel {}", CHANNEL);
+            CsiNode::esp_now_simplex_peer(
+                CHANNEL,
+                MeasurementSetup::new().acquisition(CsiConfig::default()),
+                csi_hardware,
+            )
         }
     };
     node.set_protocol(esp_radio::wifi::Protocol::N);

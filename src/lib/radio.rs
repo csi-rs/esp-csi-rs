@@ -1,4 +1,4 @@
-//! Low-level radio helpers shared by every operational mode.
+//! Low-level radio helpers shared by every mode.
 //!
 //! Band selection, HT40 channel setup, and the ESP-NOW handling this crate still
 //! needs: silencing esp-radio's built-in ESP-NOW receive dispatcher (see

@@ -27,7 +27,7 @@ pub trait MeasurementSource {
     }
 }
 
-/// The Espressif vendor CSI callback: the source every built-in operational mode uses.
+/// The Espressif vendor CSI callback: the source every built-in mode uses.
 ///
 /// Its frames do not pass through [`emit`] — the callback runs the same pipeline inline, with its
 /// attribution filter and policy judged on the raw buffer before a packet is built — but they are
@@ -48,8 +48,8 @@ impl MeasurementSource for EspVendorSource {
 /// one of the callback, the async queue or the logger, like any captured frame.
 ///
 /// Callable from any task. It must not race the vendor CSI callback's own reporting-policy state, so
-/// do not emit from a second source while a [`Threshold`](crate::ReportingPolicy::Threshold) or
-/// [`Decimate`](crate::ReportingPolicy::Decimate) policy is in force on a running ESP mode.
+/// do not emit from a second source while a [`Threshold`](crate::Reporting::ThresholdBased) or
+/// [`Decimate`](crate::Reporting::Decimate) policy is in force on a running ESP mode.
 pub fn emit(source: &dyn MeasurementSource, mut frame: CsiFrame) -> bool {
     if !super::delivery::publish_open() {
         return false;

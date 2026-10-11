@@ -2,15 +2,17 @@
 //!
 //! | Attribute | Value |
 //! |---|---|
-//! | Operational mode | Wi-Fi station |
-//! | Network role | `NETWORK_ROLE` below — both are meaningful |
-//! | Reporting policy | `REPORTING` below — `Always`, `Never`, `Threshold` or `Decimate` |
-//! | Session role | none — the run's controller is whatever calls `run()` |
+//! | Mode | Wi-Fi station |
+//! | Session role | `SESSION_ROLE` below — `Some(Initiator)` or `None` |
+//! | Sensing role | transmitter-receiver when it drives the traffic, otherwise receiver |
+//! | Reporting | `REPORTING` below — `Report`, `None`, `ThresholdBased` or `Decimate` |
 //!
-//! A station is **central** when the uplink it generates is the traffic being measured — the usual
-//! case here, where it pings its gateway at `PING_RATE_HZ` so the AP has something to measure. It
-//! is a **peripheral** when it only measures an already-busy link and sources nothing itself; set
-//! that with `with_network_role` and drop the ping rate to `None`.
+//! The run's controller is whatever calls `run()`; it is never the initiator.
+//!
+//! A station is the session's **initiator** when the uplink it generates is the traffic being
+//! measured — the usual case here, where it pings its gateway at `PING_RATE_HZ` so the AP has
+//! something to measure. It has **no session role** when it only measures an already-busy link
+//! and drives nothing itself; set `SESSION_ROLE` to `None` and drop the ping rate to `None`.
 //!
 //! Associates to an ESP softAP (`access_point`) or to any commercial router. On the dual-band
 //! ESP32-C5, `with_channel_hint` pins the band before the scan — without it the node scans both,
@@ -27,7 +29,7 @@ use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CsiPacket;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, ReportingPolicy, NetworkRole, NodeHardware, WifiStationConfig, config::CsiConfig,
+    CsiConfig, CsiNode, MeasurementSetup, NodeHardware, Reporting, SessionRole, WifiStationConfig,
     log_ln, set_csi_callback,
 };
 use esp_hal::clock::CpuClock;
@@ -44,16 +46,16 @@ extern crate alloc;
 /// Must match `access_point` (or your own AP).
 const SSID: &str = "esp-csi-ap";
 
-/// Central if this node's uplink is the traffic being measured; peripheral if it only listens to a
-/// link someone else keeps busy.
-const NETWORK_ROLE: NetworkRole = NetworkRole::Central;
+/// `Some(Initiator)` if this node's uplink is the traffic being measured; `None` if it only
+/// measures a link someone else keeps busy.
+const SESSION_ROLE: Option<SessionRole> = Some(SessionRole::Initiator);
 
-/// `Never` keeps the link busy without reporting anything — useful when the AP is the collector
-/// and you want this node's delivery cost out of the measurement.
-const REPORTING: ReportingPolicy = ReportingPolicy::Always;
+/// `Reporting::None` keeps the link busy without reporting anything — useful when the AP is the
+/// node that reports and you want this node's delivery cost out of the measurement.
+const REPORTING: Reporting = Reporting::HOST;
 
-/// Gateway ping rate (Hz) — the uplink an AP collector measures. Set `None` for a peripheral that
-/// generates no traffic of its own.
+/// Gateway ping rate (Hz): the measurement periodicity, the uplink a reporting AP measures. Set
+/// `None` for a passive station that generates no traffic of its own.
 const PING_RATE_HZ: Option<u16> = Some(4000);
 
 /// Pin the radio band from the AP's primary channel (ESP32-C5 dual-band only).
@@ -108,8 +110,8 @@ async fn main(spawner: Spawner) -> ! {
         .with_authentication(esp_radio::wifi::AuthenticationMethodConfig::Open);
 
     let mut station_config = WifiStationConfig::new(client_config)
-        .with_network_role(NETWORK_ROLE)
-        .with_reporting(REPORTING);
+        .session(SESSION_ROLE)
+        .reporting(REPORTING);
     if let Some(channel) = CHANNEL_HINT {
         station_config = station_config.with_channel_hint(channel);
     }
@@ -117,12 +119,11 @@ async fn main(spawner: Spawner) -> ! {
     log_ln!("Starting station on SSID {}", SSID);
 
     let csi_hardware = NodeHardware::new(controller);
-    let mut node = CSINode::station(
-        station_config,
-        Some(CsiConfig::default()),
-        PING_RATE_HZ,
-        csi_hardware,
-    );
+    let mut setup = MeasurementSetup::new().acquisition(CsiConfig::default());
+    if let Some(hz) = PING_RATE_HZ {
+        setup = setup.periodicity_hz(hz);
+    }
+    let mut node = CsiNode::station(station_config, setup, csi_hardware);
     node.set_protocol(esp_radio::wifi::Protocol::N);
 
     set_csi_callback(on_csi);

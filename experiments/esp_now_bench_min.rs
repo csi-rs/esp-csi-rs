@@ -1,4 +1,4 @@
-//! **ESP-NOW footprint floor** — the platform baseline, with no `CSINode` in it.
+//! **ESP-NOW footprint floor** — the platform baseline, with no `CsiNode` in it.
 //!
 //! The `min` half of the binary-footprint measurement. Performs the same platform boilerplate and
 //! the same raw ESP-NOW bring-up the crate's ESP-NOW arm relies on (STA config, channel, per-peer
@@ -7,7 +7,7 @@
 //!
 //! `esp_now_bench − esp_now_bench_min` is the crate's ESP-NOW footprint. **Build both halves with
 //! the same feature set**, or the difference includes whatever the features linked. Built and
-//! measured, not run. The radio floor is shared between the central and peripheral ends, which is
+//! measured, not run. The radio floor is shared between the initiator and responder ends, which is
 //! why there is one floor rather than two.
 //!
 //! Build: `cargo esp32c6-build --example esp_now_bench_min`
@@ -28,7 +28,7 @@ use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
 
-/// Wi-Fi channel — match `esp_now_central`.
+/// Wi-Fi channel — match `esp_now_bench`.
 const CHANNEL: u8 = 1;
 
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
@@ -47,18 +47,18 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-    log_ln!("Footprint min: ESP-NOW central platform floor (no CSINode)");
+    log_ln!("Footprint min: ESP-NOW initiator platform floor (no CsiNode)");
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
     let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio).expect("Wi-Fi init failed");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
     // Claim the same radio handles `NodeHardware::new` claims, so the footprint difference
-    // against the full harness is only the CSINode machinery.
+    // against the full harness is only the CsiNode machinery.
     let _station = esp_radio::wifi::Interface::station();
     let _access_point = esp_radio::wifi::Interface::access_point();
     let _sniffer = controller.sniffer();
 
-    // Raw ESP-NOW bring-up (STA started, channel, per-peer MCS0) — no CSINode,
+    // Raw ESP-NOW bring-up (STA started, channel, per-peer MCS0) — no CsiNode,
     // no ControlPacket, no TX loop. Keeps the ESP-NOW interface alive/linked.
     let _esp_now = controller.esp_now();
     let _ = controller.set_config(&Config::Station(StationConfig::default()));

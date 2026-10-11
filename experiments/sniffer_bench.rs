@@ -1,7 +1,7 @@
 //! **Sniffer measurement harness** — heap, throughput and log-format cost.
 //!
-//! A peripheral collector locked to `CHANNEL`, reporting one line a second. Replaces the four
-//! single-purpose sniffer harnesses (`sniffer_wifi_exper{,_heap,_esp_csi_tool,_logmode_cycle}`),
+//! A sniffer (observer, receiver) locked to `CHANNEL`, reporting one line a second. Replaces the
+//! four single-purpose sniffer harnesses (`sniffer_wifi_exper{,_heap,_esp_csi_tool,_logmode_cycle}`),
 //! which differed only in `MEASURE` and `LOG_MODE`.
 //!
 //! `LOG_MODE` is a measurement variable in its own right: the log format decides how many bytes
@@ -9,7 +9,7 @@
 //! saturates first. `EspCsiTool` emits the ESP32-CSI-Tool CSV layout for comparison against that
 //! tool's own numbers; `Serialized` is the compact postcard/COBS framing.
 //!
-//! The footprint half is `sniffer_bench_min` — same platform and radio bring-up, no `CSINode`.
+//! The footprint half is `sniffer_bench_min` — same platform and radio bring-up, no `CsiNode`.
 //! Build both with the same features.
 //!
 //! Build:
@@ -26,7 +26,7 @@ use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, NodeHardware, WifiSnifferConfig, config::CsiConfig, log_ln,
+    CsiConfig, CsiNode, CsiNodeClient, MeasurementSetup, NodeHardware, WifiSnifferConfig, log_ln,
 };
 #[cfg(feature = "statistics")]
 use esp_csi_rs::{get_dropped_packets_rx, get_pps_rx, get_total_rx_packets};
@@ -63,7 +63,7 @@ static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-async fn report_task(_client: &mut CSINodeClient) {
+async fn report_task(_client: &mut CsiNodeClient) {
     let mut last_rx_total = get_total_rx_packets();
     loop {
         Timer::after_secs(1).await;
@@ -102,11 +102,11 @@ async fn main(spawner: Spawner) -> ! {
 
     log_ln!("Sniffer bench — channel {}", CHANNEL);
 
-    let mut node_handle = CSINodeClient::new();
+    let mut node_handle = CsiNodeClient::new();
     let csi_hardware = NodeHardware::new(controller);
-    let mut node = CSINode::sniffer(
+    let mut node = CsiNode::sniffer(
         WifiSnifferConfig::default().with_channel(CHANNEL),
-        Some(CsiConfig::default()),
+        MeasurementSetup::new().acquisition(CsiConfig::default()),
         csi_hardware,
     );
     // Deliberately no `set_protocol`: on the C5 the broadcast PHY is not forced, so frames can be

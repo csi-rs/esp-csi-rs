@@ -2,21 +2,18 @@
 //!
 //! | Attribute | Value |
 //! |---|---|
-//! | Operational mode | Emitter (raw sounding) |
-//! | Network role | Central — the sounding frames *are* the network's traffic |
-//! | Reporting policy | Never — it captures nothing, so it has nothing to report |
-//! | Session role | none — the run's controller is whatever calls `run()` |
+//! | Mode | Emitter (raw sounding) |
+//! | Session role | none — it sounds for whoever listens, in no session |
+//! | Sensing role | Transmitter — the sounding frames *are* the network's traffic |
+//! | Reporting | None — it measures nothing, so it has nothing to report |
 //!
-//! Neither role is settable, so `CSINode::emitter` takes no role arguments and no CSI config.
-//!
-//! This is the case the older two-role vocabulary could not express. "Emitter" was treated as a
-//! role opposite "collector", which left no name for the far more useful description: a **central
-//! listener**, a node that puts known energy into the channel and measures nothing. See
-//! `docs/network-model.md`.
+//! None of these is settable, so `CsiNode::emitter` takes no role arguments and no measurement
+//! setup: a **sensing transmitter that reports nothing**, a node that puts known energy into the
+//! channel and measures nothing. See `docs/network-model.md`.
 //!
 //! Because the frames carry no meaning, an emitter needs no peer, no handshake and no protocol.
-//! Pair it with any number of `sniffer` nodes on the same primary channel; adding collectors costs
-//! the emitter nothing, and several emitters can share one collector because each frame carries its
+//! Pair it with any number of `sniffer` nodes on the same primary channel; adding receivers costs
+//! the emitter nothing, and several emitters can share one receiver because each frame carries its
 //! transmitter's MAC.
 //!
 //! ## Transport is chosen by the chip, not by you
@@ -33,7 +30,7 @@
 //! and C6, `HE20` forces 802.11ax HE20 instead; pair it with a `sniffer` built with `HE20 = true`,
 //! which captures the ~242-subcarrier HE-LTF. HT40 needs room in the band:
 //! `Ht40Above` on channel 7 occupies up to channel 11 and `Ht40Below` occupies down to channel 3, so
-//! a primary too close to the edge silently falls back. Confirm it engaged at the *collector*, not
+//! a primary too close to the edge silently falls back. Confirm it engaged at the *receiver*, not
 //! here: a subcarrier count >= 100 (commonly ~117) is HT40, ~53/~56 means fallback.
 //!
 //! Build / run:
@@ -46,7 +43,7 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
-use esp_csi_rs::{CSINode, EmitterConfig, EmitterPhy, NodeHardware, log_ln};
+use esp_csi_rs::{CsiNode, EmitterConfig, EmitterPhy, NodeHardware, log_ln};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::WifiController;
@@ -77,8 +74,8 @@ fn phy() -> EmitterPhy {
 /// Delay between injected frames. 20 ms is ~50 frames/s.
 const PERIOD: Duration = Duration::from_millis(20);
 
-/// Address a specific collector instead of broadcasting. Broadcast is the default; unicasting to
-/// one collector tends to raise *that* collector's CSI callback rate.
+/// Address a specific receiver instead of broadcasting. Broadcast is the default; unicasting to
+/// one receiver tends to raise *that* receiver's CSI callback rate.
 const DST_MAC: Option<[u8; 6]> = None;
 
 // ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -110,13 +107,13 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     log_ln!(
-        "Starting emitter (central listener) — channel {}, {} ms period",
+        "Starting emitter (sensing transmitter) — channel {}, {} ms period",
         CHANNEL,
         PERIOD.as_millis()
     );
 
     let hardware = NodeHardware::new(controller);
-    let mut node = CSINode::emitter(emitter, hardware);
+    let mut node = CsiNode::emitter(emitter, hardware);
 
     let started = Instant::now();
     node.run().await;

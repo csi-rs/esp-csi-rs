@@ -1,20 +1,20 @@
-//! Peripheral-side ESP-NOW driver task.
+//! Responder-side ESP-NOW driver task.
 //!
-//! Receives [`crate::ControlPacket`] frames from the central, promotes itself to
-//! [`Collector`](crate::CollectionMode::Collector) when the central announces that it is a
-//! listener (so the pair still produces a dataset), and replies with a
-//! [`crate::PeripheralPacket`] presence beacon. Operates against the lock-free
+//! Receives [`crate::ControlPacket`] frames from the initiator, promotes itself to
+//! `Report { to: Host }` when the initiator announces that it reports nothing (so the pair still
+//! produces a dataset), and replies with a
+//! [`crate::ResponderPacket`] presence beacon. Operates against the lock-free
 //! [`crate::esp_now_pool`] receive queue to avoid heap churn in the
 //! ESP-NOW interrupt path.
 
 use core::sync::atomic::Ordering;
 
-use crate::CENTRAL_MAGIC_NUMBER;
+use crate::INITIATOR_MAGIC_NUMBER;
 use crate::ControlPacket;
-use crate::IS_COLLECTOR;
-use crate::PERIPHERAL_BEACON_SENTINEL;
-use crate::PERIPHERAL_MAGIC_NUMBER;
-use crate::PeripheralPacket;
+use crate::REPORTS;
+use crate::RESPONDER_BEACON_SENTINEL;
+use crate::RESPONDER_MAGIC_NUMBER;
+use crate::ResponderPacket;
 #[cfg(feature = "statistics")]
 use crate::STATS;
 use crate::STOP_SIGNAL;
@@ -47,7 +47,7 @@ const ADAPT_DOWN_PERCENT: u64 = 25;
 const ADAPT_UP_PERCENT: u64 = 10;
 const MIN_REPLY_HZ_FLOOR: u64 = 100;
 const MAX_REPLY_HZ_CEILING: u64 = 8_000;
-const PERIPHERAL_PACKET_BUF_LEN: usize = 8;
+const RESPONDER_PACKET_BUF_LEN: usize = 8;
 const TX_CATCH_UP_BURST: u8 = 1;
 const RX_BURST_MAX_WITH_TX: u16 = 1;
 const RX_RESERVED_TX_GUARD_US: u64 = 15;
@@ -116,34 +116,34 @@ pub fn get_rx_parse_fail_packets() -> u64 {
 }
 
 /// Returns the number of received frames dropped because the magic
-/// number did not match `CENTRAL_MAGIC_NUMBER`.
+/// number did not match `INITIATOR_MAGIC_NUMBER`.
 #[cfg(feature = "statistics")]
 pub fn get_rx_magic_drop_packets() -> u64 {
     RX_MAGIC_DROP_COUNT.load(Ordering::Relaxed)
 }
 
 /// Returns the number of received frames dropped because the source MAC
-/// did not match the currently locked-in central peer.
+/// did not match the currently locked-in initiator peer.
 #[cfg(feature = "statistics")]
 pub fn get_rx_source_filter_drop_packets() -> u64 {
     RX_SOURCE_FILTER_DROP_COUNT.load(Ordering::Relaxed)
 }
 
-/// Returns the number of times adding the central as an ESP-NOW peer
+/// Returns the number of times adding the initiator as an ESP-NOW peer
 /// failed (e.g., peer table full).
 #[cfg(feature = "statistics")]
 pub fn get_rx_peer_add_fail_packets() -> u64 {
     RX_PEER_ADD_FAIL_COUNT.load(Ordering::Relaxed)
 }
 
-/// Returns the number of detected gaps in the central's
+/// Returns the number of detected gaps in the initiator's
 /// `sequence_number` (drops or reordering).
 #[cfg(feature = "statistics")]
 pub fn get_rx_sequence_miss_packets() -> u64 {
     RX_SEQUENCE_MISS_COUNT.load(Ordering::Relaxed)
 }
 
-/// Returns the number of valid control packets received from the central
+/// Returns the number of valid control packets received from the initiator
 /// (passed source/parse/magic checks). Together with
 /// [`get_rx_sequence_miss_packets`] this gives the sequence-gap drop rate:
 /// `missed / (received + missed)`.
@@ -153,7 +153,7 @@ pub fn get_rx_control_packets() -> u64 {
 }
 
 /// Returns the number of times an RX completed inside the TX guard
-/// window — i.e. the peripheral's reply landed before the central had
+/// window — i.e. the responder's reply landed before the initiator had
 /// finished its previous transmit slot.
 #[cfg(feature = "statistics")]
 pub fn get_rx_tx_guard_breaks() -> u64 {
@@ -186,8 +186,8 @@ fn u64_to_mac(v: u64) -> [u8; 6] {
     ]
 }
 
-/// Whether the peripheral replies by unicast to the auto-learned central MAC
-/// (vs. broadcast). The central MAC is always discovered from the first control
+/// Whether the responder replies by unicast to the auto-learned initiator MAC
+/// (vs. broadcast). The initiator MAC is always discovered from the first control
 /// frame in auto-pairing mode — unicast here never requires a configured MAC.
 ///
 /// - **HT40** always unicasts: a per-peer HT40 rate config only applies to a
@@ -195,9 +195,9 @@ fn u64_to_mac(v: u64) -> [u8; 6] {
 /// - **C5 HT20 with forced PHY** also unicasts. `esp_now_set_peer_rate_config`
 ///   on the broadcast peer wedges the C5 dual-band Wi-Fi ISR, so forced MCS/HT20
 ///   can only be applied to a learned unicast peer. This is what lets a C5
-///   central collect CSI automatically (OFDM replies) without hardcoded MACs.
+///   initiator measure CSI automatically (OFDM replies) without hardcoded MACs.
 /// - **Non-C5 HT20** stays broadcast: the broadcast peer accepts forced PHY
-///   there, and broadcast is more robust for an unassociated started-STA central.
+///   there, and broadcast is more robust for an unassociated started-STA initiator.
 fn unicast_replies(config: &EspNowConfig) -> bool {
     if config.secondary_channel().is_some() {
         return true;
@@ -212,35 +212,35 @@ fn unicast_replies(config: &EspNowConfig) -> bool {
     }
 }
 
-fn apply_central_peer_phy(esp_now: &EspNow, config: &EspNowConfig, central_mac: &[u8; 6]) {
+fn apply_initiator_peer_phy(esp_now: &EspNow, config: &EspNowConfig, initiator_mac: &[u8; 6]) {
     if !config.force_phy() {
         return;
     }
     if unicast_replies(config) {
-        apply_peer_espnow_phy(esp_now, central_mac, config.peer_phy());
+        apply_peer_espnow_phy(esp_now, initiator_mac, config.peer_phy());
     }
 }
 
 fn reply_destination(shared: &Shared, config: &EspNowConfig) -> [u8; 6] {
     if unicast_replies(config) {
-        u64_to_mac(shared.central_mac.load(Ordering::Relaxed))
+        u64_to_mac(shared.initiator_mac.load(Ordering::Relaxed))
     } else {
         BROADCAST_ADDRESS
     }
 }
 
-fn register_central_peer(
+fn register_initiator_peer(
     esp_now: &EspNow,
     channel: u8,
     config: &EspNowConfig,
-    central_mac: [u8; 6],
+    initiator_mac: [u8; 6],
 ) -> bool {
-    let add_res = if esp_now.peer_exists(&central_mac) {
+    let add_res = if esp_now.peer_exists(&initiator_mac) {
         Ok(())
     } else {
         esp_now.add_peer(PeerInfo {
             interface: esp_radio::esp_now::EspNowWifiInterface::Station,
-            peer_address: central_mac,
+            peer_address: initiator_mac,
             lmk: None,
             channel: Some(channel),
             encrypt: false,
@@ -249,7 +249,7 @@ fn register_central_peer(
 
     match add_res {
         Ok(()) => {
-            apply_central_peer_phy(esp_now, config, &central_mac);
+            apply_initiator_peer_phy(esp_now, config, &initiator_mac);
             true
         }
         Err(_) => {
@@ -263,18 +263,18 @@ fn register_central_peer(
 /// Shared responder state.
 struct Shared {
     is_connected: AtomicBool,
-    is_collector: AtomicBool,
-    central_mac: AtomicU64,
+    reports: AtomicBool,
+    initiator_mac: AtomicU64,
     peer_healthcheck_counter: AtomicU16,
     #[cfg(feature = "statistics")]
     last_control_sequence: AtomicU32,
     #[cfg(feature = "statistics")]
     sequence_initialized: AtomicBool,
     /// Raised when a valid control packet has been ingested and a presence
-    /// beacon reply is owed to the central.
+    /// beacon reply is owed to the initiator.
     pending_flag: AtomicBool,
-    /// Last `!packet.is_collector` value seen; used to detect direction changes.
-    last_central_is_listener: AtomicBool,
+    /// Last `!packet.initiator_reports` value seen; used to detect direction changes.
+    last_initiator_silent: AtomicBool,
     /// Consecutive-packet streak counter for mode-switch hysteresis.
     mode_streak: AtomicU8,
 }
@@ -300,7 +300,7 @@ fn ingest_control_packet(
 
     let is_connected = shared.is_connected.load(Ordering::Acquire);
     if is_connected {
-        let expected = u64_to_mac(shared.central_mac.load(Ordering::Relaxed));
+        let expected = u64_to_mac(shared.initiator_mac.load(Ordering::Relaxed));
         if expected != r.info.src_address {
             #[cfg(feature = "statistics")]
             RX_SOURCE_FILTER_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -312,7 +312,7 @@ fn ingest_control_packet(
     // source-MAC filter above is the discriminator.
     let expect_magic = peer_mac.is_none();
     let Some(packet) =
-        parse_with_magic::<ControlPacket>(r.data(), CENTRAL_MAGIC_NUMBER, expect_magic)
+        parse_with_magic::<ControlPacket>(r.data(), INITIATOR_MAGIC_NUMBER, expect_magic)
     else {
         #[cfg(feature = "statistics")]
         if expect_magic {
@@ -325,7 +325,7 @@ fn ingest_control_packet(
         return;
     };
 
-    // The CSI this control frame produces belongs to the central's sounding with this number.
+    // The CSI this control frame produces belongs to the initiator's sounding with this number.
     crate::csi::session::set_sounding_instance(packet.sequence_number);
 
     #[cfg(feature = "statistics")]
@@ -333,7 +333,7 @@ fn ingest_control_packet(
         RX_CONTROL_PACKET_COUNT.fetch_add(1, Ordering::Relaxed);
         if shared.sequence_initialized.load(Ordering::Acquire) {
             let last_seq = shared.last_control_sequence.load(Ordering::Relaxed);
-            // 64-bit signed gap so a central reboot (sequence restarting at
+            // 64-bit signed gap so an initiator reboot (sequence restarting at
             // 0) or a reordered frame shows up as `gap <= 0` and resyncs
             // silently instead of registering ~2^32 misses. The trade-off is
             // that a genuine u32 sequence wrap also resyncs, but that takes
@@ -353,16 +353,16 @@ fn ingest_control_packet(
     if tx_enabled {
         // Peer table management is only needed so we can send unicast replies.
         if !is_connected {
-            // Lock onto the first valid central and add it as a unicast peer.
-            if register_central_peer(esp_now, channel, config, r.info.src_address) {
+            // Lock onto the first valid initiator and add it as a unicast peer.
+            if register_initiator_peer(esp_now, channel, config, r.info.src_address) {
                 shared
-                    .central_mac
+                    .initiator_mac
                     .store(mac_to_u64(&r.info.src_address), Ordering::Relaxed);
                 shared.peer_healthcheck_counter.store(0, Ordering::Relaxed);
                 shared.is_connected.store(true, Ordering::Release);
                 if unicast_replies(config) {
                     log_ln!(
-                        "ESP-NOW peripheral: locked central {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, unicast forced-PHY replies enabled (rate {:?})",
+                        "ESP-NOW responder: locked initiator {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, unicast forced-PHY replies enabled (rate {:?})",
                         r.info.src_address[0],
                         r.info.src_address[1],
                         r.info.src_address[2],
@@ -373,7 +373,7 @@ fn ingest_control_packet(
                     );
                 } else {
                     log_ln!(
-                        "ESP-NOW peripheral: locked central {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, broadcast HT20 replies",
+                        "ESP-NOW responder: locked initiator {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, broadcast HT20 replies",
                         r.info.src_address[0],
                         r.info.src_address[1],
                         r.info.src_address[2],
@@ -387,13 +387,13 @@ fn ingest_control_packet(
             // Driver-side peer table can churn under pressure; keep unicast peer
             // present so TX doesn't get stuck on recurring NotFound. Checking on
             // every frame is expensive, so sample periodically.
-            let expected = u64_to_mac(shared.central_mac.load(Ordering::Relaxed));
+            let expected = u64_to_mac(shared.initiator_mac.load(Ordering::Relaxed));
             let check_counter = shared
                 .peer_healthcheck_counter
                 .fetch_add(1, Ordering::Relaxed)
                 .wrapping_add(1);
             if (check_counter & (PEER_HEALTHCHECK_PERIOD - 1)) == 0 {
-                let _ = register_central_peer(esp_now, channel, config, expected);
+                let _ = register_initiator_peer(esp_now, channel, config, expected);
             }
         }
 
@@ -401,41 +401,41 @@ fn ingest_control_packet(
         shared.pending_flag.store(true, Ordering::Release);
     }
 
-    // Peripheral mode policy: only follow the central when it becomes a listener,
-    // ensuring someone is always collecting. When central is a collector, the
-    // peripheral keeps its configured mode — both nodes can collect simultaneously.
+    // Responder policy: only follow the initiator when it stops reporting, ensuring someone
+    // always reports. When the initiator reports, the responder keeps its configured
+    // reporting — both nodes can report simultaneously.
     //
     // Hysteresis: require MODE_SWITCH_HYSTERESIS consecutive packets with the same
     // value before acting, so a single noise-corrupted packet cannot flip the mode.
-    let central_is_listener = !packet.is_collector;
-    let prev_seen = shared.last_central_is_listener.load(Ordering::Relaxed);
+    let initiator_silent = !packet.initiator_reports;
+    let prev_seen = shared.last_initiator_silent.load(Ordering::Relaxed);
 
-    if central_is_listener != prev_seen {
+    if initiator_silent != prev_seen {
         shared
-            .last_central_is_listener
-            .store(central_is_listener, Ordering::Relaxed);
+            .last_initiator_silent
+            .store(initiator_silent, Ordering::Relaxed);
         shared.mode_streak.store(1, Ordering::Relaxed);
     } else {
         let streak = shared.mode_streak.load(Ordering::Relaxed).saturating_add(1);
         shared.mode_streak.store(streak, Ordering::Relaxed);
 
-        if streak == MODE_SWITCH_HYSTERESIS && central_is_listener {
-            // Central has consistently been a listener → switch peripheral to collector.
-            if !shared.is_collector.load(Ordering::Relaxed) {
-                set_runtime_reporting(crate::ReportingPolicy::Always);
-                shared.is_collector.store(true, Ordering::Relaxed);
+        if streak == MODE_SWITCH_HYSTERESIS && initiator_silent {
+            // The initiator has consistently reported nothing → the responder reports to the host.
+            if !shared.reports.load(Ordering::Relaxed) {
+                set_runtime_reporting(crate::Reporting::HOST);
+                shared.reports.store(true, Ordering::Relaxed);
             }
         }
-        // When central is consistently a collector, do NOT force peripheral to
-        // listener — peripheral and central are allowed to both collect.
+        // When the initiator consistently reports, do NOT silence the responder —
+        // responder and initiator are allowed to both report.
     }
 }
 
-/// Run ESP-NOW in Peripheral mode.
+/// Run ESP-NOW as a responder.
 ///
 /// Configures the channel and starts the responder loop that listens for
-/// `ControlPacket`s from a Central node and reply with `PeripheralPacket`s.
-pub async fn run_esp_now_peripheral(
+/// `ControlPacket`s from an initiator node and reply with `ResponderPacket`s.
+pub async fn run_esp_now_responder(
     esp_now: &mut EspNow,
     config: &EspNowConfig,
     freq_hz: Option<u16>,
@@ -449,8 +449,8 @@ pub async fn run_esp_now_peripheral(
             esp_now.set_channel(config.channel).unwrap();
         });
     }
-    // Forced PHY on the broadcast peer (HT20 only): skipped on C5 — see central/esp_now.rs.
-    // HT40 applies forced PHY to the learned central unicast peer inside `responder`.
+    // Forced PHY on the broadcast peer (HT20 only): skipped on C5 — see initiator/esp_now.rs.
+    // HT40 applies forced PHY to the learned initiator unicast peer inside `responder`.
     #[cfg(not(feature = "esp32c5"))]
     if config.force_phy() && config.secondary_channel().is_none() {
         crate::set_peer_espnow_phy(esp_now, &BROADCAST_ADDRESS, config.peer_phy());
@@ -485,29 +485,29 @@ async fn responder(
     let peer_mac = config.peer_mac();
     let send_magic = peer_mac.is_none();
     let shared = Shared {
-        // Manual pairing skips the "lock onto first valid central" handshake:
+        // Manual pairing skips the "lock onto first valid initiator" handshake:
         // pre-seed the configured peer so source-MAC filtering applies from the
         // very first frame.
         is_connected: AtomicBool::new(peer_mac.is_some()),
-        is_collector: AtomicBool::new(IS_COLLECTOR.load(Ordering::Relaxed)),
-        central_mac: AtomicU64::new(peer_mac.map(|m| mac_to_u64(&m)).unwrap_or(0)),
+        reports: AtomicBool::new(REPORTS.load(Ordering::Relaxed)),
+        initiator_mac: AtomicU64::new(peer_mac.map(|m| mac_to_u64(&m)).unwrap_or(0)),
         peer_healthcheck_counter: AtomicU16::new(0),
         #[cfg(feature = "statistics")]
         last_control_sequence: AtomicU32::new(0),
         #[cfg(feature = "statistics")]
         sequence_initialized: AtomicBool::new(false),
         pending_flag: AtomicBool::new(false),
-        last_central_is_listener: AtomicBool::new(false),
+        last_initiator_silent: AtomicBool::new(false),
         mode_streak: AtomicU8::new(0),
     };
 
-    // In manual mode, register the central as a unicast peer up front so the
+    // In manual mode, register the initiator as a unicast peer up front so the
     // first reply can be sent without waiting to discover it.
     if let Some(mac) = peer_mac
         && io_tasks.tx_enabled
-        && !register_central_peer(esp_now, channel, config, mac)
+        && !register_initiator_peer(esp_now, channel, config, mac)
     {
-        // register_central_peer already counted the failure.
+        // register_initiator_peer already counted the failure.
     }
 
     // Adaptive reply pacing: start from configured target and automatically
@@ -523,12 +523,12 @@ async fn responder(
     let adaptive_pacing_enabled = io_tasks.rx_enabled && io_tasks.tx_enabled;
     let mut consecutive_tx_ok: u16 = 0;
     let mut next_tx_us = Instant::now().as_micros().saturating_add(tx_interval_us);
-    let mut tx_buf = [0u8; PERIPHERAL_PACKET_BUF_LEN];
+    let mut tx_buf = [0u8; RESPONDER_PACKET_BUF_LEN];
 
     loop {
         // Service queued control packets before attempting a due reply. In
         // bidirectional mode this prevents TX from overtaking already-received
-        // central control frames; the burst cap and deadline guard keep replies
+        // initiator control frames; the burst cap and deadline guard keep replies
         // from being starved by a busy RX queue.
         if io_tasks.rx_enabled && io_tasks.tx_enabled {
             let mut rx_packets: u16 = 0;
@@ -571,29 +571,29 @@ async fn responder(
                 burst_budget = burst_budget.saturating_sub(1);
 
                 // HT20 (e.g. C6 ch 11): reply via broadcast so an unassociated
-                // started-STA central surfaces CSI reliably. HT40 (e.g. C5 ch
-                // 149+153): unicast to the learned central MAC — broadcast
+                // started-STA initiator surfaces CSI reliably. HT40 (e.g. C5 ch
+                // 149+153): unicast to the learned initiator MAC — broadcast
                 // forced PHY wedges the C5 dual-band path; per-peer HT40 applies
-                // only to that unicast peer (see `apply_central_peer_phy`).
+                // only to that unicast peer (see `apply_initiator_peer_phy`).
                 let dest_mac = reply_destination(&shared, config);
 
                 // Auto mode: send the 4-byte magic prefix (empty beacon body).
                 // Manual mode: a single sentinel byte so the frame isn't empty.
                 let message: &[u8] = if send_magic {
                     match serialize_with_magic(
-                        &PeripheralPacket::new(),
-                        PERIPHERAL_MAGIC_NUMBER,
+                        &ResponderPacket::new(),
+                        RESPONDER_MAGIC_NUMBER,
                         true,
                         &mut tx_buf,
                     ) {
                         Ok(slice) => slice,
                         Err(_) => {
-                            log_ln!("Failed to serialize ESP-NOW peripheral packet");
+                            log_ln!("Failed to serialize ESP-NOW responder packet");
                             break;
                         }
                     }
                 } else {
-                    tx_buf[0] = PERIPHERAL_BEACON_SENTINEL;
+                    tx_buf[0] = RESPONDER_BEACON_SENTINEL;
                     &tx_buf[..1]
                 };
 

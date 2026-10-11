@@ -1,10 +1,10 @@
-//! Footprint **min** — Wi-Fi promiscuous-sniffer platform floor (no `CSINode`).
+//! Footprint **min** — Wi-Fi promiscuous-sniffer platform floor (no `CsiNode`).
 //!
 //! Binary-footprint counterpart to `sniffer_bench`: identical platform
 //! boilerplate (esp-hal + esp-rtos + esp-radio + embassy + alloc + the Wi-Fi
 //! blob) and the same raw promiscuous bring-up the crate's sniffer arm performs
 //! (`Sniffer::set_promiscuous_mode` + `set_channel`), but **without** the
-//! `CSINode` state machine, `CsiConfig`, `set_csi`, `CsiPacket` build, or
+//! `CsiNode` state machine, `CsiConfig`, `set_csi`, `CsiPacket` build, or
 //! `log_csi` pipeline. `full − min` isolates that crate machinery for the
 //! sniffer mode. Not meant to be run — it is built and measured (Test 3).
 //!
@@ -43,7 +43,7 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-    log_ln!("Footprint min: Wi-Fi sniffer platform floor (no CSINode)");
+    log_ln!("Footprint min: Wi-Fi sniffer platform floor (no CsiNode)");
 
     let config_radio = esp_radio::wifi::ControllerConfig::default()
         .with_static_rx_buf_num(25)
@@ -52,12 +52,12 @@ async fn main(spawner: Spawner) -> ! {
     let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio).expect("Wi-Fi init failed");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
     // Claim the same radio handles `NodeHardware::new` claims, so the footprint difference
-    // against the full harness is only the CSINode machinery.
+    // against the full harness is only the CsiNode machinery.
     let _station = esp_radio::wifi::Interface::station();
     let _access_point = esp_radio::wifi::Interface::access_point();
     let _esp_now = controller.esp_now();
 
-    // Same esp-radio calls the CSINode sniffer arm makes — raw promiscuous +
+    // Same esp-radio calls the CsiNode sniffer arm makes — raw promiscuous +
     // channel lock — but no CSI capture/serialize/log machinery is linked.
     let sniffer = controller.sniffer();
     let sniffer = &sniffer;

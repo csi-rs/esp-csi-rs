@@ -4,7 +4,7 @@
 //! traffic, reporting one line a second. Replaces `wifi_station_heap` and `wifi_station_power`,
 //! which differed only in what they printed.
 //!
-//! The footprint half is `station_bench_min` — same platform and radio bring-up, no `CSINode`.
+//! The footprint half is `station_bench_min` — same platform and radio bring-up, no `CsiNode`.
 //! Build both with the same features.
 //!
 //! Build:
@@ -21,8 +21,8 @@ use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, ReportingPolicy, NodeHardware, WifiStationConfig, config::CsiConfig,
-    log_ln, set_csi_logging_enabled,
+    CsiConfig, CsiNode, CsiNodeClient, MeasurementSetup, NodeHardware, Reporting,
+    WifiStationConfig, log_ln, set_csi_logging_enabled,
 };
 #[cfg(feature = "statistics")]
 use esp_csi_rs::{get_pps_rx, get_total_rx_packets};
@@ -61,7 +61,7 @@ static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-async fn report_task(_client: &mut CSINodeClient) {
+async fn report_task(_client: &mut CsiNodeClient) {
     let mut last_rx_total = get_total_rx_packets();
     loop {
         Timer::after_secs(1).await;
@@ -105,13 +105,14 @@ async fn main(spawner: Spawner) -> ! {
 
     log_ln!("Station bench — SSID {}", SSID);
 
-    let mut node_handle = CSINodeClient::new();
+    let mut node_handle = CsiNodeClient::new();
     let csi_hardware = NodeHardware::new(controller);
-    let mut node = CSINode::station(
+    let mut node = CsiNode::station(
         // Acquisition cost without delivery cost.
-        WifiStationConfig::new(client_config).with_reporting(ReportingPolicy::Never),
-        Some(CsiConfig::default()),
-        Some(PING_RATE_HZ),
+        WifiStationConfig::new(client_config).reporting(Reporting::None),
+        MeasurementSetup::new()
+            .periodicity_hz(PING_RATE_HZ)
+            .acquisition(CsiConfig::default()),
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::N);

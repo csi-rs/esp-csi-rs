@@ -26,11 +26,11 @@ pub const PROBE_FRAME_LEN: usize = 24 + 8;
 /// source (the transmitter address a receiver's CSI callback reports as
 /// [`crate::csi::CsiPacket::mac`]), Addr3 = BSSID. Give each emitter a
 /// distinct `src_mac` — its own interface MAC is the obvious choice — and a
-/// single collector can separate emitters by that field.
+/// single receiver can separate emitters by that field.
 ///
 /// The sequence-control field is left zero: pair this with the driver's internal
 /// sequence numbering in [`inject_probe_once`] so each frame gets an
-/// incrementing sequence number, which is what lets a collector de-duplicate
+/// incrementing sequence number, which is what lets a receiver de-duplicate
 /// per-MAC.
 ///
 /// Returns the number of bytes written, or `0` if `buf` is shorter than

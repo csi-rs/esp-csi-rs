@@ -1,8 +1,8 @@
-//! Central-side ESP-NOW driver task.
+//! Initiator-side ESP-NOW driver task.
 //!
-//! Drives the timed control/reply exchange with the peripheral node:
+//! Drives the timed control/reply exchange with the responder node:
 //! transmits [`crate::ControlPacket`]s on a balanced TX/RX schedule and
-//! ingests [`crate::PeripheralPacket`] presence beacons, tracking peers and
+//! ingests [`crate::ResponderPacket`] presence beacons, tracking peers and
 //! updating runtime statistics when the `statistics` feature is enabled.
 
 #[cfg(any(feature = "statistics", feature = "cpu-test-tx"))]
@@ -13,10 +13,10 @@ use embassy_time::Instant;
 use embassy_time::Timer;
 use heapless::LinearMap;
 
-use crate::CENTRAL_MAGIC_NUMBER;
+use crate::INITIATOR_MAGIC_NUMBER;
 use crate::ControlPacket;
-use crate::PERIPHERAL_MAGIC_NUMBER;
-use crate::PeripheralPacket;
+use crate::RESPONDER_MAGIC_NUMBER;
+use crate::ResponderPacket;
 #[cfg(feature = "statistics")]
 use crate::STATS;
 use crate::STOP_SIGNAL;
@@ -70,7 +70,7 @@ fn reset_tx_diagnostics() {
     TX_FAILED_COUNT.store(0, Ordering::Relaxed);
 }
 
-/// Returns the cumulative number of ESP-NOW frames the central has handed
+/// Returns the cumulative number of ESP-NOW frames the initiator has handed
 /// off for transmission since boot.
 #[cfg(any(feature = "statistics", feature = "cpu-test-tx"))]
 pub fn get_tx_queued_packets() -> u64 {
@@ -95,14 +95,14 @@ fn hz_to_interval_us(hz: u64) -> u64 {
     (1_000_000u64 / hz.max(1)).max(1)
 }
 
-fn handle_peripheral_packet(
+fn handle_responder_packet(
     esp_now: &mut EspNow,
     r: PoolFrame,
     config: &EspNowConfig,
     peer_mac: Option<[u8; 6]>,
     known_peers: &mut LinearMap<[u8; 6], (), RX_TRACKED_PEERS_CAPACITY>,
 ) {
-    // Manual pairing: accept replies only from the configured peripheral; the
+    // Manual pairing: accept replies only from the configured responder; the
     // source-MAC filter is the discriminator, so the (sentinel) payload is not
     // parsed. Auto pairing: validate the magic prefix instead.
     match peer_mac {
@@ -112,7 +112,7 @@ fn handle_peripheral_packet(
             }
         }
         None => {
-            if parse_with_magic::<PeripheralPacket>(r.data(), PERIPHERAL_MAGIC_NUMBER, true)
+            if parse_with_magic::<ResponderPacket>(r.data(), RESPONDER_MAGIC_NUMBER, true)
                 .is_none()
             {
                 return;
@@ -134,8 +134,8 @@ fn handle_peripheral_packet(
         // Forced PHY is applied here rather than up front because this is a
         // *learned unicast* peer. Per-peer rate config is only safe on one of
         // those — on the broadcast peer it wedges the C5 dual-band Wi-Fi ISR —
-        // which is the same reason the peripheral defers it to
-        // `apply_central_peer_phy`.
+        // which is the same reason the responder defers it to
+        // `apply_initiator_peer_phy`.
         if config.force_phy() {
             crate::apply_peer_espnow_phy(esp_now, &r.info.src_address, config.peer_phy());
         }
@@ -147,20 +147,20 @@ fn handle_peripheral_packet(
     }
 }
 
-/// The address the central's control traffic is sent to.
+/// The address the initiator's control traffic is sent to.
 ///
 /// Auto-pairing has to *start* on broadcast, because that is how an unpaired
-/// peripheral discovers the central. It must not *stay* there. A broadcast
-/// frame does not reach the Wi-Fi CSI callback, so a peripheral fed nothing but
+/// responder discovers the initiator. It must not *stay* there. A broadcast
+/// frame does not reach the Wi-Fi CSI callback, so a responder fed nothing but
 /// broadcasts captures zero CSI while looking perfectly healthy — it still
 /// decodes every control packet and still replies. The exchange is symmetric on
-/// the wire and asymmetric in what it measures: the central collects (the
-/// replies are unicast), the peripheral collects nothing.
+/// the wire and asymmetric in what it measures: the initiator measures (the
+/// replies are unicast), the responder measures nothing.
 ///
-/// So once exactly one peripheral is known the downlink retargets to it and
-/// both ends collect. With more than one, broadcast is the only way to reach
-/// them all and the peripherals go back to being listeners — which is the star
-/// deployment, where the central is the collector anyway.
+/// So once exactly one responder is known the downlink retargets to it and
+/// both ends measure. With more than one, broadcast is the only way to reach
+/// them all and the responders go back to measuring nothing — which is the star
+/// deployment, where the initiator is the one that reports anyway.
 fn downlink_target(
     peer_mac: Option<[u8; 6]>,
     known_peers: &LinearMap<[u8; 6], (), RX_TRACKED_PEERS_CAPACITY>,
@@ -175,17 +175,17 @@ fn downlink_target(
     }
 }
 
-/// Run ESP-NOW in Central mode, broadcasting control packets and handling replies.
+/// Run ESP-NOW as the initiator, broadcasting control packets and handling replies.
 ///
 /// This task periodically sends `ControlPacket` broadcasts at the specified
-/// frequency, processes `PeripheralPacket` replies, and updates statistics
+/// frequency, processes `ResponderPacket` replies, and updates statistics
 /// when the `statistics` feature is enabled.
-pub async fn run_esp_now_central(
+pub async fn run_esp_now_initiator(
     esp_now: &mut EspNow, // Borrow the hardware
     _mac_addr: [u8; 6],
     config: &EspNowConfig,
     frequency_hz: Option<u16>,
-    is_collector: bool,
+    reports: bool,
     io_tasks: IOTaskConfig,
 ) {
     #[cfg(any(feature = "statistics", feature = "cpu-test-tx"))]
@@ -203,7 +203,7 @@ pub async fn run_esp_now_central(
             esp_now.set_channel(config.channel).unwrap();
         });
     }
-    // Forced PHY for central broadcast is safe for HT20/legacy on single-band
+    // Forced PHY for initiator broadcast is safe for HT20/legacy on single-band
     // chips, but on C5 `esp_now_set_peer_rate_config` on the broadcast peer
     // wedges the dual-band Wi-Fi ISR when the TX loop starts (IWDT /
     // handle_interrupts). HT40 broadcast is also skipped — see below.
@@ -225,7 +225,7 @@ pub async fn run_esp_now_central(
         });
         if add_res.is_err() {
             log_ln!(
-                "ESP-NOW central: failed to add manual peer {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                "ESP-NOW initiator: failed to add manual peer {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 mac[0],
                 mac[1],
                 mac[2],
@@ -245,7 +245,7 @@ pub async fn run_esp_now_central(
     {
         crate::apply_peer_espnow_phy(esp_now, &mac, config.peer_phy());
         log_ln!(
-            "ESP-NOW central: applied peer PHY to {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} rate={:?} secondary={:?}",
+            "ESP-NOW initiator: applied peer PHY to {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} rate={:?} secondary={:?}",
             mac[0],
             mac[1],
             mac[2],
@@ -338,12 +338,12 @@ pub async fn run_esp_now_central(
                     break;
                 };
 
-                handle_peripheral_packet(esp_now, r, config, peer_mac, &mut known_peers);
+                handle_responder_packet(esp_now, r, config, peer_mac, &mut known_peers);
                 rx_packets = rx_packets.saturating_add(1);
                 embassy_futures::yield_now().await;
             }
 
-            // Re-read every pass, not just on the first peer: a peripheral that
+            // Re-read every pass, not just on the first peer: a responder that
             // drops out (or a second one appearing) has to move the downlink
             // back to broadcast, or the pair silently stops pairing.
             tx_target = downlink_target(peer_mac, &known_peers);
@@ -355,10 +355,10 @@ pub async fn run_esp_now_central(
             while now_us >= next_tx_us && burst_budget > 0 {
                 burst_budget = burst_budget.saturating_sub(1);
 
-                let control_packet = ControlPacket::new(is_collector, control_sequence);
+                let control_packet = ControlPacket::new(reports, control_sequence);
                 let body_len = match serialize_with_magic(
                     &control_packet,
-                    CENTRAL_MAGIC_NUMBER,
+                    INITIATOR_MAGIC_NUMBER,
                     send_magic,
                     &mut tx_buf,
                 ) {
@@ -394,7 +394,7 @@ pub async fn run_esp_now_central(
                 // dropping this future or queueing another send first can corrupt
                 // the driver's completion state and freeze later sends.
                 // Replies to this frame are measured under the number it carries — the same one
-                // the peripheral reads off it. Set before sending: a reply can be measured before
+                // the responder reads off it. Set before sending: a reply can be measured before
                 // this task resumes from the send.
                 crate::csi::session::set_sounding_instance(control_sequence);
                 match esp_now.send_async(&tx_target, message).await {

@@ -1,8 +1,8 @@
-//! The **peer** end of the ESP-NOW simplex exchange: a peripheral collector.
+//! The **peer** end of the ESP-NOW simplex exchange: a responder and sensing receiver that
+//! reports every measurement.
 //!
 //! Built by [`SimplexConfig::peer`](crate::SimplexConfig::peer) /
-//! [`CSINode::esp_now_simplex_peer`](crate::CSINode::esp_now_simplex_peer). The module keeps the
-//! name it had when this end was called the "fast collector" and filed under `central`.
+//! [`CsiNode::esp_now_simplex_peer`](crate::CsiNode::esp_now_simplex_peer).
 //!
 //! The peer broadcasts a **sparse discovery beacon** (~1 Hz) until it hears the
 //! [source](crate::SimplexConfig::source), then stops beaconing entirely and goes
@@ -19,8 +19,8 @@ use esp_radio::esp_now::{BROADCAST_ADDRESS, EspNow};
 
 use crate::espnow_phy::with_espnow_recv_suspended;
 use crate::{
-    CENTRAL_MAGIC_NUMBER, ControlPacket, EspNowConfig, IOTaskConfig, PERIPHERAL_MAGIC_NUMBER,
-    PeripheralPacket, STOP_SIGNAL, log_ln, parse_with_magic, serialize_with_magic,
+    INITIATOR_MAGIC_NUMBER, ControlPacket, EspNowConfig, IOTaskConfig, RESPONDER_MAGIC_NUMBER,
+    ResponderPacket, STOP_SIGNAL, log_ln, parse_with_magic, serialize_with_magic,
 };
 #[cfg(feature = "statistics")]
 use crate::STATS;
@@ -30,13 +30,13 @@ use portable_atomic::Ordering;
 /// Discovery beacon period.
 const BEACON_PERIOD: Duration = Duration::from_secs(1);
 /// Max frames drained from the pool per RX wake-up (absorbs a full 802.11n
-/// AMPDU without holding the executor). Mirrors the peripheral RX-only cap.
+/// AMPDU without holding the executor). Mirrors the responder RX-only cap.
 const RX_BURST_MAX_RX_ONLY: u16 = 64;
 /// Control-packet scratch buffer (4-byte magic + small postcard body).
 const BEACON_BUF_LEN: usize = 16;
 
 /// Run the simplex peer end: sparse beacon → detect source → RX-only.
-pub async fn run_esp_now_fast_collector(
+pub async fn run_esp_now_simplex_peer(
     esp_now: &mut EspNow,
     config: &EspNowConfig,
     io_tasks: IOTaskConfig,
@@ -52,7 +52,7 @@ pub async fn run_esp_now_fast_collector(
             esp_now.set_channel(config.channel).unwrap();
         });
     }
-    // The collector only receives — it never forces a TX PHY (forced broadcast
+    // The peer only receives — it never forces a TX PHY (forced broadcast
     // PHY wedges C5, and sparse beacons are rate-insensitive).
     log_ln!("esp-now version {}", esp_now.version().unwrap());
 
@@ -70,7 +70,7 @@ pub async fn run_esp_now_fast_collector(
             if io_tasks.tx_enabled && Instant::now() >= beacon_at {
                 let pkt = ControlPacket::new(true, beacon_seq);
                 if let Ok(msg) =
-                    serialize_with_magic(&pkt, CENTRAL_MAGIC_NUMBER, send_magic, &mut tx_buf)
+                    serialize_with_magic(&pkt, INITIATOR_MAGIC_NUMBER, send_magic, &mut tx_buf)
                 {
                     // One send in flight, awaited to completion (driver has a
                     // single global completion flag).
@@ -85,16 +85,16 @@ pub async fn run_esp_now_fast_collector(
             let until_beacon = beacon_at.saturating_duration_since(Instant::now());
             match select3(STOP_SIGNAL.wait(), crate::esp_now_pool::receive_async(), Timer::after(until_beacon)).await {
                 Either3::First(_) => {
-                    log_ln!("STOP signal received, shutting down fast collector...");
+                    log_ln!("STOP signal received, shutting down simplex peer...");
                     STOP_SIGNAL.signal(());
                     return;
                 }
                 Either3::Second(r) => {
                     let is_source = match peer_mac {
                         Some(expected) => r.info.src_address == expected,
-                        None => parse_with_magic::<PeripheralPacket>(
+                        None => parse_with_magic::<ResponderPacket>(
                             r.data(),
-                            PERIPHERAL_MAGIC_NUMBER,
+                            RESPONDER_MAGIC_NUMBER,
                             true,
                         )
                         .is_some(),
@@ -111,7 +111,7 @@ pub async fn run_esp_now_fast_collector(
 
     if let Some(src) = detected_src {
         log_ln!(
-            "ESP-NOW fast collector: source {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} detected, beacon stopped, RX-only flood capture",
+            "ESP-NOW simplex peer: source {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} detected, beacon stopped, RX-only flood capture",
             src[0],
             src[1],
             src[2],
@@ -121,14 +121,14 @@ pub async fn run_esp_now_fast_collector(
         );
     }
 
-    // ---- Phase 2: RX-only collect ------------------------------------------
+    // ---- Phase 2: RX-only measure ------------------------------------------
     // CSI is captured by `capture_csi_info` for every flood frame the radio
     // receives, independent of this drain. We drain purely so the 16-slot pool
     // never stays full and the source-flood frames keep flowing.
     loop {
         match select(STOP_SIGNAL.wait(), crate::esp_now_pool::receive_async()).await {
             Either::First(_) => {
-                log_ln!("STOP signal received, shutting down fast collector...");
+                log_ln!("STOP signal received, shutting down simplex peer...");
                 STOP_SIGNAL.signal(());
                 break;
             }

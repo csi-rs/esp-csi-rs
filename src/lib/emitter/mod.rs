@@ -1,8 +1,8 @@
-//! The **Emitter** operational mode: transmit-only sounding.
+//! The **Emitter** mode: transmit-only sounding.
 //!
-//! An emitter node is a **central listener** (see [`crate::model`]): it originates the network's
-//! traffic and captures nothing. It exists to put known RF energy into the channel so that other
-//! nodes — typically [sniffers](crate::CSINode::sniffer) — can measure the channel's response to
+//! An emitter node is a **sensing transmitter that reports nothing** (see [`crate::model`]): it
+//! originates the network's traffic and captures nothing. It exists to put known RF energy into the
+//! channel so that other nodes — typically [sniffers](crate::CsiNode::sniffer) — can measure the channel's response to
 //! it. It never associates: it forces its interface to a fixed TX PHY (see [`phy`]) and sends a
 //! rate-agnostic frame (see [`frame`]) at a configured period.
 //!
@@ -68,7 +68,7 @@ pub enum EmitterPhy {
     /// HT40 (802.11n) — 40 MHz with the secondary channel below the primary.
     Ht40Below,
     /// HE20 (802.11ax SU) — 20 MHz. Needs an 802.11ax PHY: ESP32-C5 / C6 only.
-    /// Pair with a collector that requests HE-LTF acquisition
+    /// Pair with a receiver that requests HE-LTF acquisition
     /// ([`phy::he20_csi_acquisition`]) to receive the full ~242-subcarrier estimate.
     #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
     He20,
@@ -125,7 +125,7 @@ pub struct EmitterConfig {
     /// primary, or HE20 on the C5/C6.
     pub phy: EmitterPhy,
     /// Destination address of injected frames (broadcast by default). Addressing
-    /// a specific collector tends to raise that collector's CSI callback rate.
+    /// a specific receiver tends to raise that receiver's CSI callback rate.
     pub dst_mac: [u8; 6],
     /// Delay between injected frames (20 ms ≈ 50 frames/s by default).
     pub period: Duration,
@@ -164,20 +164,22 @@ impl EmitterConfig {
         self
     }
 
-    /// An emitter is always a [`Central`](crate::NetworkRole::Central): sounding frames are the
-    /// network's traffic, and it originates them. There is no setter for this.
-    pub const fn network_role() -> crate::NetworkRole {
-        crate::NetworkRole::Central
+    /// An emitter takes part in no sensing session — it sounds for whoever listens — so it has no
+    /// session role (`None`). There is no setter for this.
+    pub const fn session_role() -> Option<crate::SessionRole> {
+        None
     }
 
-    /// An emitter never reports ([`Never`](crate::ReportingPolicy::Never)): it captures nothing, so
-    /// it has nothing to report. There is no setter for this.
-    ///
-    /// This is the case the older two-role vocabulary could not express. "Emitter" was treated as a
-    /// role opposite "collector", which left no name for a node that measures without reporting —
-    /// and no name for the far more common thing an emitter actually is: a central that listens.
-    pub const fn reporting() -> crate::ReportingPolicy {
-        crate::ReportingPolicy::Never
+    /// An emitter is always a [`Transmitter`](crate::SensingRole::Transmitter): it sends the
+    /// sounding PPDUs and measures nothing. There is no setter for this.
+    pub const fn sensing_role() -> crate::SensingRole {
+        crate::SensingRole::Transmitter
+    }
+
+    /// An emitter never reports ([`Reporting::None`](crate::Reporting::None)): it captures
+    /// nothing, so it has nothing to report. There is no setter for this.
+    pub const fn get_reporting() -> crate::Reporting {
+        crate::Reporting::None
     }
 }
 
@@ -276,7 +278,7 @@ pub(crate) async fn run_emitter(
     );
 
     // Source address is the interface the frames actually leave from, so a
-    // collector can attribute each frame to this emitter.
+    // receiver can attribute each frame to this emitter.
     let src = if cfg.use_sta_if {
         interfaces.station.mac_address()
     } else {
@@ -317,7 +319,7 @@ pub(crate) async fn run_emitter(
     // A raw injection that the driver rejects is silent otherwise: the loop keeps
     // running and the node looks healthy while nothing reaches the air. Report the
     // first rejection (and only the first, to keep the hot path quiet) so a
-    // "collector sees nothing" investigation starts at the right end.
+    // "receiver sees nothing" investigation starts at the right end.
     let mut reported_failure = false;
 
     loop {
@@ -349,7 +351,7 @@ pub(crate) async fn run_emitter(
                     // Count accepted frames so `get_pps_tx` / `get_total_tx_packets`
                     // report an emitter's offered rate. Without this an emitter looks
                     // idle in `show-stats`, which is exactly the wrong signal when
-                    // diagnosing "the collector sees nothing".
+                    // diagnosing "the receiver sees nothing".
                     #[cfg(feature = "statistics")]
                     crate::stats::record_tx();
                 }
