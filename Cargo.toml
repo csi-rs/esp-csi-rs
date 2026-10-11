@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-rs"
-version = "0.12.1"
+version = "0.13.0"
 edition = "2024"
 authors = ["theembeddedrustacean", "stacks-of-data", "Abdullah-Alawad", "modatt"]
 description = "Wi-Fi Channel State Information (CSI) collection on ESP32, ESP32-C3, ESP32-C5, ESP32-C6 and ESP32-S3 for no_std Rust: sniffer, station, access point, emitter and ESP-NOW nodes"
@@ -78,7 +78,7 @@ cpu-trace = ["dep:rtos-trace", "esp-rtos/rtos-trace"]
 ## Expose runtime TX controls (rate / payload / pause) that let the
 ## CPU-utilization harness (`esp_now_bench` in `experiments/`, with
 ## `MEASURE = Cpu`) steer the real TX loops from its phase schedule: the ESP-NOW
-## central's control-packet loop and the emitter's send loop. Only that
+## initiator's control-packet loop and the emitter's send loop. Only that
 ## measurement needs it.
 cpu-test-tx = []
 
@@ -281,7 +281,7 @@ features = ["esp32c3", "println"]
 # or `cpu-test-tx` fail to resolve — which is why that command could not pass.
 #
 # Each subject has a `_min` counterpart that performs the same platform and radio
-# bring-up with no `CSINode` in it. The binary-footprint number is `full − min`,
+# bring-up with no `CsiNode` in it. The binary-footprint number is `full − min`,
 # and both halves must be built with the SAME features for the difference to mean
 # anything.
 # ---------------------------------------------------------------------------

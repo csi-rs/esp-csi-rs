@@ -4,6 +4,99 @@ All notable changes to `esp-csi-rs` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: a minor bump may break).
 
+## [0.13.0]
+
+0.13 renames the node model to IEEE 802.11bf's terms. Where the standard has a word for a concept,
+the crate now uses it with the standard's meaning; where it has none, the crate uses a plain word of
+its own and never borrows one of the standard's. **This is a hard cut**: there are no deprecated
+aliases for the old names. `docs/network-model.md` is rewritten to the new model and carries the
+reasoning.
+
+**Over the air nothing changes.** The ESP-NOW magic numbers keep their values and
+`ControlPacket::initiator_reports` (was `is_collector`) keeps its position and type, so 0.12 and 0.13
+nodes pair with each other. The serialized `wire` format, including `wire::MeasurementSetup`, is
+unchanged.
+
+### Changed (breaking)
+
+- **Roles.** `NetworkRole { Central, Peripheral }` and `ModeRole` are removed. A node now has an
+  IEEE 802.11bf **`SessionRole { Initiator, Responder }`** — `None` for an observer (sniffer,
+  emitter, passive station) — and an IEEE 802.11bf **`SensingRole { Transmitter, Receiver,
+  TransmitterReceiver }`**. Both are read back from the mode, never stored.
+- **`SessionRole::Controller` is removed.** The host that starts and stops a run is the new unit
+  type `Controller`: never a node and never the initiator.
+- **Reporting.** `ReportingPolicy` is now `Reporting { Report { to: ReportTo }, ThresholdBased(Threshold),
+  Decimate(u16), None }`, with `ReportTo { Host, Local }`. `Reporting::HOST` is `Report { to: Host }`
+  and the default. The deprecated `CollectionMode` alias and its `Collector` / `Listener` constants
+  are removed.
+- **`ReportTo::Local` is new**: measurements reach on-device consumers (`set_csi_callback`, the
+  `CsiNodeClient` queue) but are never written to the host output.
+- **`OperationalMode` is now `Mode`; `CSINode` is now `CsiNode`; `CSINodeClient` is now
+  `CsiNodeClient`.** The deprecated `CSINodeHardware` alias is removed (use `NodeHardware`).
+- **`MeasurementSetup` (crate root) replaces the `csi_config` and `traffic_freq_hz` constructor
+  arguments.** It carries `periodicity_hz`, `bandwidth`, `acquisition` (a `CsiConfig`) and a setup
+  `id`. The serialized setup a controller sends is still `wire::MeasurementSetup`, and
+  `From<&MeasurementSetup>` produces it. The emitter takes no setup (its period lives in
+  `EmitterConfig`).
+- **Config builders.** `EspNowConfig::session(SessionRole)` and `.reporting(Reporting)` (default
+  `Initiator`, `Reporting::HOST`); `WifiStationConfig::session(Option<SessionRole>)` and
+  `.reporting(..)`; `WifiApConfig::reporting(..)`; `WifiSnifferConfig::with_report_to(ReportTo)`
+  beside `with_threshold` / `with_decimation`. Configured reporting is read with `get_reporting()`
+  on every config.
+- **Modules.** `central` / `peripheral` are now `initiator` / `responder`, and each holds the end of
+  both ESP-NOW exchanges its name says (the simplex files were filed under the opposite role).
+  `collector` is now `wifi`, `central_peripheral` is now `esp_now_config`, and the empty
+  `central::sniffer` is gone. `PeripheralPacket` is now `ResponderPacket`.
+- **Deprecated 0.12 shims removed:** `with_collection_mode`, `collection_mode`,
+  `runtime_collection_mode`, `set_collection_mode`.
+
+### Fixed
+
+- **ESP-NOW after a station or access-point run.** The controller outlives a run, and after an AP
+  run (or a still-associated station run) `esp_wifi_set_channel` refused the ESP-NOW channel and
+  both ends panicked about 3 s in. The node now resets the controller to an idle station first.
+
+### Migration
+
+| 0.12 | 0.13 |
+|---|---|
+| `CSINode` | `CsiNode` |
+| `CSINodeClient` | `CsiNodeClient` |
+| `CSINodeHardware` | `NodeHardware` |
+| `OperationalMode` | `Mode` |
+| `node.operational_mode()` | `node.mode()` |
+| `node.set_operational_mode(m)` | `node.set_mode(m)` |
+| `NetworkRole::Central` | `SessionRole::Initiator` |
+| `NetworkRole::Peripheral` | `SessionRole::Responder` (ESP-NOW) / `None` (sniffer, passive station) |
+| `node.network_role()` | `node.session_role()` (`Option<SessionRole>`) and `node.sensing_role()` |
+| `node.role()` / `ModeRole` | `node.session_role()` + `node.sensing_role()` |
+| `SessionRole::Controller` | `Controller` (a unit type, not a session role) |
+| `ReportingPolicy` / `CollectionMode` | `Reporting` |
+| `ReportingPolicy::Always` / `CollectionMode::Collector` | `Reporting::Report { to: ReportTo::Host }` (`Reporting::HOST`) |
+| `ReportingPolicy::Never` / `CollectionMode::Listener` | `Reporting::None` |
+| `ReportingPolicy::Threshold(t)` | `Reporting::ThresholdBased(t)` |
+| `ReportingPolicy::Decimate(n)` | `Reporting::Decimate(n)` |
+| `EspNowConfig::with_network_role(r)` | `EspNowConfig::session(r)` |
+| `EspNowConfig::with_reporting(p)` | `EspNowConfig::reporting(p)` |
+| `EspNowConfig::reporting()` / `network_role()` | `get_reporting()` / `session_role()` |
+| `WifiStationConfig::with_network_role(Central / Peripheral)` | `WifiStationConfig::session(Some(Initiator) / None)` |
+| `WifiStationConfig::with_reporting(p)` / `WifiApConfig::with_reporting(p)` | `.reporting(p)` |
+| `WifiSnifferConfig::reporting()` | `WifiSnifferConfig::get_reporting()` |
+| `CSINode::new(mode, csi_config, traffic_freq_hz, hw)` | `CsiNode::new(mode, MeasurementSetup, hw)` |
+| `CSINode::esp_now(cfg, Some(csi), Some(hz), hw)` | `CsiNode::esp_now(cfg, MeasurementSetup::new().acquisition(csi).periodicity_hz(hz), hw)` |
+| `CSINode::sniffer(cfg, Some(csi), hw)` | `CsiNode::sniffer(cfg, MeasurementSetup::new().acquisition(csi), hw)` |
+| `CSINode::station(cfg, csi, hz, hw)` / `access_point(..)` | `CsiNode::station(cfg, setup, hw)` / `access_point(cfg, setup, hw)` |
+| `CSINode::esp_now_simplex_source(cfg, hz, hw)` | `CsiNode::esp_now_simplex_source(cfg, setup, hw)` |
+| `CSINode::esp_now_simplex_peer(ch, csi, hw)` | `CsiNode::esp_now_simplex_peer(ch, setup, hw)` |
+| `node.set_traffic_frequency(hz)` | `node.set_periodicity_hz(hz)` |
+| `node.set_csi_config(c)` | unchanged (writes the setup's acquisition); `node.set_measurement_setup(s)` replaces all of it |
+| `runtime_collection_mode()` / `set_collection_mode(p)` | `runtime_reporting()` / `set_reporting(r)` |
+| `ControlPacket::is_collector` | `ControlPacket::initiator_reports` (same wire position) |
+| `PeripheralPacket` | `ResponderPacket` |
+| `esp_csi_rs::central::*` / `peripheral::*` | `esp_csi_rs::initiator::*` / `responder::*` |
+| `esp_csi_rs::collector::{ap, sta}` | `esp_csi_rs::wifi::{ap, sta}` |
+| `esp_csi_rs::central_peripheral::EspNowConfig` | `esp_csi_rs::EspNowConfig` (module `esp_now_config`) |
+
 ## [0.12.1]
 
 ### Fixed
@@ -16,7 +109,7 @@ All notable changes to `esp-csi-rs` are documented here. The format is based on
   HT-only gives HT-LTF (114 bytes), HE-only gives HE-LTF (490 bytes), and forced L-LTF gives L-LTF
   (106 bytes). `dump_ack_en` cannot be set on the C5 until esp-radio is fixed.
 
-## [0.12.0] — unreleased
+## [0.12.0]
 
 0.12 makes the crate ready for IEEE 802.11bf without waiting for the hardware. The ESP callback
 struct stops being the data contract: frames now follow a versioned, radio-neutral wire format, and
