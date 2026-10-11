@@ -1,8 +1,9 @@
-//! Low-level radio helpers shared by every operational mode.
+//! Low-level radio helpers shared by every mode.
 //!
-//! Band selection, HT40 channel setup, and the one piece of ESP-NOW handling
-//! this crate still needs: silencing esp-radio's built-in ESP-NOW receive
-//! dispatcher. See [`suppress_espnow_rx`].
+//! Band selection, HT40 channel setup, and the ESP-NOW handling this crate still
+//! needs: silencing esp-radio's built-in ESP-NOW receive dispatcher (see
+//! [`suppress_espnow_rx`]) and leaving the controller in a state the ESP-NOW roles
+//! can set a channel in (see [`idle_station_for_espnow`]).
 
 use esp_radio::esp_now::EspNow;
 use esp_radio::wifi::sniffer::Sniffer;
@@ -62,6 +63,37 @@ pub(crate) fn suppress_espnow_rx() {
     }
     unsafe {
         let _ = esp_now_unregister_recv_cb();
+    }
+}
+
+/// Return the controller to an idle station before an ESP-NOW role runs.
+///
+/// The controller outlives a run. After an access-point run it is still in AP mode, and after a
+/// station run it can still be associated with an AP that has just gone away. In both states
+/// `esp_wifi_set_channel` fails with `ESP_FAIL`, so the ESP-NOW drivers' first `set_channel`
+/// panicked and both ends of a pair rebooted about 3 s into the first ESP-NOW run after a
+/// station/AP run. The emitter's bring-up already resets the same way.
+///
+/// The mode is only switched when it is not already Station: `set_config` restarts the radio on a
+/// mode change, which would drop an HT40 channel pair applied before the run.
+pub(crate) async fn idle_station_for_espnow(controller: &mut WifiController<'_>) {
+    use esp_radio::wifi::{Config, sta::StationConfig};
+    unsafe extern "C" {
+        fn esp_wifi_get_mode(mode: *mut u32) -> i32;
+    }
+    const WIFI_MODE_STA: u32 = 1;
+
+    if controller.is_connected() && controller.disconnect_async().await.is_err() {
+        log_ln!("ESP-NOW: disconnecting the previous run's station failed");
+    }
+    let mut mode = 0u32;
+    if unsafe { esp_wifi_get_mode(&mut mode) } == 0
+        && mode != WIFI_MODE_STA
+        && controller
+            .set_config(&Config::Station(StationConfig::default()))
+            .is_err()
+    {
+        log_ln!("ESP-NOW: resetting the controller to an idle station failed");
     }
 }
 

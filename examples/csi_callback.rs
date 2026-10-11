@@ -1,4 +1,4 @@
-//! Dedicated test for `set_csi_callback` AND `CSINodeClient::next_csi_packet`.
+//! Dedicated test for `set_csi_callback` AND `CsiNodeClient::next_csi_packet`.
 //!
 //! The crate exposes two CSI delivery paths controlled by
 //! [`esp_csi_rs::CsiDeliveryMode`] — **exactly one is active at a time**
@@ -8,7 +8,7 @@
 //!    runs in the WiFi-task callback. Lowest possible latency, must be
 //!    fast and non-blocking. Lowest per-packet overhead.
 //!
-//! 2. **Async drain** (`CSINodeClient::next_csi_packet().await`,
+//! 2. **Async drain** (`CsiNodeClient::next_csi_packet().await`,
 //!    mode = `Async`) — pops packets from a lock-free MPMC queue on a
 //!    user-spawned task. No critical section on enqueue. Lets you do
 //!    heavier work without landing it on the WiFi task. Pays a 640 B
@@ -46,8 +46,8 @@ use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CsiPacket;
 use esp_csi_rs::wire::CsiPayload;
 use esp_csi_rs::logging::logging::LogMode;
-use esp_csi_rs::{config::CsiConfig, CsiDeliveryMode, CSINode, logging::logging::init_logger, WifiSnifferConfig};
-use esp_csi_rs::{CSINodeClient, log_ln, NodeHardware, set_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled};
+use esp_csi_rs::{CsiConfig, CsiDeliveryMode, CsiNode, MeasurementSetup, logging::logging::init_logger, WifiSnifferConfig};
+use esp_csi_rs::{CsiNodeClient, log_ln, NodeHardware, set_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled};
 #[cfg(feature = "statistics")]
 use esp_csi_rs::get_dropped_packets_rx;
 use esp_hal::clock::CpuClock;
@@ -128,7 +128,7 @@ fn on_csi(packet: &CsiPacket) {
 /// be as slow as it wants without delaying the WiFi-task hot path.
 /// The first `await` here lazily opens the master publish gate and the
 /// async-delivery gate, so the WiFi callback starts enqueueing.
-async fn csi_drainer(client: &mut CSINodeClient) {
+async fn csi_drainer(client: &mut CsiNodeClient) {
     loop {
         let packet = client.next_csi_packet().await;
         CSI_DRAIN_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -261,11 +261,11 @@ async fn main(spawner: Spawner) -> ! {
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    let mut node_handle = CSINodeClient::new();
+    let mut node_handle = CsiNodeClient::new();
     let csi_hardware = NodeHardware::new(controller);
-    let mut node = CSINode::sniffer(
+    let mut node = CsiNode::sniffer(
         WifiSnifferConfig::default(),
-        Some(CsiConfig::default()),
+        MeasurementSetup::new().acquisition(CsiConfig::default()),
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::LR);

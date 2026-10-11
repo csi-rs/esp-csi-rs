@@ -8,7 +8,7 @@
 //! has).
 //!
 //! A controller can speak these terms today. A node maps the parameters onto whatever its mode
-//! actually does — an ESP-NOW central's periodicity becomes its packet rate — and refuses the ones
+//! actually does — an ESP-NOW initiator's periodicity becomes its packet rate — and refuses the ones
 //! it cannot honour rather than ignoring them. When an 802.11bf mode exists, the same setup maps
 //! onto a negotiated one, with no change for the controller.
 //!

@@ -1,16 +1,16 @@
 //! Radio-profile seam.
 //!
-//! The node orchestrator ([`crate::node::CSINode`]) drives Wi-Fi bring-up
+//! The node orchestrator ([`crate::node::CsiNode`]) drives Wi-Fi bring-up
 //! through a small set of hooks so that alternative PHY back-ends can be
 //! supplied out-of-tree without forking the engine. The crate ships
 //! [`StandardProfile`], which performs the generic chip-level radio tuning and,
 //! on the ESP32-C5 / C6, the 802.11ax HE20 bring-up a node asks for with
-//! [`CSINode::set_protocol`](crate::CSINode::set_protocol)`(Protocol::AX)`;
+//! [`CsiNode::set_protocol`](crate::CsiNode::set_protocol)`(Protocol::AX)`;
 //! specialised profiles override the hooks they need.
 
 use crate::model::NodeView;
 #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
-use crate::model::OperationalMode;
+use crate::model::Mode;
 use esp_radio::wifi::csi::CsiConfig as RadioCsiConfig;
 use esp_radio::wifi::{Protocol, Protocols, WifiController};
 
@@ -125,13 +125,13 @@ impl RadioProfile for StandardProfile {
         protocol == Some(Protocol::AX)
             && match node.mode() {
                 // HT40 softAP is out: HE20 locks 20 MHz.
-                OperationalMode::AccessPoint(c) => c.secondary_channel().is_none(),
-                OperationalMode::Station(_) | OperationalMode::Sniffer(_) => true,
+                Mode::AccessPoint(c) => c.secondary_channel().is_none(),
+                Mode::Station(_) | Mode::Sniffer(_) => true,
                 // The emitter and the ESP-NOW modes force their own PHY; taking over their
                 // bring-up would undo it.
-                OperationalMode::Emitter(_)
-                | OperationalMode::EspNow(_)
-                | OperationalMode::EspNowSimplex(_) => false,
+                Mode::Emitter(_)
+                | Mode::EspNow(_)
+                | Mode::EspNowSimplex(_) => false,
             }
     }
 
@@ -145,7 +145,7 @@ impl RadioProfile for StandardProfile {
         if _protocol == Protocol::AX
             && matches!(
                 node.mode(),
-                OperationalMode::Station(_) | OperationalMode::AccessPoint(_)
+                Mode::Station(_) | Mode::AccessPoint(_)
             )
         {
             return he20::protocols();
@@ -158,7 +158,7 @@ impl RadioProfile for StandardProfile {
             // emitter pins its own protocol set to match its forced TX PHY.
             if matches!(
                 node.mode(),
-                OperationalMode::Station(_) | OperationalMode::AccessPoint(_)
+                Mode::Station(_) | Mode::AccessPoint(_)
             ) {
                 return base.with_5(Protocol::A | Protocol::N);
             }

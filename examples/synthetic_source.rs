@@ -4,11 +4,11 @@
 //! | Attribute | Value |
 //! |---|---|
 //! | Source | `SyntheticBf` — a deterministic IEEE 802.11bf-shaped generator (`synthetic` feature) |
-//! | Reporting policy | `REPORTING` below |
-//! | Session role | none — this program is the run's controller |
+//! | Reporting | `REPORTING` below |
+//! | Session role | none — this program is the run's controller, not a node in a session |
 //!
-//! A `MeasurementSource` hands its frames to `emit`, which applies the publish gate, the reporting
-//! policy, this node's envelope (node id, session id, the next `stream_seq`), the statistics and
+//! A `MeasurementSource` hands its frames to `emit`, which applies the publish gate, the reporting,
+//! this node's envelope (node id, session id, the next `stream_seq`), the statistics and
 //! the delivery path, exactly as for a captured frame. The generator emits what an 802.11bf sensing
 //! initiator collects: one `CsiPayload::Grouped` report per responder per sounding, stamped with
 //! the measurement setup and the sounding instance. The callback below regroups them by instance,
@@ -30,7 +30,7 @@ use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::wire::synthetic::SyntheticBf;
 use esp_csi_rs::wire::{CsiPayload, Stimulus};
 use esp_csi_rs::{
-    ReportingPolicy, emit, log_ln, set_csi_callback, set_csi_logging_enabled, set_reporting,
+    Reporting, emit, log_ln, set_csi_callback, set_csi_logging_enabled, set_reporting,
     set_session,
 };
 use esp_hal::clock::CpuClock;
@@ -57,7 +57,7 @@ const NG: u8 = 4;
 const PERIOD_MS: u64 = 100;
 
 /// `Decimate(n)` keeps every *n*th report.
-const REPORTING: ReportingPolicy = ReportingPolicy::Always;
+const REPORTING: Reporting = Reporting::HOST;
 
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 

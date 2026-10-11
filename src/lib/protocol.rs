@@ -1,17 +1,19 @@
 //! ESP-NOW wire-format packets and the magic-prefix framing helpers.
 //!
-//! The central transmits [`ControlPacket`]s and the peripheral replies with
-//! [`PeripheralPacket`] presence beacons. In auto-pairing mode each frame is
+//! The initiator transmits [`ControlPacket`]s and the responder replies with
+//! [`ResponderPacket`] presence beacons. In auto-pairing mode each frame is
 //! prefixed with a 4-byte little-endian magic (see `serialize_with_magic` /
 //! `parse_with_magic`); in manual-pairing mode no magic is sent and the
 //! source-MAC filter is the discriminator.
 
 use serde::{Deserialize, Serialize};
 
-pub(crate) static CENTRAL_MAGIC_NUMBER: u32 = 0xA8912BF0;
-pub(crate) static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
+// The values are part of the over-the-air protocol and are unchanged since they were introduced;
+// only the names moved to the IEEE 802.11bf roles in 0.13.
+pub(crate) static INITIATOR_MAGIC_NUMBER: u32 = 0xA8912BF0;
+pub(crate) static RESPONDER_MAGIC_NUMBER: u32 = !INITIATOR_MAGIC_NUMBER;
 
-/// Control packet sent from Central to Peripheral.
+/// Control packet sent from the ESP-NOW initiator to its responders.
 ///
 /// In auto-pairing mode the serialized frame is prefixed with a 4-byte
 /// little-endian magic (see `serialize_with_magic` / `parse_with_magic`);
@@ -19,13 +21,16 @@ pub(crate) static PERIPHERAL_MAGIC_NUMBER: u32 = !CENTRAL_MAGIC_NUMBER;
 /// discriminator. Both nodes must agree on the pairing mode for frames to parse.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ControlPacket {
-    /// Whether the central's collection mode is currently
-    /// [`Collector`](crate::CollectionMode::Collector). A peripheral that hears a listening central
-    /// promotes itself to collector so the pair still produces a dataset; a collecting central
-    /// leaves the peripheral's own collection mode alone.
-    pub is_collector: bool,
-    /// Monotonic sounding counter. It numbers the central's soundings, which is what a measurement
-    /// frame's `Stimulus::Controlled { instance_id }` is taken from, and lets a peripheral detect
+    /// Whether the initiator's reporting in force reports anything at all (anything but
+    /// [`Reporting::None`](crate::Reporting::None)). A responder that hears an initiator reporting
+    /// nothing promotes itself to `Report { to: Host }` so the pair still produces a dataset; a
+    /// reporting initiator leaves the responder's own reporting alone.
+    ///
+    /// Before 0.13 this field was `is_collector`. Its position and type are unchanged, so the
+    /// postcard encoding on the air is identical and 0.12 and 0.13 nodes interoperate.
+    pub initiator_reports: bool,
+    /// Monotonic sounding counter. It numbers the initiator's soundings, which is what a measurement
+    /// frame's `Stimulus::Controlled { instance_id }` is taken from, and lets a responder detect
     /// dropped or reordered control frames.
     ///
     /// Before 0.12 the field existed only under the `statistics` feature, so two nodes built with
@@ -34,39 +39,39 @@ pub struct ControlPacket {
 }
 
 impl ControlPacket {
-    /// Create a new control packet with the collector flag and sounding counter.
-    pub fn new(is_collector: bool, sequence_number: u32) -> Self {
+    /// Create a new control packet with the initiator's reporting flag and sounding counter.
+    pub fn new(initiator_reports: bool, sequence_number: u32) -> Self {
         Self {
-            is_collector,
+            initiator_reports,
             sequence_number,
         }
     }
 }
 
-/// Peripheral reply packet — a pure presence beacon.
+/// Responder reply packet — a pure presence beacon.
 ///
 /// Carries no payload fields; in auto-pairing mode it is sent as the 4-byte
 /// magic prefix alone, and in manual-pairing mode as a single sentinel byte
 /// (ESP-NOW frames should not be zero-length).
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct PeripheralPacket;
+pub struct ResponderPacket;
 
-impl PeripheralPacket {
-    /// Create a new peripheral presence beacon.
+impl ResponderPacket {
+    /// Create a new responder presence beacon.
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Default for PeripheralPacket {
+impl Default for ResponderPacket {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// One-byte sentinel used for manual-mode peripheral replies so the frame is
+/// One-byte sentinel used for manual-mode responder replies so the frame is
 /// never zero-length.
-pub(crate) const PERIPHERAL_BEACON_SENTINEL: u8 = 0;
+pub(crate) const RESPONDER_BEACON_SENTINEL: u8 = 0;
 
 /// Serialize `packet` into `buf`, optionally prefixed with a 4-byte
 /// little-endian `magic`. Returns the populated slice. When `send_magic` is
@@ -89,7 +94,7 @@ pub(crate) fn serialize_with_magic<'a, T: Serialize>(
     }
 }
 
-/// The sounding number of a central's control frame, found in a received frame's payload.
+/// The sounding number of an initiator's control frame, found in a received frame's payload.
 ///
 /// Called from the CSI callback, so the measurement of a control frame is labelled with that
 /// frame's own number instead of whichever one the ESP-NOW task processed last — the CSI callback
@@ -97,7 +102,7 @@ pub(crate) fn serialize_with_magic<'a, T: Serialize>(
 /// (the ESP-NOW vendor element sits a few bytes into the action frame), so it only works in
 /// auto-pairing mode; manual pairing sends no magic and returns `None`.
 pub(crate) fn control_sequence_in(payload: &[u8]) -> Option<u32> {
-    let magic = CENTRAL_MAGIC_NUMBER.to_le_bytes();
+    let magic = INITIATOR_MAGIC_NUMBER.to_le_bytes();
     let at = payload.windows(4).position(|w| w == magic)?;
     postcard::take_from_bytes::<ControlPacket>(&payload[at + 4..])
         .ok()

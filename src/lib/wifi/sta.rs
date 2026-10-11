@@ -1,4 +1,4 @@
-//! Wi-Fi station mode central driver.
+//! Wi-Fi station mode driver.
 //!
 //! Connects to a configured access point, brings up an embassy-net stack
 //! with DHCP, and drives the network/ICMP plumbing required to keep CSI
@@ -34,14 +34,14 @@ static DHCP_CLIENT_INFO: Signal<CriticalSectionRawMutex, IpInfo> = Signal::new()
 /// because each `send().await` waits for the previous datagram to leave smoltcp.
 const ICMP_FLOOD_TX_SLOTS: usize = 16;
 const ICMP_FLOOD_RX_SLOTS: usize = 4;
-/// Max datagrams queued per scheduler wake (matches `esp_now_central_min_drop`).
+/// Max datagrams queued per scheduler wake (matches the retired `esp_now_*_min_drop` harness).
 const ICMP_FLOOD_CATCH_UP_BURST: u8 = 16;
 const ICMP_FLOOD_QUEUE_BACKOFF_US: u64 = 50;
 
 /// One-shot-then-reusable storage for the STA stack's `StackResources`.
 ///
 /// `StaticCell` panics on the second `uninit()`, which broke
-/// stop-then-restart cycles for `CSINode::run`. The previous `&mut` borrow
+/// stop-then-restart cycles for `CsiNode::run`. The previous `&mut` borrow
 /// is always gone by the time we land here again (`node.run` joins every
 /// STA task before returning, dropping the `Stack`/`Runner`), so we can
 /// safely hand the same buffer back out.
@@ -51,7 +51,7 @@ pub(crate) struct StackResourcesSlot {
 }
 
 // SAFETY: Access is serialised — `sta_init` is only called from
-// `CSINode::run`/`run_duration`, which run on a single executor with
+// `CsiNode::run`/`run_duration`, which run on a single executor with
 // exclusive `&mut self`, and any prior `&mut` to the inner storage has
 // been dropped before we get here.
 unsafe impl Sync for StackResourcesSlot {}
@@ -394,7 +394,7 @@ pub async fn sta_connection(
 static ICMP_FLOOD_UNSOLICITED: AtomicBool = AtomicBool::new(false);
 
 /// Select unsolicited-echo-reply flood mode (see [`ICMP_FLOOD_UNSOLICITED`]).
-/// Applied by `CSINode::run` from node configuration on every run so the
+/// Applied by `CsiNode::run` from node configuration on every run so the
 /// process-wide flag never leaks across differently-configured runs.
 pub(crate) fn set_icmp_flood_unsolicited(enabled: bool) {
     ICMP_FLOOD_UNSOLICITED.store(enabled, Ordering::Relaxed);
@@ -453,12 +453,12 @@ const ICMP_FLOOD_REPORT_INTERVAL_US: u64 = 1_000_000;
 ///
 /// Uses a deep TX queue and catch-up bursts so offered traffic is not capped at
 /// ~30 Hz by awaiting one in-flight datagram per timer tick. On the CSI
-/// collector, uplink 802.11 ACKs (and ICMP echo replies) become CSI reports.
+/// receiver, uplink 802.11 ACKs (and ICMP echo replies) become CSI reports.
 ///
 /// Catch-up debt is clamped to one burst's worth of ticks: a stall (radio
 /// busy, buffer full, heap pressure) is absorbed, not repaid at max rate —
 /// unbounded repayment previously drove a saturate/starve oscillation that
-/// showed up as bursty CSI with ~500 ms gaps on the collector.
+/// showed up as bursty CSI with ~500 ms gaps on the receiver.
 ///
 /// With [`ICMP_FLOOD_UNSOLICITED`] set the flood sends echo *replies* instead
 /// of requests — the peer never answers at the IP level, making the traffic

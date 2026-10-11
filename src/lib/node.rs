@@ -1,16 +1,15 @@
-//! The [`CSINode`] orchestrator and the Wi-Fi mode configs.
+//! The [`CsiNode`] orchestrator and the Wi-Fi mode configs.
 //!
-//! [`CSINode`] holds one [`OperationalMode`] and its `run` / `run_duration` wire up Wi-Fi, CSI
-//! and the mode's tasks. This module also owns the configs of the three Wi-Fi modes
-//! ([`WifiSnifferConfig`], [`WifiStationConfig`], [`WifiApConfig`]), the hardware bundle
-//! ([`NodeHardware`]), the TX/RX toggles ([`IOTaskConfig`]), the shared stop signal and the
-//! per-run lifecycle helpers. The emitter's config is [`EmitterConfig`] and the ESP-NOW modes'
-//! is [`EspNowConfig`](crate::EspNowConfig).
+//! [`CsiNode`] holds one [`Mode`] and one [`MeasurementSetup`], and its
+//! `run` / `run_duration` wire up Wi-Fi, CSI and the mode's tasks. This module also owns the
+//! configs of the three Wi-Fi modes ([`WifiSnifferConfig`], [`WifiStationConfig`],
+//! [`WifiApConfig`]), the hardware bundle ([`NodeHardware`]), the TX/RX toggles ([`IOTaskConfig`]),
+//! the shared stop signal and the per-run lifecycle helpers. The emitter's config is
+//! [`EmitterConfig`] and the ESP-NOW modes' is [`EspNowConfig`](crate::EspNowConfig).
 //!
-//! A node is described by the attributes in [`crate::model`]: its role, network role and
-//! reporting policy are read back from the operational mode, never stored beside it. Each
-//! mode's config exposes only the attributes that mode admits, so a node that the model rules
-//! out cannot be built.
+//! A node is described by the attributes in [`crate::model`]: its session role, sensing role and
+//! reporting are read back from the mode, never stored beside it. Each mode's config exposes only
+//! the attributes that mode admits, so a node that the model rules out cannot be built.
 
 #[cfg(any(feature = "async-print", feature = "auto"))]
 use embassy_time::with_timeout;
@@ -30,25 +29,23 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use portable_atomic::Ordering;
 
-use crate::collector::ap::{ap_init, run_ap};
-use crate::collector::sta::{run_sta_connect, sta_init};
-use crate::config::CsiConfig as CsiConfiguration;
-use crate::central::esp_now::run_esp_now_central;
-// The simplex flip, made visible at the import: the driver that FLOODS is the central end and the
-// driver that goes receive-only is the peripheral end. The files still sit under the module names
-// they had when the roles were assigned the other way around; moving them is a separate step.
-use crate::central::esp_now_fast::run_esp_now_fast_collector as run_esp_now_simplex_peer;
+use crate::wifi::ap::{ap_init, run_ap};
+use crate::wifi::sta::{run_sta_connect, sta_init};
+use crate::CsiConfig;
+use crate::MeasurementSetup;
 use crate::emitter::{EmitterConfig, run_emitter};
-use crate::peripheral::esp_now::run_esp_now_peripheral;
-use crate::peripheral::esp_now_fast::run_esp_now_fast_source as run_esp_now_simplex_source;
-use crate::model::{NodeView, OperationalMode, SimplexConfig};
+use crate::initiator::esp_now::run_esp_now_initiator;
+use crate::initiator::esp_now_simplex::run_esp_now_simplex_source;
+use crate::model::{Mode, NodeView, SimplexConfig};
+use crate::responder::esp_now::run_esp_now_responder;
+use crate::responder::esp_now_simplex::run_esp_now_simplex_peer;
 use crate::profile::{RadioProfile, StandardProfile};
 
 use crate::csi::delivery::{
-    CSINodeClient, build_csi_config, run_process_csi_packet, set_csi,
+    CsiNodeClient, build_csi_config, run_process_csi_packet, set_csi,
 };
 use crate::log_ln;
-use crate::radio::{apply_ht40_channel, suppress_espnow_rx};
+use crate::radio::{apply_ht40_channel, idle_station_for_espnow, suppress_espnow_rx};
 #[cfg(feature = "esp32c5")]
 use crate::radio::{apply_band_auto, apply_band_for_channel};
 use crate::stats::set_seq_drop_detection;
@@ -78,7 +75,7 @@ async fn c5_radio_settle() {
     Timer::after(Duration::from_millis(C5_RADIO_SETTLE_MS)).await;
 }
 
-async fn csi_data_collection(client: &mut CSINodeClient, duration: u64) {
+async fn csi_data_collection(client: &mut CsiNodeClient, duration: u64) {
     #[cfg(any(feature = "async-print", feature = "auto"))]
     if crate::logging::logging::is_async_logging_active() {
         with_timeout(Duration::from_secs(duration), async {
@@ -127,33 +124,46 @@ pub struct WifiSnifferConfig {
     #[allow(dead_code)]
     mac_filter: Option<[u8; 6]>,
     channel: u8,
-    reporting: crate::ReportingPolicy,
+    reporting: crate::Reporting,
 }
 
 impl WifiSnifferConfig {
-    /// A sniffer is always a [`Peripheral`](crate::NetworkRole::Peripheral): it never transmits, so
-    /// it cannot source the network's traffic. There is no setter for this.
-    pub const fn network_role() -> crate::NetworkRole {
-        crate::NetworkRole::Peripheral
+    /// A sniffer takes part in no sensing session: it observes traffic it neither originates nor
+    /// answers, so its session role is `None` (an observer). There is no setter for this.
+    pub const fn session_role() -> Option<crate::SessionRole> {
+        None
     }
 
-    /// How often this sniffer reports: [`Always`](crate::ReportingPolicy::Always) unless set with
-    /// [`with_threshold`](Self::with_threshold) or [`with_decimation`](Self::with_decimation).
-    /// Never [`Never`](crate::ReportingPolicy::Never): a sniffer that does not report observes
-    /// nothing, so there is no way to configure one.
-    pub fn reporting(&self) -> crate::ReportingPolicy {
+    /// A sniffer is always a [`Receiver`](crate::SensingRole::Receiver): it never transmits.
+    /// There is no setter for this.
+    pub const fn sensing_role() -> crate::SensingRole {
+        crate::SensingRole::Receiver
+    }
+
+    /// How this sniffer reports: [`Reporting::HOST`](crate::Reporting::HOST) unless set with
+    /// [`with_report_to`](Self::with_report_to), [`with_threshold`](Self::with_threshold) or
+    /// [`with_decimation`](Self::with_decimation). Never [`None`](crate::Reporting::None): a sniffer
+    /// that does not report observes nothing, so there is no way to configure one.
+    pub fn get_reporting(&self) -> crate::Reporting {
         self.reporting
     }
 
-    /// Report only while the channel is moving. See [`Threshold`](crate::Threshold).
+    /// Report every measurement to `to`.
+    pub fn with_report_to(mut self, to: crate::ReportTo) -> Self {
+        self.reporting = crate::Reporting::Report { to };
+        self
+    }
+
+    /// Report only while the channel is moving (threshold-based reporting). See
+    /// [`Threshold`](crate::Threshold).
     pub fn with_threshold(mut self, threshold: crate::Threshold) -> Self {
-        self.reporting = crate::ReportingPolicy::Threshold(threshold);
+        self.reporting = crate::Reporting::ThresholdBased(threshold);
         self
     }
 
     /// Report every `n`th measurement.
     pub fn with_decimation(mut self, n: u16) -> Self {
-        self.reporting = crate::ReportingPolicy::Decimate(n.max(1));
+        self.reporting = crate::Reporting::Decimate(n.max(1));
         self
     }
 }
@@ -162,7 +172,7 @@ impl Default for WifiSnifferConfig {
     fn default() -> Self {
         Self {
             mac_filter: None,
-            reporting: crate::ReportingPolicy::Always,
+            reporting: crate::Reporting::HOST,
             // Channel 1 is typically less congested than 11 in dense
             // residential / office environments.
             channel: 1,
@@ -212,13 +222,13 @@ pub struct WifiStationConfig {
     /// Primary channel of the target AP. On dual-band ESP32-C5 this selects
     /// 2.4 vs 5 GHz (`set_band_mode`) before scan/association.
     pub channel_hint: Option<u8>,
-    /// Whether the uplink this station generates is the traffic being measured. A station that
-    /// pings its gateway to keep the link busy is the network's traffic source and so a
-    /// [`Central`](crate::NetworkRole::Central); one that merely measures an already-busy link
-    /// sources nothing and is a [`Peripheral`](crate::NetworkRole::Peripheral).
-    network_role: crate::NetworkRole,
+    /// Whether this station drives the measured traffic. A station that pings its gateway to keep
+    /// the link busy originates the soundings and so is the session's
+    /// [`Initiator`](crate::SessionRole::Initiator); one that merely measures an already-busy link
+    /// takes part in no session it set up and has no session role (`None`).
+    session: Option<crate::SessionRole>,
     /// Whether, and how often, this node reports the CSI it captures.
-    reporting: crate::ReportingPolicy,
+    reporting: crate::Reporting,
 }
 
 impl WifiStationConfig {
@@ -227,44 +237,45 @@ impl WifiStationConfig {
         Self {
             client_config,
             channel_hint: None,
-            network_role: crate::NetworkRole::Central,
-            reporting: crate::ReportingPolicy::Always,
+            session: Some(crate::SessionRole::Initiator),
+            reporting: crate::Reporting::HOST,
         }
     }
 
-    /// Set whether the uplink this station generates is the network's traffic. Defaults to
-    /// [`Central`](crate::NetworkRole::Central).
-    pub fn with_network_role(mut self, role: crate::NetworkRole) -> Self {
-        self.network_role = role;
+    /// Set whether this station drives the measured traffic: `Some(Initiator)` when its gateway
+    /// ping (the [periodicity](crate::MeasurementSetup::periodicity_hz)) is the traffic being
+    /// measured, `None` when it passively measures a link something else keeps busy. Defaults to
+    /// `Some(Initiator)`.
+    ///
+    /// The value describes the node; the ping itself runs whenever a periodicity is set.
+    pub fn session(mut self, role: Option<crate::SessionRole>) -> Self {
+        self.session = role;
         self
     }
 
     /// Set whether, and how often, this node reports its CSI. Defaults to
-    /// [`Always`](crate::ReportingPolicy::Always).
-    pub fn with_reporting(mut self, policy: crate::ReportingPolicy) -> Self {
-        self.reporting = policy;
+    /// [`Reporting::HOST`](crate::Reporting::HOST).
+    pub fn reporting(mut self, reporting: crate::Reporting) -> Self {
+        self.reporting = reporting;
         self
     }
 
-    /// The pre-0.12 name of [`with_reporting`](Self::with_reporting).
-    #[deprecated(since = "0.12.0", note = "renamed to `with_reporting`")]
-    pub fn with_collection_mode(self, policy: crate::ReportingPolicy) -> Self {
-        self.with_reporting(policy)
+    /// Whether this station drives the measured traffic (`Some(Initiator)`) or not (`None`).
+    pub fn session_role(&self) -> Option<crate::SessionRole> {
+        self.session
     }
 
-    /// Whether the uplink this station generates is the network's traffic.
-    pub fn network_role(&self) -> crate::NetworkRole {
-        self.network_role
+    /// [`TransmitterReceiver`](crate::SensingRole::TransmitterReceiver) for a station that drives
+    /// the traffic it measures, [`Receiver`](crate::SensingRole::Receiver) otherwise.
+    pub fn sensing_role(&self) -> crate::SensingRole {
+        match self.session {
+            Some(crate::SessionRole::Initiator) => crate::SensingRole::TransmitterReceiver,
+            _ => crate::SensingRole::Receiver,
+        }
     }
 
-    /// Whether, and how often, this node reports the CSI it captures.
-    pub fn reporting(&self) -> crate::ReportingPolicy {
-        self.reporting
-    }
-
-    /// The pre-0.12 name of [`reporting`](Self::reporting).
-    #[deprecated(since = "0.12.0", note = "renamed to `reporting`")]
-    pub fn collection_mode(&self) -> crate::ReportingPolicy {
+    /// Whether, and how often, this node reports the CSI it captures, as configured.
+    pub fn get_reporting(&self) -> crate::Reporting {
         self.reporting
     }
 
@@ -282,7 +293,7 @@ impl defmt::Format for WifiStationConfig {
     }
 }
 
-/// Configuration for self-contained softAP CSI collector mode.
+/// Configuration for the self-contained softAP mode.
 ///
 /// Wraps esp-radio's [`AccessPointConfig`] (SSID, channel, auth, secondary
 /// channel) and the static IPv4 addressing used by the built-in DHCP server.
@@ -290,7 +301,7 @@ impl defmt::Format for WifiStationConfig {
 /// subnet with the gateway set to the AP itself.
 ///
 /// `channel`/`secondary_channel` are duplicated here because esp-radio's
-/// `AccessPointConfig` fields are not externally readable; [`CSINode`] needs them
+/// `AccessPointConfig` fields are not externally readable; [`CsiNode`] needs them
 /// for band/HT40 setup.
 ///
 /// [`AccessPointConfig`]: esp_radio::wifi::ap::AccessPointConfig
@@ -312,10 +323,10 @@ pub struct WifiApConfig {
     /// Whether to run the built-in DHCP server. When `false`, the AP only starts
     /// + collects CSI (clients must self-assign IPs).
     pub serve_dhcp: bool,
-    /// Whether this node reports the CSI it captures. The access point's *network* role is not
-    /// configurable — beacons and DHCP make it a traffic source by construction — but whether its
-    /// measurements leave it is.
-    reporting: crate::ReportingPolicy,
+    /// Whether this node reports the CSI it captures. The access point's roles are not
+    /// configurable — it is the session's initiator by construction — but whether its measurements
+    /// leave it is.
+    reporting: crate::Reporting,
     /// When `true`, every flood tick fires one unicast frame back-to-back to
     /// **all** active leases instead of advancing one lease per tick (round-robin).
     /// All associated stations then receive their downlink PPDU within tens of
@@ -358,37 +369,32 @@ impl WifiApConfig {
             lease_count: 1,
             serve_dhcp: true,
             sync_burst: false,
-            reporting: crate::ReportingPolicy::Always,
+            reporting: crate::Reporting::HOST,
         }
     }
 
-    /// An access point is always a [`Central`](crate::NetworkRole::Central): its beacons and DHCP
-    /// make it a traffic source by construction, so there is no setter for this.
-    pub const fn network_role() -> crate::NetworkRole {
-        crate::NetworkRole::Central
+    /// An access point is always the session's [`Initiator`](crate::SessionRole::Initiator): its
+    /// beacons and the downlink it drives to its stations originate the session, so there is no
+    /// setter for this.
+    pub const fn session_role() -> Option<crate::SessionRole> {
+        Some(crate::SessionRole::Initiator)
+    }
+
+    /// An access point is a [`Receiver`](crate::SensingRole::Receiver): it measures the uplink its
+    /// associated stations send. There is no setter for this.
+    pub const fn sensing_role() -> crate::SensingRole {
+        crate::SensingRole::Receiver
     }
 
     /// Set whether, and how often, this node reports its CSI. Defaults to
-    /// [`Always`](crate::ReportingPolicy::Always).
-    pub fn with_reporting(mut self, policy: crate::ReportingPolicy) -> Self {
-        self.reporting = policy;
+    /// [`Reporting::HOST`](crate::Reporting::HOST).
+    pub fn reporting(mut self, reporting: crate::Reporting) -> Self {
+        self.reporting = reporting;
         self
     }
 
-    /// The pre-0.12 name of [`with_reporting`](Self::with_reporting).
-    #[deprecated(since = "0.12.0", note = "renamed to `with_reporting`")]
-    pub fn with_collection_mode(self, policy: crate::ReportingPolicy) -> Self {
-        self.with_reporting(policy)
-    }
-
-    /// Whether, and how often, this node reports the CSI it captures.
-    pub fn reporting(&self) -> crate::ReportingPolicy {
-        self.reporting
-    }
-
-    /// The pre-0.12 name of [`reporting`](Self::reporting).
-    #[deprecated(since = "0.12.0", note = "renamed to `reporting`")]
-    pub fn collection_mode(&self) -> crate::ReportingPolicy {
+    /// Whether, and how often, this node reports the CSI it captures, as configured.
+    pub fn get_reporting(&self) -> crate::Reporting {
         self.reporting
     }
 
@@ -460,7 +466,7 @@ impl defmt::Format for WifiApConfig {
     }
 }
 
-/// Placeholder for the central driver's unused `_mac_addr` parameter. See its call site.
+/// Placeholder for the initiator driver's unused `_mac_addr` parameter. See its call site.
 const UNSET_MAC: [u8; 6] = [0; 6];
 
 /// Controls whether TX and RX tasks are active for a node.
@@ -490,7 +496,7 @@ impl Default for IOTaskConfig {
     }
 }
 
-/// Hardware handles required to operate a node in any operational mode.
+/// Hardware handles required to operate a node in any mode.
 pub struct NodeHardware<'a> {
     interfaces: RadioInterfaces,
     controller: &'a mut WifiController<'static>,
@@ -514,7 +520,7 @@ pub(crate) fn reset_globals() {
     // are no-ops. The CSI callback stays registered with esp-radio after stop
     // (the radio itself is still up), but with the gates closed the callback
     // short-circuits before it touches the log channel or the user's callback.
-    // Without this, a collector keeps emitting CSI lines on the serial port
+    // Without this, a receiver keeps emitting CSI lines on the serial port
     // well after `send_stop()`.
     //
     // The statistics counters are deliberately NOT cleared here. This runs at the END of
@@ -533,189 +539,158 @@ pub(crate) fn reset_globals() {
 
 /// Primary orchestration object for a CSI node.
 ///
-/// Construct with a per-mode constructor — [`CSINode::sniffer`], [`CSINode::station`],
-/// [`CSINode::access_point`], [`CSINode::emitter`], [`CSINode::esp_now`],
-/// [`CSINode::esp_now_simplex_source`] or [`CSINode::esp_now_simplex_peer`] — or with
-/// [`CSINode::new`] and an [`OperationalMode`]. Configure an optional protocol / traffic
-/// frequency, then call `run()`.
-pub struct CSINode<'a> {
-    /// How this node reaches the channel. The node's network role and collection mode are read
-    /// back from it rather than stored alongside it — see [`OperationalMode`].
-    mode: OperationalMode,
+/// Construct with a per-mode constructor — [`CsiNode::sniffer`], [`CsiNode::station`],
+/// [`CsiNode::access_point`], [`CsiNode::emitter`], [`CsiNode::esp_now`],
+/// [`CsiNode::esp_now_simplex_source`] or [`CsiNode::esp_now_simplex_peer`] — or with
+/// [`CsiNode::new`] and a [`Mode`]. Every constructor except the emitter's takes a
+/// [`MeasurementSetup`] (periodicity, bandwidth, acquisition); configure an optional protocol,
+/// then call `run()`.
+pub struct CsiNode<'a> {
+    /// How this node reaches the channel. The node's roles and reporting are read back from it
+    /// rather than stored alongside it — see [`Mode`].
+    mode: Mode,
     io_tasks: IOTaskConfig,
-    /// CSI Configuration
-    csi_config: Option<CsiConfiguration>,
-    /// Traffic Generation Frequency
-    traffic_freq_hz: Option<u16>,
+    /// Periodicity, bandwidth, acquisition and setup id.
+    setup: MeasurementSetup,
     hardware: NodeHardware<'a>,
     protocol: Option<Protocol>,
     /// ICMP flood sends unsolicited echo replies (one-directional traffic)
-    /// instead of echo requests. See [`CSINode::set_flood_unsolicited_reply`].
+    /// instead of echo requests. See [`CsiNode::set_flood_unsolicited_reply`].
     flood_unsolicited_reply: bool,
     /// Pluggable Wi-Fi bring-up back-end. Defaults to [`StandardProfile`];
-    /// override with [`CSINode::set_radio_profile`].
+    /// override with [`CsiNode::set_radio_profile`].
     profile: &'static dyn RadioProfile,
-    /// Measurement-setup id stamped on controlled soundings. See
-    /// [`CSINode::apply_measurement_setup`].
-    setup_id: u8,
 }
 
-impl<'a> CSINode<'a> {
-    /// Create a node that reaches the channel through `mode`.
+impl<'a> CsiNode<'a> {
+    /// Create a node that reaches the channel through `mode`, measuring under `setup`.
     ///
-    /// The node's network role and collection mode come from the mode's config — see the
+    /// The node's session role, sensing role and reporting come from the mode's config — see the
     /// per-mode constructors below, which are the ergonomic way in.
-    pub fn new(
-        mode: OperationalMode,
-        csi_config: Option<CsiConfiguration>,
-        traffic_freq_hz: Option<u16>,
-        hardware: NodeHardware<'a>,
-    ) -> Self {
+    pub fn new(mode: Mode, setup: MeasurementSetup, hardware: NodeHardware<'a>) -> Self {
         Self {
             mode,
             io_tasks: IOTaskConfig::default(),
-            csi_config,
-            traffic_freq_hz,
+            setup,
             hardware,
             protocol: None,
             flood_unsolicited_reply: false,
             profile: &StandardProfile,
-            setup_id: 0,
         }
     }
 
-    /// A node in the symmetric ESP-NOW exchange. Central or peripheral, collector or listener —
-    /// set both on the [`EspNowConfig`](crate::EspNowConfig); every combination is meaningful.
+    /// A node in the symmetric ESP-NOW exchange. Initiator or responder, reporting or not — set
+    /// both on the [`EspNowConfig`](crate::EspNowConfig); every combination is meaningful. The
+    /// setup's periodicity is the initiator's control-packet rate and the responder's reply
+    /// pacing.
     pub fn esp_now(
         config: crate::EspNowConfig,
-        csi_config: Option<CsiConfiguration>,
-        traffic_freq_hz: Option<u16>,
+        setup: MeasurementSetup,
         hardware: NodeHardware<'a>,
     ) -> Self {
-        Self::new(
-            OperationalMode::EspNow(config),
-            csi_config,
-            traffic_freq_hz,
-            hardware,
-        )
+        Self::new(Mode::EspNow(config), setup, hardware)
     }
 
-    /// The flooding end of the asymmetric ESP-NOW exchange: a **central listener**. It owns all
-    /// the transmit airtime and captures nothing.
+    /// The flooding end of the asymmetric ESP-NOW exchange: an **initiator and sensing transmitter
+    /// that reports nothing**. It owns all the transmit airtime and measures nothing, so the
+    /// setup's acquisition is ignored; its periodicity paces the flood.
     pub fn esp_now_simplex_source(
         config: crate::EspNowConfig,
-        traffic_freq_hz: Option<u16>,
+        setup: MeasurementSetup,
         hardware: NodeHardware<'a>,
     ) -> Self {
         Self::new(
-            OperationalMode::EspNowSimplex(SimplexConfig::source(config)),
-            None,
-            traffic_freq_hz,
+            Mode::EspNowSimplex(SimplexConfig::source(config)),
+            setup,
             hardware,
         )
     }
 
-    /// The measuring end of the asymmetric ESP-NOW exchange: a **peripheral collector**. It
-    /// beacons until it is found, then goes receive-only.
+    /// The measuring end of the asymmetric ESP-NOW exchange: a **responder and sensing receiver
+    /// that reports every measurement**. It beacons until it is found, then goes receive-only; it
+    /// sounds nothing, so the setup's periodicity is ignored.
     pub fn esp_now_simplex_peer(
         channel: u8,
-        csi_config: Option<CsiConfiguration>,
+        setup: MeasurementSetup,
         hardware: NodeHardware<'a>,
     ) -> Self {
         Self::new(
-            OperationalMode::EspNowSimplex(SimplexConfig::peer(channel)),
-            csi_config,
-            None,
+            Mode::EspNowSimplex(SimplexConfig::peer(channel)),
+            setup,
             hardware,
         )
     }
 
-    /// A promiscuous sniffer: a **peripheral collector**, always. It never transmits, so it cannot
-    /// source the network's traffic, and a sniffer that does not report observes nothing.
+    /// A promiscuous sniffer: an **observer** (no session role) and sensing receiver, always. It
+    /// never transmits, and a sniffer that does not report observes nothing. It sounds nothing, so
+    /// the setup's periodicity is ignored.
     pub fn sniffer(
         config: WifiSnifferConfig,
-        csi_config: Option<CsiConfiguration>,
+        setup: MeasurementSetup,
         hardware: NodeHardware<'a>,
     ) -> Self {
-        Self::new(OperationalMode::Sniffer(config), csi_config, None, hardware)
+        Self::new(Mode::Sniffer(config), setup, hardware)
     }
 
-    /// A Wi-Fi station associated to an access point or a commercial router. Central when the
-    /// uplink it generates is the traffic being measured, peripheral when it is not.
+    /// A Wi-Fi station associated to an access point or a commercial router. The setup's
+    /// periodicity is its gateway ping rate; it is the session's initiator when that ping is the
+    /// traffic being measured (see [`WifiStationConfig::session`]).
     pub fn station(
         config: WifiStationConfig,
-        csi_config: Option<CsiConfiguration>,
-        traffic_freq_hz: Option<u16>,
+        setup: MeasurementSetup,
         hardware: NodeHardware<'a>,
     ) -> Self {
-        Self::new(
-            OperationalMode::Station(config),
-            csi_config,
-            traffic_freq_hz,
-            hardware,
-        )
+        Self::new(Mode::Station(config), setup, hardware)
     }
 
-    /// A self-contained softAP with DHCP. Always a **central** — beacons and DHCP make it a
-    /// traffic source by construction — and a collector or a listener.
+    /// A self-contained softAP with DHCP. Always the session's **initiator** and a sensing
+    /// receiver; reporting is configurable. The setup's periodicity is its downlink flood rate.
     pub fn access_point(
         config: WifiApConfig,
-        csi_config: Option<CsiConfiguration>,
-        traffic_freq_hz: Option<u16>,
+        setup: MeasurementSetup,
         hardware: NodeHardware<'a>,
     ) -> Self {
-        Self::new(
-            OperationalMode::AccessPoint(config),
-            csi_config,
-            traffic_freq_hz,
-            hardware,
-        )
+        Self::new(Mode::AccessPoint(config), setup, hardware)
     }
 
-    /// An unassociated transmit-only sounding node: a **central listener**, always. It originates
-    /// the network's traffic and captures nothing, so it takes no CSI config.
+    /// An unassociated transmit-only sounding node: a **sensing transmitter that reports nothing**,
+    /// with no session role, always. It measures nothing and takes its period from the
+    /// [`EmitterConfig`], so it takes no measurement setup.
     pub fn emitter(config: EmitterConfig, hardware: NodeHardware<'a>) -> Self {
-        Self::new(OperationalMode::Emitter(config), None, None, hardware)
+        Self::new(Mode::Emitter(config), MeasurementSetup::new(), hardware)
     }
 
     /// How this node reaches the channel.
-    pub fn operational_mode(&self) -> &OperationalMode {
+    pub fn mode(&self) -> &Mode {
         &self.mode
     }
 
-    /// What this node contributes to the network. Computed from the mode.
-    pub fn network_role(&self) -> crate::NetworkRole {
-        self.mode.network_role()
-    }
-
-    /// Whether, and how often, this node's measurements leave it, **as configured**. A peripheral
-    /// paired with a silent central promotes itself mid-run without rewriting its configuration, so
-    /// this and [`runtime_reporting`](crate::runtime_reporting) can legitimately differ.
-    pub fn reporting(&self) -> crate::ReportingPolicy {
-        self.mode.reporting()
-    }
-
-    /// The pre-0.12 name of [`reporting`](Self::reporting).
-    #[deprecated(since = "0.12.0", note = "renamed to `reporting`")]
-    pub fn collection_mode(&self) -> crate::ReportingPolicy {
-        self.mode.reporting()
-    }
-
-    /// The node's role within its operational mode.
-    pub fn role(&self) -> crate::ModeRole {
-        self.mode.role()
-    }
-
-    /// The node's IEEE 802.11bf session role, if its mode runs a sensing session. `None` for every
-    /// mode today — see [`SessionRole`](crate::SessionRole).
-    pub const fn session_role(&self) -> Option<crate::SessionRole> {
+    /// The node's IEEE 802.11bf session role, or `None` for an observer. Computed from the mode.
+    pub fn session_role(&self) -> Option<crate::SessionRole> {
         self.mode.session_role()
+    }
+
+    /// The node's IEEE 802.11bf sensing role. Computed from the mode.
+    pub fn sensing_role(&self) -> crate::SensingRole {
+        self.mode.sensing_role()
+    }
+
+    /// Whether, and how often, this node's measurements leave it, **as configured**. A responder
+    /// paired with a silent initiator promotes itself mid-run without rewriting its configuration,
+    /// so this and [`runtime_reporting`](crate::runtime_reporting) can legitimately differ.
+    pub fn reporting(&self) -> crate::Reporting {
+        self.mode.reporting()
+    }
+
+    /// The node's measurement setup.
+    pub fn measurement_setup(&self) -> &MeasurementSetup {
+        &self.setup
     }
 
     /// If this is an emitter, return its configuration.
     pub fn get_emitter_config(&self) -> Option<&EmitterConfig> {
         match &self.mode {
-            OperationalMode::Emitter(config) => Some(config),
+            Mode::Emitter(config) => Some(config),
             _ => None,
         }
     }
@@ -733,10 +708,11 @@ impl<'a> CSINode<'a> {
     /// - `acquisition.ppdu_formats`: every format, HE only (ESP32-C5/C6 HE-LTF acquisition), or
     ///   no legacy formats. Other subsets are refused.
     /// - `acquisition.bandwidth` and `stimulus.bandwidth` must match the mode's configured width.
-    /// - `stimulus.periodicity_us` becomes the traffic rate — the ESP-NOW central's control-packet
-    ///   rate, the station's or access point's ping rate, the emitter's frame period. A mode that
-    ///   does not sound the channel (a sniffer, an ESP-NOW peripheral or simplex peer) refuses any
-    ///   stimulus.
+    /// - `stimulus.periodicity_us` becomes the node's
+    ///   [periodicity](MeasurementSetup::periodicity_hz) — the ESP-NOW initiator's control-packet
+    ///   rate, the station's or access point's ping rate — or the emitter's frame period. A mode
+    ///   that does not sound the channel (a sniffer, an ESP-NOW responder or simplex peer) refuses
+    ///   any stimulus.
     /// - `stimulus.responders`: none, or exactly one, which becomes the CSI peer filter.
     /// - Grouped reports, `ng`/`nb` other than 1/8, and trigger-based sounding are refused: the
     ///   radio produces raw estimates from non-TB soundings only.
@@ -748,11 +724,11 @@ impl<'a> CSINode<'a> {
 
         let width = self.configured_bandwidth();
         let sounds = match &self.mode {
-            OperationalMode::EspNow(c) => c.network_role() == crate::NetworkRole::Central,
-            OperationalMode::EspNowSimplex(c) => c.is_source(),
-            OperationalMode::Station(c) => c.network_role() == crate::NetworkRole::Central,
-            OperationalMode::AccessPoint(_) | OperationalMode::Emitter(_) => true,
-            OperationalMode::Sniffer(_) => false,
+            Mode::EspNow(c) => c.session_role() == crate::SessionRole::Initiator,
+            Mode::EspNowSimplex(c) => c.is_source(),
+            Mode::Station(c) => c.session_role() == Some(crate::SessionRole::Initiator),
+            Mode::AccessPoint(_) | Mode::Emitter(_) => true,
+            Mode::Sniffer(_) => false,
         };
 
         // Validate everything before changing anything.
@@ -811,31 +787,31 @@ impl<'a> CSINode<'a> {
         if he_only {
             #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
             {
-                self.csi_config = Some(CsiConfiguration::he20());
+                self.setup.set_acquisition(Some(CsiConfig::he20()));
             }
         } else if formats.excludes_legacy() {
             #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
             {
-                let mut c = self.csi_config.clone().unwrap_or_default();
+                let mut c = self.setup.get_acquisition().cloned().unwrap_or_default();
                 c.acquire_csi_legacy = 0;
                 #[cfg(feature = "esp32c5")]
                 {
                     c.acquire_csi_force_lltf = false;
                 }
-                self.csi_config = Some(c);
+                self.setup.set_acquisition(Some(c));
             }
             #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
             crate::set_csi_min_sig_mode(1);
         }
         if let Some(hz) = rate {
             match &mut self.mode {
-                OperationalMode::Emitter(c) => {
+                Mode::Emitter(c) => {
                     c.period = Duration::from_micros(1_000_000 / hz.max(1) as u64);
                 }
-                _ => self.traffic_freq_hz = Some(hz),
+                _ => self.setup.set_periodicity_hz(Some(hz)),
             }
         }
-        self.setup_id = setup.id;
+        self.setup.set_id(setup.id);
         Ok(())
     }
 
@@ -843,12 +819,12 @@ impl<'a> CSINode<'a> {
     fn configured_bandwidth(&self) -> Option<crate::wire::Bandwidth> {
         use crate::wire::Bandwidth;
         let forty = match &self.mode {
-            OperationalMode::EspNow(c) => c.secondary_channel().is_some(),
-            OperationalMode::EspNowSimplex(c) => c.inner().secondary_channel().is_some(),
-            OperationalMode::AccessPoint(c) => c.secondary_channel.is_some(),
-            OperationalMode::Emitter(c) => c.phy.is_forty(),
+            Mode::EspNow(c) => c.secondary_channel().is_some(),
+            Mode::EspNowSimplex(c) => c.inner().secondary_channel().is_some(),
+            Mode::AccessPoint(c) => c.secondary_channel.is_some(),
+            Mode::Emitter(c) => c.phy.is_forty(),
             // A station's width is whatever it associates at; a sniffer's follows the PPDU.
-            OperationalMode::Station(_) | OperationalMode::Sniffer(_) => return None,
+            Mode::Station(_) | Mode::Sniffer(_) => return None,
         };
         Some(if forty { Bandwidth::Mhz40 } else { Bandwidth::Mhz20 })
     }
@@ -856,38 +832,39 @@ impl<'a> CSINode<'a> {
     /// Replace the mode's primary channel.
     fn set_mode_channel(&mut self, ch: u8) {
         match &mut self.mode {
-            OperationalMode::EspNow(c) => c.channel = ch,
-            OperationalMode::EspNowSimplex(c) => c.set_channel(ch),
-            OperationalMode::Sniffer(c) => c.channel = ch,
-            OperationalMode::Station(c) => c.channel_hint = Some(ch),
-            OperationalMode::AccessPoint(c) => {
+            Mode::EspNow(c) => c.channel = ch,
+            Mode::EspNowSimplex(c) => c.set_channel(ch),
+            Mode::Sniffer(c) => c.channel = ch,
+            Mode::Station(c) => c.channel_hint = Some(ch),
+            Mode::AccessPoint(c) => {
                 c.channel = ch;
                 c.ap_config = c.ap_config.clone().with_channel(ch);
             }
-            OperationalMode::Emitter(c) => c.channel = ch,
+            Mode::Emitter(c) => c.channel = ch,
         }
     }
 
-    /// Update CSI configuration.
-    pub fn set_csi_config(&mut self, config: CsiConfiguration) {
-        self.csi_config = Some(config);
+    /// Replace the measurement setup.
+    pub fn set_measurement_setup(&mut self, setup: MeasurementSetup) {
+        self.setup = setup;
+    }
+
+    /// Replace the acquisition (CSI configuration) of the measurement setup.
+    pub fn set_csi_config(&mut self, config: CsiConfig) {
+        self.setup.set_acquisition(Some(config));
     }
 
     /// Update Wi-Fi Station configuration (only applies to a station node).
     pub fn set_station_config(&mut self, config: WifiStationConfig) {
-        if let OperationalMode::Station(_) = &self.mode {
-            self.mode = OperationalMode::Station(config);
+        if let Mode::Station(_) = &self.mode {
+            self.mode = Mode::Station(config);
         }
     }
 
-    /// Set the traffic generation frequency in Hz.
-    ///
-    /// Read by the modes that source traffic: the station's gateway ping, the access point's
-    /// downlink flood, the ESP-NOW central's control-packet rate and the ESP-NOW peripheral's reply
-    /// pacing, and the simplex source's flood. The sniffer, the emitter (which uses
-    /// [`EmitterConfig::period`]) and the simplex peer ignore it.
-    pub fn set_traffic_frequency(&mut self, freq_hz: u16) {
-        self.traffic_freq_hz = Some(freq_hz);
+    /// Set the periodicity of the measurement setup, in Hz. See
+    /// [`MeasurementSetup::periodicity_hz`] for which modes read it.
+    pub fn set_periodicity_hz(&mut self, hz: u16) {
+        self.setup.set_periodicity_hz(Some(hz));
     }
 
     /// Replace the TX/RX task configuration. See [`IOTaskConfig`]; the two fields can also be set
@@ -912,10 +889,10 @@ impl<'a> CSINode<'a> {
         self.io_tasks
     }
 
-    /// Replace how this node reaches the channel, and with it the network role and collection
-    /// mode the new mode implies. Used to run one node through several configurations without
-    /// reconstructing it — see `examples/runtime_config.rs`.
-    pub fn set_operational_mode(&mut self, mode: OperationalMode) {
+    /// Replace how this node reaches the channel, and with it the roles and reporting the new mode
+    /// implies. Used to run one node through several configurations without reconstructing it —
+    /// see `examples/runtime_config.rs`.
+    pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
     }
 
@@ -945,10 +922,10 @@ impl<'a> CSINode<'a> {
         self.flood_unsolicited_reply = enabled;
     }
 
-    /// Run the node for `duration` seconds with internal collection.
+    /// Run the node for `duration` seconds with internal draining of the measurements.
     ///
     /// This initializes Wi-Fi, configures CSI, and starts mode-specific tasks.
-    pub async fn run_duration(&mut self, duration: u64, client: &mut CSINodeClient) {
+    pub async fn run_duration(&mut self, duration: u64, client: &mut CsiNodeClient) {
         self.run_inner(Some(duration), Some(client)).await;
     }
 
@@ -959,26 +936,49 @@ impl<'a> CSINode<'a> {
     /// when set, each mode arm runs an extra concurrent future that stops the
     /// node after `duration` seconds (and, with RX enabled, drains CSI to the
     /// logger via `client`). When `None` the node runs until externally
-    /// stopped via [`CSINodeClient::send_stop`].
-    async fn run_inner(&mut self, duration: Option<u64>, client: Option<&mut CSINodeClient>) {
+    /// stopped via [`CsiNodeClient::send_stop`].
+    async fn run_inner(&mut self, duration: Option<u64>, client: Option<&mut CsiNodeClient>) {
         // Zero the counters and stamp the capture start so `show-stats` describes THIS run, and
         // still describes it after the run ends. Deliberately here rather than in `reset_globals`,
-        // which runs at stop — see the note there. Mirrors what an out-of-tree collector path
+        // which runs at stop — see the note there. Mirrors what an out-of-tree receiver path
         // does with `stats_begin_run`.
         #[cfg(feature = "statistics")]
         crate::stats::stats_begin_run();
+
+        // A requested width the mode's own config contradicts is reported, not applied: the
+        // config is where the width is set (see `MeasurementSetup::bandwidth`).
+        if let (Some(want), Some(have)) = (self.setup.get_bandwidth(), self.configured_bandwidth())
+            && want != have
+        {
+            let mhz = |b: crate::wire::Bandwidth| -> u16 {
+                use crate::wire::Bandwidth::*;
+                match b {
+                    Mhz20 => 20,
+                    Mhz40 => 40,
+                    Mhz80 => 80,
+                    Mhz160 => 160,
+                    Mhz320 => 320,
+                }
+            };
+            log_ln!(
+                "Measurement setup asks for {} MHz but the mode is configured for {} MHz; running at {} MHz",
+                mhz(want),
+                mhz(have),
+                mhz(have)
+            );
+        }
 
         let interfaces = &mut self.hardware.interfaces;
         let controller = &mut self.hardware.controller;
 
         // Applied every run (not only when set) so the process-wide flood-kind
         // flag never leaks from a previous, differently-configured run.
-        crate::collector::sta::set_icmp_flood_unsolicited(self.flood_unsolicited_reply);
+        crate::wifi::sta::set_icmp_flood_unsolicited(self.flood_unsolicited_reply);
 
         // Applied every run, for the same reason as the flood flag above: the gate is
-        // process-wide, so a node left as a Listener by a previous run would silently stop
-        // processing CSI in this one. Read by the ESP-NOW central to decide whether it does
-        // anything with what it captures.
+        // process-wide, so a node left reporting `None` by a previous run would silently stop
+        // processing CSI in this one. Read by the ESP-NOW initiator to announce whether it
+        // reports.
         crate::set_runtime_reporting(self.mode.reporting());
 
         // Session context for this run's frames. The ESP-NOW modes sound the channel themselves,
@@ -988,11 +988,11 @@ impl<'a> CSINode<'a> {
         crate::csi::session::begin_run(
             matches!(
                 self.mode,
-                OperationalMode::EspNow(_) | OperationalMode::EspNowSimplex(_)
+                Mode::EspNow(_) | Mode::EspNowSimplex(_)
             ),
-            matches!(self.mode, OperationalMode::Sniffer(_)),
+            matches!(self.mode, Mode::Sniffer(_)),
         );
-        crate::csi::session::set_setup_id(self.setup_id);
+        crate::csi::session::set_setup_id(self.setup.get_id());
 
         // Deal with esp-radio's built-in ESP-NOW receive dispatcher before any other Wi-Fi
         // reconfiguration runs — see `suppress_espnow_rx` for why this must happen this early.
@@ -1001,7 +1001,7 @@ impl<'a> CSINode<'a> {
         // permanently UNREGISTERS the callback, which is right for the 802.11 roles — none of them
         // reads ESP-NOW, and the stock dispatcher heap-allocates every overheard vendor action
         // frame into a deque nothing drains. It is exactly wrong for the ESP-NOW roles, which would
-        // then be deaf: a peripheral would never see a control frame and a fast source would never
+        // then be deaf: a responder would never see a control frame and a simplex source would never
         // hear the discovery beacon, both while looking perfectly healthy.
         //
         // So an ESP-NOW role installs the static-pool dispatcher instead, which replaces the
@@ -1009,9 +1009,10 @@ impl<'a> CSINode<'a> {
         // frames still arrive.
         if matches!(
             &self.mode,
-            OperationalMode::EspNow(_) | OperationalMode::EspNowSimplex(_)
+            Mode::EspNow(_) | Mode::EspNowSimplex(_)
         ) {
             crate::esp_now_pool::install();
+            idle_station_for_espnow(controller).await;
         } else {
             suppress_espnow_rx();
         }
@@ -1019,11 +1020,11 @@ impl<'a> CSINode<'a> {
         // reconfiguration mutation (no-op off C5).
         c5_radio_settle().await;
 
-        let is_ap = matches!(&self.mode, OperationalMode::AccessPoint(_));
-        let is_sniffer = matches!(&self.mode, OperationalMode::Sniffer(_));
-        let is_emitter = matches!(&self.mode, OperationalMode::Emitter(_));
+        let is_ap = matches!(&self.mode, Mode::AccessPoint(_));
+        let is_sniffer = matches!(&self.mode, Mode::Sniffer(_));
+        let is_emitter = matches!(&self.mode, Mode::Emitter(_));
 
-        // An emitter never captures, so CSI is only ever armed for a collector.
+        // An emitter never captures, so CSI is only ever armed for a receiver.
         // Everything downstream keys off this rather than re-testing the role.
         let rx_enabled = self.io_tasks.rx_enabled && !is_emitter;
 
@@ -1038,8 +1039,8 @@ impl<'a> CSINode<'a> {
         #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
         if self.protocol.is_none() {
             let he20 = match &self.mode {
-                OperationalMode::EspNow(c) => c.he20(),
-                OperationalMode::EspNowSimplex(c) => c.inner().he20(),
+                Mode::EspNow(c) => c.he20(),
+                Mode::EspNowSimplex(c) => c.inner().he20(),
                 _ => false,
             };
             if he20 {
@@ -1069,9 +1070,9 @@ impl<'a> CSINode<'a> {
             c5_radio_settle().await;
         }
 
-        // Tasks necessary for a station collector.
+        // Tasks necessary for a station receiver.
         let sta_interface =
-            if let OperationalMode::Station(config) = &self.mode {
+            if let Mode::Station(config) = &self.mode {
                 let ifaces = sta_init(
                     &mut interfaces.station,
                     config,
@@ -1107,7 +1108,7 @@ impl<'a> CSINode<'a> {
         // Self-contained softAP: bring up the AP-side embassy-net stack (static
         // IP) and apply the AP config to the controller. `interfaces.access_point`
         // is disjoint from `.station`/`.sniffer`, so this borrow is fine.
-        let ap_interface = if let OperationalMode::AccessPoint(config) = &self.mode {
+        let ap_interface = if let Mode::AccessPoint(config) = &self.mode {
             #[cfg(feature = "esp32c5")]
             if config.secondary_channel().is_none() {
                 apply_band_for_channel(controller, config.channel());
@@ -1134,14 +1135,14 @@ impl<'a> CSINode<'a> {
         };
 
         // Build CSI Configuration. An emitter captures nothing, so this is only
-        // meaningful for a collector — but it is cheap and keeps the flow linear.
-        let mut config = match self.csi_config {
-            Some(ref config) => {
+        // meaningful for a receiver — but it is cheap and keeps the flow linear.
+        let mut config = match self.setup.get_acquisition() {
+            Some(config) => {
                 log_ln!("CSI Configuration Set: {:?}", config);
                 build_csi_config(config)
             }
             None => {
-                let default_config = CsiConfiguration::default();
+                let default_config = CsiConfig::default();
                 log_ln!(
                     "No CSI Configuration Provided. Going with defaults: {:?}",
                     default_config
@@ -1154,12 +1155,12 @@ impl<'a> CSINode<'a> {
         profile.tune_csi_acquisition(&mut config);
 
         log_ln!("Wi-Fi Controller Started");
-        // The collection mode reaches the delivery gate through `set_runtime_collection_mode`
-        // above, not through here: `CSI_OUTPUT_ENABLED` is the user's runtime override and writing
-        // the configured mode into it would make `set-csi-output --enabled=true` unable to
-        // re-enable a node that had been configured as a listener.
+        // The reporting reaches the delivery gate through `set_runtime_reporting` above, not
+        // through here: `CSI_OUTPUT_ENABLED` is the user's runtime override and writing the
+        // configured reporting into it would make `set-csi-output --enabled=true` unable to
+        // re-enable a node that had been configured to report nothing.
         // Sequence-drop detection tracks per-source-MAC sequence numbers, so it
-        // works for any collector: the emitter's driver-assigned incrementing
+        // works for any receiver: the emitter's driver-assigned incrementing
         // sequence numbers make gaps in a capture measurable.
         set_seq_drop_detection(!is_emitter);
 
@@ -1185,14 +1186,14 @@ impl<'a> CSINode<'a> {
         let sniffer = &interfaces.sniffer;
 
         match &self.mode {
-            OperationalMode::Emitter(emitter_config) => {
+            Mode::Emitter(emitter_config) => {
                 // The emitter owns its whole bring-up (forced TX PHY, unassociated
                 // interface start, channel lock) inside `run_emitter`, because the
                 // forced rate has to be applied before the interface starts.
                 let main_task = run_emitter(controller, interfaces, emitter_config);
                 drive_main(main_task, false, duration, client).await;
             }
-            OperationalMode::Sniffer(sniffer_config) => {
+            Mode::Sniffer(sniffer_config) => {
                     #[cfg(feature = "esp32c5")]
                     {
                         let band = if sniffer_config.channel() >= 36 {
@@ -1233,7 +1234,7 @@ impl<'a> CSINode<'a> {
                     }
                     sniffer.set_promiscuous_mode(false).unwrap();
                 }
-            OperationalMode::AccessPoint(ap_config) => {
+            Mode::AccessPoint(ap_config) => {
                     // Start the AP, run the net stack + optional DHCP server, and
                     // collect CSI from associated stations' uplink frames. CSI is
                     // registered inside `run_ap` (after the AP-start radio restart).
@@ -1245,12 +1246,12 @@ impl<'a> CSINode<'a> {
                         ap_config,
                         csi_config_for_recovery,
                         self.io_tasks,
-                        self.traffic_freq_hz,
+                        self.setup.get_periodicity_hz(),
                     );
                     drive_main(main_task, rx_enabled, duration, client).await;
                     sniffer.set_promiscuous_mode(false).unwrap();
                 }
-            OperationalMode::Station(_sta_config) => {
+            Mode::Station(_sta_config) => {
                     // 1. Connect to the Wi-Fi network.
                     // 2. Run DHCP / NTP sync if enabled in config.
                     // 3. Drive STA connection handling and network operations.
@@ -1258,7 +1259,7 @@ impl<'a> CSINode<'a> {
 
                     let main_task = run_sta_connect(
                         controller,
-                        self.traffic_freq_hz,
+                        self.setup.get_periodicity_hz(),
                         sta_stack,
                         sta_runner,
                         csi_config_for_recovery,
@@ -1283,60 +1284,55 @@ impl<'a> CSINode<'a> {
             // take `&mut interfaces.esp_now`, a disjoint field, which the borrow checker accepts —
             // and they must not touch `sniffer`, which is why none of them clears promiscuous mode
             // on the way out. ESP-NOW never sets it.
-            OperationalMode::EspNow(cfg) => {
-                // The symmetric exchange has two ends and the network role picks which one this
-                // node drives: the central originates the control traffic, the peripheral answers
-                // it. Both capture, which is why this is the one mode where every combination of
-                // the two attributes is meaningful.
-                match cfg.network_role() {
-                    crate::NetworkRole::Central => {
-                        // `is_collector` decides whether the central PROCESSES the CSI it captures
-                        // or merely keeps it flowing — the `CollectionMode` distinction. It is read
-                        // from the same runtime flag the delivery path uses, so a mode change
-                        // mid-run is seen by both.
-                        let main_task = run_esp_now_central(
+            Mode::EspNow(cfg) => {
+                // The symmetric exchange has two ends and the session role picks which one this
+                // node drives: the initiator originates the control traffic, the responder answers
+                // it. Both measure, which is why this is the one mode where every combination of
+                // session role and reporting is meaningful.
+                match cfg.session_role() {
+                    crate::SessionRole::Initiator => {
+                        // `reports` is announced to the responders in every control packet, so a
+                        // responder paired with a silent initiator can promote itself. It is read
+                        // from the same runtime flag the delivery path uses.
+                        let main_task = run_esp_now_initiator(
                             &mut interfaces.esp_now,
-                            // `run_esp_now_central` takes this as `_mac_addr` and does not read
+                            // `run_esp_now_initiator` takes this as `_mac_addr` and does not read
                             // it — the peer MAC it actually uses comes from
                             // `EspNowConfig::peer_mac`. Passed as an explicit unset value rather
                             // than a plausible-looking address, so that if the driver ever starts
                             // reading it the result is obviously wrong rather than subtly wrong.
                             UNSET_MAC,
                             cfg,
-                            self.traffic_freq_hz,
-                            crate::IS_COLLECTOR.load(Ordering::Relaxed),
+                            self.setup.get_periodicity_hz(),
+                            crate::REPORTS.load(Ordering::Relaxed),
                             self.io_tasks,
                         );
                         drive_main(main_task, rx_enabled, duration, client).await;
                     }
-                    crate::NetworkRole::Peripheral => {
-                        let main_task = run_esp_now_peripheral(
+                    crate::SessionRole::Responder => {
+                        let main_task = run_esp_now_responder(
                             &mut interfaces.esp_now,
                             cfg,
-                            self.traffic_freq_hz,
+                            self.setup.get_periodicity_hz(),
                             self.io_tasks,
                         );
                         drive_main(main_task, rx_enabled, duration, client).await;
                     }
                 }
             }
-            OperationalMode::EspNowSimplex(cfg) => {
+            Mode::EspNowSimplex(cfg) => {
                 // Asymmetric simplex. The `source` end owns all the transmit airtime; the `peer`
                 // end beacons until it is found and then goes receive-only. Both drivers take the
-                // same `EspNowConfig`, so the end is what selects between them.
-                //
-                // Which end is which used to be spelled the other way around: the flooding end was
-                // a `PeripheralOpMode::EspNowFastSource` and the receive-only end a
-                // `CentralOpMode::EspNowFastCollector`, so the only node transmitting was the one
-                // called "peripheral". The drivers are unchanged; only the roles that name them
-                // moved, to follow the traffic as they do in every other mode.
+                // same `EspNowConfig`, so the end is what selects between them: the source is the
+                // initiator (`initiator::esp_now_simplex`), the peer the responder
+                // (`responder::esp_now_simplex`).
                 if cfg.is_source() {
                     // It captures nothing, so RX is forced off regardless of `rx_enabled` — a CSI
                     // rate task here would compete for the airtime the flood exists to fill.
                     let main_task = run_esp_now_simplex_source(
                         &mut interfaces.esp_now,
                         cfg.inner(),
-                        self.traffic_freq_hz,
+                        self.setup.get_periodicity_hz(),
                         self.io_tasks,
                     );
                     drive_main(main_task, false, duration, client).await;
@@ -1373,7 +1369,7 @@ async fn drive_main(
     main_task: impl core::future::Future,
     rx_enabled: bool,
     duration: Option<u64>,
-    client: Option<&mut CSINodeClient>,
+    client: Option<&mut CsiNodeClient>,
 ) {
     match (duration, rx_enabled) {
         (Some(d), true) => {
@@ -1405,9 +1401,9 @@ async fn drive_main(
 ///
 /// This was measured, not theorised. With an N-only set, an ESP32-C6 `sniffer` collected
 /// **zero** HT20 frames from a working emitter — reproduced on both C6 boards, in both role
-/// assignments — while ESP32-S3 collectors on the same link and the same config collected
+/// assignments — while ESP32-S3 receivers on the same link and the same config collected
 /// normally (their driver tolerates the degenerate set). The emitter never hit this because
-/// `emitter::phy` builds `B | G | N` for itself; only the collector path used `only()`.
+/// `emitter::phy` builds `B | G | N` for itself; only the receiver path used `only()`.
 ///
 /// `LR` is Espressif's proprietary long-range PHY rather than a rung on the ladder, so it
 /// stays on its own. The 5 GHz-only rungs keep the previous one-bit behaviour instead of
@@ -1450,7 +1446,7 @@ mod protocol_ladder_tests {
     }
 
     /// Regression for the measured failure: an N-only 2.4 GHz set made an ESP32-C6
-    /// collector capture zero HT20 frames. `N` must never be advertised alone.
+    /// receiver capture zero HT20 frames. `N` must never be advertised alone.
     #[test]
     fn n_is_never_advertised_alone() {
         let set = protocol_ladder_2_4(Protocol::N);
@@ -1460,7 +1456,7 @@ mod protocol_ladder_tests {
         assert_ne!(set, EnumSet::only(Protocol::N));
     }
 
-    /// The collector ladder must match what the emitter already builds for itself in
+    /// The receiver ladder must match what the emitter already builds for itself in
     /// `emitter::phy` (`B | G | N`) — the two ends of an HT link have to agree, and the
     /// mismatch between them is exactly what this bug was.
     #[test]

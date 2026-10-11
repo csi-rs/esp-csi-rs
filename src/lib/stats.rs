@@ -170,19 +170,19 @@ pub(crate) fn record_tx() {
 /// Record one transmitted frame from an **out-of-tree emitter**.
 ///
 /// An emitter that owns the radio directly (rather than running through
-/// [`CSINode::emitter`](crate::CSINode::emitter)) has no other way to reach the TX counters, so
+/// [`CsiNode::emitter`](crate::CsiNode::emitter)) has no other way to reach the TX counters, so
 /// its frames would be invisible to `get_total_tx_packets` / `get_pps_tx` — the
-/// exact counters someone reaches for when a collector reports nothing. Call this
+/// exact counters someone reaches for when a receiver reports nothing. Call this
 /// once per frame the driver accepted.
 #[cfg(feature = "statistics")]
 pub fn record_emitter_tx() {
     record_tx();
 }
 
-/// Record one received CSI report from an **out-of-tree collector**.
+/// Record one received CSI report from an **out-of-tree receiver**.
 ///
 /// A radio profile that registers its own CSI callback never enters
-/// `capture_csi_info`, so until this existed such a collector's `show-stats`
+/// `capture_csi_info`, so until this existed such a receiver's `show-stats`
 /// reported `RX Total Packets: 0` however many frames it forwarded — the
 /// firmware's receive accounting was simply dead on the path production runs.
 #[cfg(feature = "statistics")]
@@ -190,7 +190,7 @@ pub fn record_collector_rx() {
     STATS.rx_count.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Record one CSI report an out-of-tree collector DROPPED (payload over the
+/// Record one CSI report an out-of-tree receiver DROPPED (payload over the
 /// wire cap, filtered, or otherwise not forwarded). Sibling of
 /// [`record_collector_rx`], same reasoning.
 #[cfg(feature = "statistics")]
@@ -200,7 +200,7 @@ pub fn record_collector_rx_drop() {
 
 /// Reset every counter and stamp the capture start, at the START of a run.
 ///
-/// Called by `CSINode::run_inner` for the in-tree modes and directly by an out-of-tree run
+/// Called by `CsiNode::run_inner` for the in-tree modes and directly by an out-of-tree run
 /// loop, which enters neither `run_inner` nor `run_process_csi_packet` and so had no counter reset
 /// and no start time to divide `pps` by.
 ///

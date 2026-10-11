@@ -2,12 +2,13 @@
 //!
 //! | Attribute | Value |
 //! |---|---|
-//! | Operational mode | Wi-Fi access point |
-//! | Network role | Central — beacons and DHCP make it a traffic source by construction |
-//! | Reporting policy | `REPORTING` below — `Always`, `Never`, `Threshold` or `Decimate` |
-//! | Session role | none — the run's controller is whatever calls `run()` |
+//! | Mode | Wi-Fi access point |
+//! | Session role | Initiator — it drives the downlink its stations answer |
+//! | Sensing role | Receiver — it measures the stations' uplink |
+//! | Reporting | `REPORTING` below — `Report`, `None`, `ThresholdBased` or `Decimate` |
 //!
-//! The network role is not settable, so there is no way to build a peripheral access point.
+//! The run's controller is whatever calls `run()`; it is never the initiator. The roles are not
+//! settable, so there is no way to build an access point that is not the initiator.
 //!
 //! No external router is needed: the AP hands out DHCP leases from a configurable pool and pings
 //! associated clients, and the uplink ICMP replies become CSI here. Pair with `station` on the same
@@ -32,7 +33,7 @@ use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CsiPacket;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, ReportingPolicy, NodeHardware, WifiApConfig, config::CsiConfig, log_ln,
+    CsiConfig, CsiNode, MeasurementSetup, NodeHardware, Reporting, WifiApConfig, log_ln,
     set_csi_callback,
 };
 use esp_hal::clock::CpuClock;
@@ -51,9 +52,9 @@ const SSID: &str = "esp-csi-ap";
 /// Primary channel. On the dual-band ESP32-C5, `>= 36` selects 5 GHz.
 const CHANNEL: u8 = 6;
 
-/// `Never` keeps the flood on air without reporting — the AP half of a measurement whose data
-/// comes from the stations.
-const REPORTING: ReportingPolicy = ReportingPolicy::Always;
+/// `Reporting::None` keeps the flood on air without reporting — the AP half of a measurement whose
+/// data comes from the stations.
+const REPORTING: Reporting = Reporting::HOST;
 
 /// DHCP lease pool size. Each client gets a distinct address (MAC to IP binding).
 const LEASE_POOL: u8 = 1;
@@ -114,22 +115,20 @@ async fn main(spawner: Spawner) -> ! {
     let ap_config = WifiApConfig::new(ap_radio_config, CHANNEL, None)
         .with_lease_pool(LEASE_POOL)
         .with_sync_burst(SYNC_BURST)
-        .with_reporting(REPORTING);
+        .reporting(REPORTING);
 
     log_ln!(
-        "Starting softAP (central) — SSID {}, channel {}, {} lease(s)",
+        "Starting softAP (initiator) — SSID {}, channel {}, {} lease(s)",
         SSID,
         CHANNEL,
         LEASE_POOL
     );
 
     let csi_hardware = NodeHardware::new(controller);
-    let mut node = CSINode::access_point(
-        ap_config,
-        Some(CsiConfig::default()),
-        Some(PING_RATE_HZ),
-        csi_hardware,
-    );
+    let setup = MeasurementSetup::new()
+        .periodicity_hz(PING_RATE_HZ)
+        .acquisition(CsiConfig::default());
+    let mut node = CsiNode::access_point(ap_config, setup, csi_hardware);
     node.set_protocol(esp_radio::wifi::Protocol::N);
 
     set_csi_callback(on_csi);

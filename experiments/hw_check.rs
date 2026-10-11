@@ -5,14 +5,14 @@
 //!
 //! | Variable | Values (default first) |
 //! |---|---|
-//! | `HW_MODE` | `sniffer`, `emitter`, `espnow-central`, `espnow-peripheral` |
+//! | `HW_MODE` | `sniffer`, `emitter`, `espnow-initiator`, `espnow-responder` |
 //! | `HW_CH` | primary channel, default `6` |
 //! | `HW_PHY` | `ht20`, `he20` — emitter / ESP-NOW forced PHY |
-//! | `HW_REPORT` | `always`, `never`, `decim4`, `thr`, `thrvar` |
+//! | `HW_REPORT` | `report`, `local`, `none`, `decim4`, `thr`, `thrvar` |
 //! | `HW_CSI` | `default`, `he20`, `ht` (HT-LTF only), `nolltf` (default without forced L-LTF, C5) |
 //! | `HW_PROTO` | unset, or `ax` — `set_protocol(AX)` (sniffer HE bring-up) |
-//! | `HW_HZ` | traffic rate in Hz, default `100` |
-//! | `HW_SETUP` | unset, or `1` — apply a `MeasurementSetup` (id 5) to an ESP-NOW central |
+//! | `HW_HZ` | measurement periodicity in Hz, default `100` |
+//! | `HW_SETUP` | unset, or `1` — apply a `wire::MeasurementSetup` (id 5) to an ESP-NOW initiator |
 //! | `HW_LOG` | `serialized`, `text`, `array`, `tool` |
 //! | `HW_EPOCH` | unset, or UNIX seconds — `set_session(0x5e55_1013, epoch)` before the run |
 //!
@@ -27,12 +27,11 @@
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
-use esp_csi_rs::config::CsiConfig;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::wire::{Bandwidth, MeasurementSetup, StimulusParams};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, EmitterConfig, EmitterPhy, EspNowConfig, NetworkRole, NodeHardware,
-    ReportingPolicy, Threshold, WifiSnifferConfig, log_ln,
+    CsiConfig, CsiNode, CsiNodeClient, EmitterConfig, EmitterPhy, EspNowConfig, NodeHardware,
+    ReportTo, Reporting, SessionRole, Threshold, WifiSnifferConfig, log_ln,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -99,16 +98,23 @@ const fn log_mode() -> LogMode {
     }
 }
 
-const fn reporting() -> ReportingPolicy {
+const fn reporting() -> Reporting {
     match option_env!("HW_REPORT") {
-        Some(r) if eq(r, "never") => ReportingPolicy::Never,
-        Some(r) if eq(r, "decim4") => ReportingPolicy::Decimate(4),
-        Some(r) if eq(r, "thr") => ReportingPolicy::Threshold(Threshold::new(6000, 200)),
+        Some(r) if eq(r, "none") => Reporting::None,
+        Some(r) if eq(r, "local") => Reporting::Report { to: ReportTo::Local },
+        Some(r) if eq(r, "decim4") => Reporting::Decimate(4),
+        Some(r) if eq(r, "thr") => Reporting::ThresholdBased(Threshold::new(6000, 200)),
         Some(r) if eq(r, "thrvar") => {
-            ReportingPolicy::Threshold(Threshold::new(2000, 200).variation_only())
+            Reporting::ThresholdBased(Threshold::new(2000, 200).variation_only())
         }
-        _ => ReportingPolicy::Always,
+        _ => Reporting::HOST,
     }
+}
+
+/// The node-level setup: the acquisition below. (`HW_SETUP` separately exercises the serialized
+/// `wire::MeasurementSetup` a controller would send.)
+fn node_setup() -> esp_csi_rs::MeasurementSetup {
+    esp_csi_rs::MeasurementSetup::new().acquisition(csi_config())
 }
 
 fn csi_config() -> CsiConfig {
@@ -212,24 +218,24 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut node = if eq(MODE, "emitter") {
         let phy = emitter_phy();
-        CSINode::emitter(
+        CsiNode::emitter(
             EmitterConfig::new(CH, phy).with_period(Duration::from_micros(1_000_000 / HZ as u64)),
             hardware,
         )
-    } else if eq(MODE, "espnow-central") || eq(MODE, "espnow-peripheral") {
-        let role = if eq(MODE, "espnow-central") {
-            NetworkRole::Central
+    } else if eq(MODE, "espnow-initiator") || eq(MODE, "espnow-responder") {
+        let role = if eq(MODE, "espnow-initiator") {
+            SessionRole::Initiator
         } else {
-            NetworkRole::Peripheral
+            SessionRole::Responder
         };
         let cfg = maybe_he20(
             EspNowConfig::default()
                 .with_channel(CH)
                 .with_phy_rate(WifiPhyRate::RateMcs0Lgi)
-                .with_network_role(role)
-                .with_reporting(reporting()),
+                .session(role)
+                .reporting(reporting()),
         );
-        let mut n = CSINode::esp_now(cfg, Some(csi_config()), Some(HZ), hardware);
+        let mut n = CsiNode::esp_now(cfg, node_setup().periodicity_hz(HZ), hardware);
         if SETUP {
             let setup = MeasurementSetup::new(5)
                 .with_stimulus(StimulusParams::new(1_000_000 / HZ as u32, Bandwidth::Mhz20));
@@ -242,11 +248,12 @@ async fn main(spawner: Spawner) -> ! {
     } else {
         let mut cfg = WifiSnifferConfig::default().with_channel(CH);
         match reporting() {
-            ReportingPolicy::Decimate(n) => cfg = cfg.with_decimation(n),
-            ReportingPolicy::Threshold(t) => cfg = cfg.with_threshold(t),
+            Reporting::Report { to } => cfg = cfg.with_report_to(to),
+            Reporting::Decimate(n) => cfg = cfg.with_decimation(n),
+            Reporting::ThresholdBased(t) => cfg = cfg.with_threshold(t),
             _ => {}
         }
-        CSINode::sniffer(cfg, Some(csi_config()), hardware)
+        CsiNode::sniffer(cfg, node_setup(), hardware)
     };
     if PROTO_AX {
         node.set_protocol(esp_radio::wifi::Protocol::AX);
@@ -257,7 +264,7 @@ async fn main(spawner: Spawner) -> ! {
         esp_csi_rs::set_session(0x5e55_1013, Some(secs * 1_000_000));
     }
 
-    let mut client = CSINodeClient::new();
+    let mut client = CsiNodeClient::new();
     let _ = &mut client;
     join(node.run(), stats_task()).await;
 

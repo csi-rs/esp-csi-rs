@@ -2,22 +2,26 @@
 //!
 //! | Attribute | Value |
 //! |---|---|
-//! | Operational mode | ESP-NOW |
-//! | Network role | `NETWORK_ROLE` below — both are meaningful |
-//! | Reporting policy | `REPORTING` below — `Always`, `Never`, `Threshold` or `Decimate` |
-//! | Session role | none — the run's controller is whatever calls `run()` |
+//! | Mode | ESP-NOW |
+//! | Session role | `SESSION_ROLE` below — initiator or responder |
+//! | Sensing role | transmitter-receiver — both ends transmit and measure |
+//! | Reporting | `REPORTING` below — `Report`, `None`, `ThresholdBased` or `Decimate` |
 //!
-//! This is the one mode where **every** combination of the two attributes is meaningful, because
-//! the exchange is symmetric: the central originates the control traffic, the peripheral answers
-//! it, and either end can measure. It is also the only mode that supports a star — one central
-//! against several peripherals. Flash this same example onto both boards and change `NETWORK_ROLE`.
+//! The run's controller is whatever calls `run()`; it is never the initiator.
+//!
+//! This is the one mode where **every** combination of session role and reporting is meaningful,
+//! because the exchange is symmetric: the initiator originates the control traffic, the responder
+//! answers it, and either end can measure. It is also the only mode that supports a star — one
+//! initiator against several responders. Flash this same example onto both boards and change
+//! `SESSION_ROLE`.
 //!
 //! Pairing is automatic: the two ends find each other by magic prefix, so there are no hardcoded
 //! MACs. Set `PEER_MAC` on both if you would rather pin it, in which case the source-MAC filter
 //! becomes the discriminator and the magic prefix is dropped.
 //!
-//! A listening central announces itself on the wire (`ControlPacket::is_collector`), and a
-//! peripheral that hears one **promotes itself to collector** so the pair still produces a dataset.
+//! An initiator that reports nothing announces it on the wire (`ControlPacket::initiator_reports`),
+//! and a responder that hears one **promotes itself to `Report { to: Host }`** so the pair still
+//! produces a dataset.
 //! That promotion does not rewrite this node's configuration, so `node.reporting()` keeps
 //! reporting what you set here while `esp_csi_rs::runtime_reporting()` reports what is in force.
 //!
@@ -26,9 +30,9 @@
 //! Without `with_phy_rate`, ESP-NOW frames fall back to a legacy 11b/g rate. With it, the per-peer
 //! TX PHY is forced and the node brings the radio up in started STA mode to do it.
 //!
-//! **HT40 only applies to a unicast peer.** The central broadcasts; the peripheral learns its MAC
+//! **HT40 only applies to a unicast peer.** The initiator broadcasts; the responder learns its MAC
 //! and replies by unicast, and the forced HT40 rate applies to that learned peer — so the wide CSI
-//! is collected by the *central*, from the peripheral's replies. On the dual-band ESP32-C5, forcing
+//! is measured by the *initiator*, from the responder's replies. On the dual-band ESP32-C5, forcing
 //! the PHY on the broadcast peer is additionally unsafe (it wedges the Wi-Fi ISR), so a C5 pair
 //! must use the unicast path. See `docs/bandwidth.md`.
 //!
@@ -39,10 +43,10 @@
 //! ## Sessions and measurement setups
 //!
 //! Every measurement here is a *controlled* stimulus: `Stimulus::Controlled` carries the
-//! measurement-setup id and the sounding instance — the number of the central's control frame that
-//! produced it — so the two ends' measurements of one sounding line up. `SESSION_ID` names the run
-//! on every frame's envelope. `SETUP_ID` applies an IEEE 802.11bf-style `MeasurementSetup` to the
-//! central: its periodicity becomes the control-packet rate and its id is stamped on each frame.
+//! measurement-setup id and the sounding instance — the number of the initiator's control frame
+//! that produced it — so the two ends' measurements of one sounding line up. `SESSION_ID` names the
+//! run on every frame's envelope. The node's `MeasurementSetup` carries the periodicity (the
+//! control-packet rate) and, with `SETUP_ID`, the id stamped on each frame.
 //!
 //! `HE20` (ESP32-C5 / C6) forces HE20 instead of HT20 and captures the full HE-LTF.
 //!
@@ -56,11 +60,11 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::csi::CsiPacket;
-use esp_csi_rs::wire::{Bandwidth, MeasurementSetup, Stimulus, StimulusParams};
+use esp_csi_rs::wire::Stimulus;
 use esp_csi_rs::logging::logging::{LogMode, auto_log_backend_label, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, ReportingPolicy, EspNowConfig, IOTaskConfig, NetworkRole, NodeHardware,
-    config::CsiConfig, install_static_espnow_recv, log_ln, set_csi_callback,
+    CsiConfig, CsiNode, CsiNodeClient, EspNowConfig, IOTaskConfig, MeasurementSetup, NodeHardware,
+    Reporting, SessionRole, install_static_espnow_recv, log_ln, set_csi_callback,
 };
 #[cfg(feature = "statistics")]
 use esp_csi_rs::{get_dropped_packets_rx, get_pps_rx, get_pps_tx};
@@ -76,11 +80,11 @@ extern crate alloc;
 // ── Knobs ───────────────────────────────────────────────────────────────────────────────────────
 
 /// Which end of the exchange this board is. Flash the same binary to both, changing only this.
-const NETWORK_ROLE: NetworkRole = NetworkRole::Central;
+const SESSION_ROLE: SessionRole = SessionRole::Initiator;
 
-/// `Never` keeps the exchange running without reporting. A central that reports nothing tells its
-/// peripheral so, and the peripheral promotes itself to `Always`.
-const REPORTING: ReportingPolicy = ReportingPolicy::Always;
+/// `Reporting::None` keeps the exchange running without reporting. An initiator that reports
+/// nothing tells its responder so, and the responder promotes itself to `Report { to: Host }`.
+const REPORTING: Reporting = Reporting::HOST;
 
 /// Both ends must agree. On the ESP32-C5, `>= 36` selects 5 GHz.
 const CHANNEL: u8 = 6;
@@ -95,8 +99,8 @@ const SECONDARY: Option<SecondaryChannel> = None;
 /// Pin the peer instead of discovering it. Both ends need the other's address.
 const PEER_MAC: Option<[u8; 6]> = None;
 
-/// Control-packet rate (Hz) on the central.
-const TRAFFIC_HZ: u16 = 1000;
+/// Measurement periodicity (Hz): the initiator's control-packet rate.
+const PERIODICITY_HZ: u16 = 1000;
 
 /// Force HE20 (802.11ax) on the ESP32-C5 / C6 instead of HT20. Both ends must agree.
 const HE20: bool = false;
@@ -104,10 +108,10 @@ const HE20: bool = false;
 /// Name the run on every frame's envelope. `None` draws a random id per run.
 const SESSION_ID: Option<u32> = None;
 
-/// Apply a `MeasurementSetup` with this id to the central, sounding at `TRAFFIC_HZ`.
+/// Measurement-setup id stamped on every controlled sounding. `None` leaves it at 0.
 const SETUP_ID: Option<u8> = None;
 
-/// Prune a task subtree entirely: a TX-only central plus an RX-only peripheral is the lowest-
+/// Prune a task subtree entirely: a TX-only initiator plus an RX-only responder is the lowest-
 /// overhead one-directional pairing the mode offers.
 const TX_ENABLED: bool = true;
 const RX_ENABLED: bool = true;
@@ -210,8 +214,8 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut espnow_cfg = EspNowConfig::default()
         .with_channel(CHANNEL)
-        .with_network_role(NETWORK_ROLE)
-        .with_reporting(REPORTING);
+        .session(SESSION_ROLE)
+        .reporting(REPORTING);
     if let Some(rate) = PHY_RATE {
         espnow_cfg = espnow_cfg.with_phy_rate(rate);
     }
@@ -227,35 +231,32 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     log_ln!(
-        "Starting ESP-NOW node on channel {} — role {}, collection {}",
+        "Starting ESP-NOW node on channel {} — session role {}, reporting {}",
         CHANNEL,
-        match NETWORK_ROLE {
-            NetworkRole::Central => "central",
-            _ => "peripheral",
+        match SESSION_ROLE {
+            SessionRole::Initiator => "initiator",
+            _ => "responder",
         },
         match REPORTING {
-            ReportingPolicy::Never => "listener",
-            _ => "collector",
+            Reporting::None => "none",
+            _ => "report",
         },
     );
 
-    let mut node_handle = CSINodeClient::new();
+    let mut node_handle = CsiNodeClient::new();
     let csi_hardware = NodeHardware::new(controller);
-    let mut node = CSINode::esp_now(espnow_cfg, Some(csi_config()), Some(TRAFFIC_HZ), csi_hardware);
+    let mut setup = MeasurementSetup::new()
+        .periodicity_hz(PERIODICITY_HZ)
+        .acquisition(csi_config());
+    if let Some(id) = SETUP_ID {
+        setup = setup.id(id);
+    }
+    let mut node = CsiNode::esp_now(espnow_cfg, setup, csi_hardware);
     node.set_protocol(if HE20 {
         esp_radio::wifi::Protocol::AX
     } else {
         esp_radio::wifi::Protocol::N
     });
-    if let (Some(id), NetworkRole::Central) = (SETUP_ID, NETWORK_ROLE) {
-        let setup = MeasurementSetup::new(id).with_stimulus(StimulusParams::new(
-            1_000_000 / TRAFFIC_HZ as u32,
-            Bandwidth::Mhz20,
-        ));
-        if node.apply_measurement_setup(&setup).is_err() {
-            log_ln!("Measurement setup refused by this mode");
-        }
-    }
     node.set_io_tasks(IOTaskConfig {
         tx_enabled: TX_ENABLED,
         rx_enabled: RX_ENABLED,

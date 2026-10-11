@@ -115,8 +115,8 @@ pub fn apply_tx_protocols(controller: &mut WifiController<'_>, he: bool) {
 /// Request HT-LTF CSI acquisition on a raw CSI config, disabling the other
 /// acquisition paths so the HT channel estimate is the only one reported.
 ///
-/// This is the collector-side counterpart to the emitter's forced TX PHY: a
-/// collector paired with an HT emitter wants HT acquisition and nothing else,
+/// This is the receiver-side counterpart to the emitter's forced TX PHY: a
+/// receiver paired with an HT emitter wants HT acquisition and nothing else,
 /// otherwise the stream is diluted by short legacy and ACK frames.
 ///
 /// The two PHY generations expose completely different acquisition controls, so
@@ -149,7 +149,7 @@ pub fn ht_csi_acquisition(raw: &mut RadioCsiConfig, forty: bool) {
         // HT-LTF is what we want, but `lltf_en` must stay ON: measured on an
         // ESP32-S3, clearing it silences CSI reporting altogether rather than
         // just dropping the legacy field, so an HT-only filter here produces a
-        // collector that captures nothing. Turning `ltf_merge_en` off is what
+        // receiver that captures nothing. Turning `ltf_merge_en` off is what
         // keeps the HT estimate from being averaged with the L-LTF one, which is
         // the part that actually mattered.
         raw.lltf_en = true;
@@ -163,7 +163,7 @@ pub fn ht_csi_acquisition(raw: &mut RadioCsiConfig, forty: bool) {
 /// Request HE-LTF CSI acquisition on a raw CSI config (ESP32-C5 / C6), disabling
 /// the legacy, HT, VHT and ACK paths so HE-LTF is the only estimate reported.
 ///
-/// The collector-side counterpart to an HE20 emitter. Without it the radio keeps
+/// The receiver-side counterpart to an HE20 emitter. Without it the radio keeps
 /// reporting the legacy L-LTF estimate (53 subcarriers / 106 bytes) for received
 /// HE20 frames instead of the full HE-LTF (~242 subcarriers), and on the C5 the
 /// default `acquire_csi_force_lltf = true` pins it to L-LTF outright. STBC mode 2

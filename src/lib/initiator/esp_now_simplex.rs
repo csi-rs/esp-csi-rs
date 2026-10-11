@@ -1,15 +1,15 @@
-//! The **source** end of the ESP-NOW simplex exchange: a central listener.
+//! The **source** end of the ESP-NOW simplex exchange: an initiator and sensing transmitter that
+//! reports nothing.
 //!
 //! Built by [`SimplexConfig::source`](crate::SimplexConfig::source) /
-//! [`CSINode::esp_now_simplex_source`](crate::CSINode::esp_now_simplex_source). The module keeps
-//! the name it had when this end was called the "fast source" and filed under `peripheral`.
+//! [`CsiNode::esp_now_simplex_source`](crate::CsiNode::esp_now_simplex_source).
 //!
 //! The source listens for the [peer](crate::SimplexConfig::peer)'s discovery beacon, learns the
 //! peer's MAC, registers it as a **unicast peer with a forced PHY** (HT20 MCS7-LGI by default,
 //! HT40 when a secondary channel is set), sends one magic-tagged hello so the peer switches to
 //! RX-only, then unicasts a **continuous max-rate flood**. Unlike the symmetric exchange's
-//! peripheral there is no per-control-packet reply gating and no adaptive pacing — the source
-//! transmits as fast as `send_async` completes (or at the traffic frequency, when one is set),
+//! responder there is no per-control-packet reply gating and no adaptive pacing — the source
+//! transmits as fast as `send_async` completes (or at the periodicity, when one is set),
 //! which with the peer silent drives the maximum CSI packets/sec at the peer.
 
 use embassy_futures::select::{Either, select};
@@ -21,8 +21,8 @@ use esp_radio::esp_now::{
 
 use crate::espnow_phy::{PeerPhy, with_espnow_recv_suspended};
 use crate::{
-    CENTRAL_MAGIC_NUMBER, ControlPacket, EspNowConfig, IOTaskConfig, PERIPHERAL_MAGIC_NUMBER,
-    PeripheralPacket, STOP_SIGNAL, apply_peer_espnow_phy, log_ln, parse_with_magic,
+    INITIATOR_MAGIC_NUMBER, ControlPacket, EspNowConfig, IOTaskConfig, RESPONDER_MAGIC_NUMBER,
+    ResponderPacket, STOP_SIGNAL, apply_peer_espnow_phy, log_ln, parse_with_magic,
     serialize_with_magic,
 };
 #[cfg(feature = "statistics")]
@@ -38,7 +38,7 @@ const PEER_HEALTHCHECK_PERIOD: u16 = 256;
 /// Flood-frame scratch buffer (4-byte magic + small postcard body).
 const FLOOD_BUF_LEN: usize = 16;
 
-fn add_collector_peer(esp_now: &EspNow, mac: &[u8; 6], channel: u8) -> bool {
+fn add_simplex_peer(esp_now: &EspNow, mac: &[u8; 6], channel: u8) -> bool {
     if esp_now.peer_exists(mac) {
         return true;
     }
@@ -54,7 +54,7 @@ fn add_collector_peer(esp_now: &EspNow, mac: &[u8; 6], channel: u8) -> bool {
 }
 
 /// Run the simplex source end: discover the peer → forced-PHY unicast flood.
-pub async fn run_esp_now_fast_source(
+pub async fn run_esp_now_simplex_source(
     esp_now: &mut EspNow,
     config: &EspNowConfig,
     freq_hz: Option<u16>,
@@ -73,25 +73,25 @@ pub async fn run_esp_now_fast_source(
     log_ln!("esp-now version {}", esp_now.version().unwrap());
 
     // Forced unicast PHY: default to HT20 MCS7-LGI for max throughput unless the
-    // user forced a specific rate. Applied to the learned collector peer below.
+    // user forced a specific rate. Applied to the learned peer below.
     let rate = if config.force_phy() {
         *config.phy_rate()
     } else {
         WifiPhyRate::RateMcs7Lgi
     };
 
-    // ---- Phase 1: discover the collector -----------------------------------
-    let collector_mac: [u8; 6] = match peer_mac {
+    // ---- Phase 1: discover the peer ------------------------------------------
+    let peer_addr: [u8; 6] = match peer_mac {
         Some(mac) => mac,
         None => loop {
             match select(STOP_SIGNAL.wait(), crate::esp_now_pool::receive_async()).await {
                 Either::First(_) => {
-                    log_ln!("STOP signal received, shutting down fast source...");
+                    log_ln!("STOP signal received, shutting down simplex source...");
                     STOP_SIGNAL.signal(());
                     return;
                 }
                 Either::Second(r) => {
-                    if parse_with_magic::<ControlPacket>(r.data(), CENTRAL_MAGIC_NUMBER, true)
+                    if parse_with_magic::<ControlPacket>(r.data(), INITIATOR_MAGIC_NUMBER, true)
                         .is_some()
                     {
                         break r.info.src_address;
@@ -101,32 +101,32 @@ pub async fn run_esp_now_fast_source(
         },
     };
 
-    // Register the collector as a unicast peer and force the PHY (recv-suspended,
+    // Register the peer as a unicast peer and force the PHY (recv-suspended,
     // C5-safe — per-peer rate config on a unicast peer works on all chips).
-    add_collector_peer(esp_now, &collector_mac, config.channel);
-    apply_peer_espnow_phy(esp_now, &collector_mac, PeerPhy { rate, ..config.peer_phy() });
+    add_simplex_peer(esp_now, &peer_addr, config.channel);
+    apply_peer_espnow_phy(esp_now, &peer_addr, PeerPhy { rate, ..config.peer_phy() });
     log_ln!(
-        "ESP-NOW fast source: locked collector {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, unicast flood rate {:?}",
-        collector_mac[0],
-        collector_mac[1],
-        collector_mac[2],
-        collector_mac[3],
-        collector_mac[4],
-        collector_mac[5],
+        "ESP-NOW simplex source: locked peer {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, unicast flood rate {:?}",
+        peer_addr[0],
+        peer_addr[1],
+        peer_addr[2],
+        peer_addr[3],
+        peer_addr[4],
+        peer_addr[5],
         rate,
     );
 
-    // One magic-tagged hello so the collector deterministically stops beaconing
+    // One magic-tagged hello so the peer deterministically stops beaconing
     // and switches to RX-only (auto-pairing only; manual mode pre-latches).
     if send_magic {
         let mut hello_buf = [0u8; 8];
         if let Ok(hello) = serialize_with_magic(
-            &PeripheralPacket::new(),
-            PERIPHERAL_MAGIC_NUMBER,
+            &ResponderPacket::new(),
+            RESPONDER_MAGIC_NUMBER,
             true,
             &mut hello_buf,
         ) {
-            let _ = esp_now.send_async(&collector_mac, hello).await;
+            let _ = esp_now.send_async(&peer_addr, hello).await;
         }
     }
 
@@ -141,7 +141,7 @@ pub async fn run_esp_now_fast_source(
 
     loop {
         if STOP_SIGNAL.signaled() {
-            log_ln!("STOP signal received, shutting down fast source...");
+            log_ln!("STOP signal received, shutting down simplex source...");
             STOP_SIGNAL.signal(());
             break;
         }
@@ -149,14 +149,14 @@ pub async fn run_esp_now_fast_source(
         // Periodic peer healthcheck — the driver peer table can churn under
         // pressure; keep the unicast peer present so TX doesn't stall on NotFound.
         healthcheck = healthcheck.wrapping_add(1);
-        if (healthcheck & (PEER_HEALTHCHECK_PERIOD - 1)) == 0 && !esp_now.peer_exists(&collector_mac)
+        if (healthcheck & (PEER_HEALTHCHECK_PERIOD - 1)) == 0 && !esp_now.peer_exists(&peer_addr)
         {
-            add_collector_peer(esp_now, &collector_mac, config.channel);
-            apply_peer_espnow_phy(esp_now, &collector_mac, PeerPhy { rate, ..config.peer_phy() });
+            add_simplex_peer(esp_now, &peer_addr, config.channel);
+            apply_peer_espnow_phy(esp_now, &peer_addr, PeerPhy { rate, ..config.peer_phy() });
         }
 
         let pkt = ControlPacket::new(false, seq);
-        let msg = match serialize_with_magic(&pkt, CENTRAL_MAGIC_NUMBER, send_magic, &mut tx_buf) {
+        let msg = match serialize_with_magic(&pkt, INITIATOR_MAGIC_NUMBER, send_magic, &mut tx_buf) {
             Ok(m) => m,
             Err(_) => {
                 log_ln!("Failed to serialize ESP-NOW flood packet");
@@ -166,7 +166,7 @@ pub async fn run_esp_now_fast_source(
 
         // Exactly one send in flight, awaited to completion — never drop or
         // queue a second send first (the driver has one global completion flag).
-        match esp_now.send_async(&collector_mac, msg).await {
+        match esp_now.send_async(&peer_addr, msg).await {
             Ok(()) => {
                 seq = seq.wrapping_add(1);
                 #[cfg(feature = "statistics")]

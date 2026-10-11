@@ -4,7 +4,7 @@
 //! (`esp_wifi_80211_tx`) is one way to do that and it works on the newer MACs, but on the classic
 //! parts it does not radiate: measured on an ESP32-S3, the driver returns `ESP_OK` for every
 //! frame, the forced-TX call reports `rc = 0` before and after start, the emitter logs
-//! "Emitter running" — and three independent collectors see nothing, while the same board beacons
+//! "Emitter running" — and three independent receivers see nothing, while the same board beacons
 //! normally as a softAP. That was reproduced against four different configurations (the
 //! struct-based rate API, the legacy per-interface rate API, a management probe-request instead of a data
 //! frame, and no forced rate at all), so it is not a rate or frame-type problem.
@@ -15,7 +15,7 @@
 //! the MAC's ordinary vendor-action-frame path rather than the raw-TX hook.
 //!
 //! **There is no ping-pong here.** This module only *sends*: a broadcast peer, a fixed payload, one
-//! frame per period, nothing received and nothing awaited. A collector sees these frames
+//! frame per period, nothing received and nothing awaited. A receiver sees these frames
 //! promiscuously like any other traffic and derives CSI from the PPDU preamble, so nothing on the
 //! receive side needs to know ESP-NOW is involved.
 //!

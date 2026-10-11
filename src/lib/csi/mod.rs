@@ -3,7 +3,7 @@
 //! A [`CsiPacket`] is the wire contract's [`Envelope`] and [`CsiFrame`] (see [`crate::wire`]),
 //! plus the session announcement on the first packet of a run. The same value reaches every
 //! consumer: a callback registered with [`set_csi_callback`](crate::set_csi_callback), the async
-//! [`CSINodeClient`](crate::CSINodeClient), and the logger, which encodes it for the host.
+//! [`CsiNodeClient`](crate::CsiNodeClient), and the logger, which encodes it for the host.
 //!
 //! Before 0.12 the packet was `CSIDataPacket`, a field-for-field copy of ESP's receive-control
 //! struct with one layout per chip family. Its fields now live, normalised, in [`RxMeta`]; the

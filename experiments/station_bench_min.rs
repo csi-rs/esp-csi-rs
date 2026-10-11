@@ -1,8 +1,8 @@
-//! Footprint **min** — Wi-Fi STA platform floor (no `CSINode`, no net stack).
+//! Footprint **min** — Wi-Fi STA platform floor (no `CsiNode`, no net stack).
 //!
 //! Binary-footprint counterpart to `station_bench`: identical platform
 //! boilerplate and a raw STA bring-up (config + associate at the controller
-//! level), but **without** the `CSINode` state machine, the embassy-net/smoltcp
+//! level), but **without** the `CsiNode` state machine, the embassy-net/smoltcp
 //! IP stack, DHCP, `sta_network_ops`, `set_csi`, or `CsiPacket` pipeline that
 //! the full station mode pulls in. `full − min` exposes that whole stack; the
 //! per-library breakdown attributes it (smoltcp / embassy-net / esp_csi_rs).
@@ -44,20 +44,20 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-    log_ln!("Footprint min: Wi-Fi STA platform floor (no CSINode / net stack)");
+    log_ln!("Footprint min: Wi-Fi STA platform floor (no CsiNode / net stack)");
 
     let config_radio = esp_radio::wifi::ControllerConfig::default();
     let wifi_controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, config_radio).expect("Wi-Fi init failed");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
     // Claim the same radio handles `NodeHardware::new` claims, so the footprint difference
-    // against the full harness is only the CSINode machinery.
+    // against the full harness is only the CsiNode machinery.
     let _station = esp_radio::wifi::Interface::station();
     let _access_point = esp_radio::wifi::Interface::access_point();
     let _sniffer = controller.sniffer();
     let _esp_now = controller.esp_now();
 
     // Raw STA bring-up: configure + associate at the controller level. No
-    // embassy-net/smoltcp/DHCP, no CSINode — those are what `full − min` reveals.
+    // embassy-net/smoltcp/DHCP, no CsiNode — those are what `full − min` reveals.
     let client_config = StationConfig::default()
         .with_ssid(WIFI_SSID.try_into().expect("SSID longer than 32 bytes"))
         .with_authentication(esp_radio::wifi::AuthenticationMethodConfig::Wpa2Personal(

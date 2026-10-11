@@ -1,17 +1,17 @@
 //! **ESP-NOW measurement harness** — heap, CPU, power, packet drop and bandwidth.
 //!
 //! One harness for both ends of the symmetric ESP-NOW exchange and every quantity the specs in
-//! `specs/` measure. Set `NETWORK_ROLE` and `MEASURE` below and build; the node is a **listener**
-//! throughout, because a measurement of acquisition cost should not be paying delivery cost.
+//! `specs/` measure. Set `SESSION_ROLE` and `MEASURE` below and build; the node reports
+//! **nothing** (`Reporting::None`) throughout, because a measurement of acquisition cost should not be paying delivery cost.
 //!
 //! Replaces the eleven single-purpose harnesses that differed only in these two constants
-//! (`esp_now_{central,peripheral}_{exper,exper_heap,exper_cpu*,power,drop,bw_*}`).
+//! (`esp_now_{<end>}_{exper,exper_heap,exper_cpu*,power,drop,bw_*}`, one set per end).
 //!
 //! ## Reading the numbers
 //!
 //! The binary-footprint test is the one measurement that is **not** taken from this file's output.
 //! It is `full − min`, where `min` is `esp_now_bench_min` — the same platform and radio bring-up
-//! with no `CSINode` in it at all. Both halves must be built with the **same feature set** for the
+//! with no `CsiNode` in it at all. Both halves must be built with the **same feature set** for the
 //! difference to mean anything, because features like `statistics` and `cpu-test-tx` link code of
 //! their own. Record the feature set alongside the number.
 //!
@@ -30,8 +30,8 @@ use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, ReportingPolicy, EspNowConfig, NetworkRole, NodeHardware,
-    config::CsiConfig, install_static_espnow_recv, log_ln, set_csi_logging_enabled,
+    CsiConfig, CsiNode, CsiNodeClient, EspNowConfig, MeasurementSetup, NodeHardware, Reporting,
+    SessionRole, install_static_espnow_recv, log_ln, set_csi_logging_enabled,
 };
 #[cfg(feature = "statistics")]
 use esp_csi_rs::{
@@ -55,7 +55,7 @@ mod cpu_test_schedule;
 // ── Knobs ───────────────────────────────────────────────────────────────────────────────────────
 
 /// Which end of the exchange this board drives.
-const NETWORK_ROLE: NetworkRole = NetworkRole::Central;
+const SESSION_ROLE: SessionRole = SessionRole::Initiator;
 
 /// What this run reports each second.
 #[derive(PartialEq, Eq)]
@@ -71,7 +71,7 @@ enum Measure {
     /// Quiet: no per-second line at all, so the serial port is not part of what is being
     /// measured. Used for the power run, where the instrument is at the supply.
     Quiet,
-    /// CPU utilization: march the shared phase schedule, steering the library's real central TX
+    /// CPU utilization: march the shared phase schedule, steering the library's real initiator TX
     /// loop through each (rate, payload, repetition) cell and emitting `TX_STATS` once a second.
     /// The DUT walks the identical schedule, which is what keeps the two in lockstep without a
     /// control channel. Requires `--features=cpu-test-tx`.
@@ -93,9 +93,9 @@ const CHANNEL: u8 = 11;
 /// rate makes contention visible sooner.
 const PHY_RATE: WifiPhyRate = WifiPhyRate::RateMcs0Lgi;
 
-/// Control-packet rate (Hz) on the central. 10 kHz offers more than the radio can send, which is
+/// Measurement periodicity (Hz): the initiator's control-packet rate. 10 kHz offers more than the radio can send, which is
 /// the point for a saturation run.
-const TRAFFIC_HZ: u16 = 10_000;
+const PERIODICITY_HZ: u16 = 10_000;
 
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -108,7 +108,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 #[cfg(feature = "cpu-test-tx")]
 static CURRENT_WIRE_PAYLOAD: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
 
-/// Marches the shared phase schedule, steering the library's real central TX loop through each
+/// Marches the shared phase schedule, steering the library's real initiator TX loop through each
 /// (rate, payload, repetition) cell.
 ///
 /// The phase ordering must stay bit-for-bit identical to the DUT's — that identity is what keeps
@@ -118,7 +118,7 @@ static CURRENT_WIRE_PAYLOAD: portable_atomic::AtomicU32 = portable_atomic::Atomi
 async fn schedule_driver() -> ! {
     use cpu_test_schedule::{BOOT_DELAY_S, PhaseKind, phases_iter};
     use embassy_time::Instant;
-    use esp_csi_rs::central::esp_now::{get_tx_failed_packets, get_tx_queued_packets};
+    use esp_csi_rs::initiator::esp_now::{get_tx_failed_packets, get_tx_queued_packets};
     use esp_csi_rs::{set_test_tx_paused, set_test_tx_payload_b, set_test_tx_rate_hz};
     use portable_atomic::Ordering;
 
@@ -133,7 +133,7 @@ async fn schedule_driver() -> ! {
         );
     }
 
-    // Start silent; the central TX loop boots paused.
+    // Start silent; the initiator TX loop boots paused.
     set_test_tx_paused(true);
     Timer::after(Duration::from_secs(BOOT_DELAY_S as u64)).await;
 
@@ -191,7 +191,7 @@ async fn schedule_driver() -> ! {
     }
 }
 
-async fn report_task(_client: &mut CSINodeClient) {
+async fn report_task(_client: &mut CsiNodeClient) {
     let mut last_tx_total = get_total_tx_packets();
     let mut last_rx_total = get_total_rx_packets();
     loop {
@@ -248,23 +248,24 @@ async fn main(spawner: Spawner) -> ! {
 
     log_ln!("ESP-NOW bench — channel {}", CHANNEL);
 
-    let mut node_handle = CSINodeClient::new();
+    let mut node_handle = CsiNodeClient::new();
     let csi_hardware = NodeHardware::new(controller);
-    let mut node = CSINode::esp_now(
+    let mut node = CsiNode::esp_now(
         EspNowConfig::default()
             .with_channel(CHANNEL)
             .with_phy_rate(PHY_RATE)
-            .with_network_role(NETWORK_ROLE)
+            .session(SESSION_ROLE)
             // Acquisition cost without delivery cost. This is what the retired
             // `set_csi_output_enabled(false)` was reaching for.
-            .with_reporting(ReportingPolicy::Never),
-        Some(CsiConfig::default()),
-        Some(TRAFFIC_HZ),
+            .reporting(Reporting::None),
+        MeasurementSetup::new()
+            .periodicity_hz(PERIODICITY_HZ)
+            .acquisition(CsiConfig::default()),
         csi_hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::N);
     // A TX-side measurement has no use for the RX stats task.
-    node.set_rx_enabled(NETWORK_ROLE == NetworkRole::Peripheral || MEASURE == Measure::Drop);
+    node.set_rx_enabled(SESSION_ROLE == SessionRole::Responder || MEASURE == Measure::Drop);
 
     #[cfg(feature = "cpu-test-tx")]
     if MEASURE == Measure::Cpu {

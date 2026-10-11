@@ -24,7 +24,7 @@
 //! `MpMcQueue`. **No heap allocation, ever**, regardless of how many frames
 //! arrive while the CSI callback is spinning UART.
 //!
-//! User code (`peripheral::esp_now`, `central::esp_now`) calls [`receive`]
+//! User code (`responder::esp_now`, `initiator::esp_now`) calls [`receive`]
 //! and [`receive_async`] in place of `EspNow::receive` / `receive_async`.
 //! The returned [`PoolFrame`] mirrors the small subset of `ReceivedData`'s
 //! API the rest of the crate actually consumes (`info.src_address`,
@@ -59,7 +59,7 @@ pub struct PoolInfo {
 }
 
 /// Drop-in replacement for `ReceivedData` carrying only the fields used by
-/// `peripheral::esp_now` and `central::esp_now`.
+/// `responder::esp_now` and `initiator::esp_now`.
 #[derive(Clone, Copy)]
 pub struct PoolFrame {
     /// Receive metadata extracted from the original esp-radio frame.

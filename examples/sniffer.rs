@@ -2,12 +2,12 @@
 //!
 //! | Attribute | Value |
 //! |---|---|
-//! | Operational mode | Wi-Fi sniffer |
-//! | Network role | Peripheral — it never transmits, so it sources no traffic |
-//! | Reporting policy | `REPORTING` below — `Always`, `Threshold` or `Decimate`; never `Never`, since a sniffer that does not report observes nothing |
-//! | Session role | none — the run's controller is whatever calls `run()` |
+//! | Mode | Wi-Fi sniffer |
+//! | Session role | none (observer) — it neither originates nor answers the traffic it measures |
+//! | Sensing role | Receiver — it never transmits |
+//! | Reporting | `REPORTING` below — `Report`, `ThresholdBased` or `Decimate`; never `None`, since a sniffer that does not report observes nothing |
 //!
-//! Neither of the first two is settable, so `CSINode::sniffer` takes no role arguments. See
+//! Neither role is settable, so `CsiNode::sniffer` takes no role arguments. See
 //! `docs/network-model.md`.
 //!
 //! This is the only mode that needs no second device: the traffic it measures is whatever is
@@ -16,7 +16,7 @@
 //!
 //! Frames are attributed by transmitter MAC, so several emitters can share one sniffer and the
 //! per-source rate below separates them. If a source's rate is lower than the emitter's configured
-//! frame rate, the gap is what the collector missed. Each line also names the PPDU format and the
+//! frame rate, the gap is what the sniffer missed. Each line also names the PPDU format and the
 //! subcarrier layout the buffer was captured in (`CsiPayload::EspRaw`'s `LayoutId`).
 //!
 //! `REPORTING` decides how many measurements leave the node: every one, every *n*th, or only while
@@ -26,7 +26,7 @@
 //! Build / run:
 //!   cargo esp32c6 --example sniffer
 //!
-//! Replace `esp32c6` with any supported chip — every chip can collect.
+//! Replace `esp32c6` with any supported chip — every chip can measure.
 
 #![no_std]
 #![no_main]
@@ -36,13 +36,12 @@ use embassy_futures::join::join;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Timer};
-use esp_csi_rs::config::CsiConfig;
 use esp_csi_rs::csi::CsiPacket;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::wire::{CsiPayload, PpduFormat};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, NodeHardware, ReportingPolicy, Threshold, WifiSnifferConfig, log_ln,
-    set_csi_callback,
+    CsiConfig, CsiNode, CsiNodeClient, MeasurementSetup, NodeHardware, Reporting, Threshold,
+    WifiSnifferConfig, log_ln, set_csi_callback,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -54,9 +53,10 @@ extern crate alloc;
 /// Channel to lock. Must match the emitter's primary channel when pairing with one.
 const CHANNEL: u8 = 7;
 
-/// `Always`, `Threshold(..)` or `Decimate(n)`. A threshold must be calibrated: run with
-/// `Threshold::new(level, hold_ms).variation_only()` first and read the scores a still room gives.
-const REPORTING: ReportingPolicy = ReportingPolicy::Always;
+/// `Report { to }`, `ThresholdBased(..)` or `Decimate(n)`. A threshold must be calibrated: run
+/// with `Threshold::new(level, hold_ms).variation_only()` first and read the scores a still room
+/// gives.
+const REPORTING: Reporting = Reporting::HOST;
 #[allow(dead_code)]
 const EXAMPLE_THRESHOLD: Threshold = Threshold::new(6000, 500);
 
@@ -196,17 +196,19 @@ async fn main(spawner: Spawner) -> ! {
         .expect("Failed to initialize Wi-Fi controller");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    log_ln!("Starting sniffer (peripheral collector) on channel {}", CHANNEL);
+    log_ln!("Starting sniffer (observer, receiver) on channel {}", CHANNEL);
 
-    let mut node_handle = CSINodeClient::new();
+    let mut node_handle = CsiNodeClient::new();
     let hardware = NodeHardware::new(controller);
     let mut sniffer = WifiSnifferConfig::default().with_channel(CHANNEL);
     match REPORTING {
-        ReportingPolicy::Threshold(t) => sniffer = sniffer.with_threshold(t),
-        ReportingPolicy::Decimate(n) => sniffer = sniffer.with_decimation(n),
+        Reporting::Report { to } => sniffer = sniffer.with_report_to(to),
+        Reporting::ThresholdBased(t) => sniffer = sniffer.with_threshold(t),
+        Reporting::Decimate(n) => sniffer = sniffer.with_decimation(n),
         _ => {}
     }
-    let mut node = CSINode::sniffer(sniffer, Some(csi_config()), hardware);
+    let setup = MeasurementSetup::new().acquisition(csi_config());
+    let mut node = CsiNode::sniffer(sniffer, setup, hardware);
     node.set_protocol(if HE20 {
         esp_radio::wifi::Protocol::AX
     } else {

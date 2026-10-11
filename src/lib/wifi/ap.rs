@@ -1,4 +1,4 @@
-//! Self-contained softAP CSI collector.
+//! Self-contained softAP CSI receiver.
 //!
 //! Starts a Wi-Fi access point and brings up an embassy-net stack on the AP
 //! interface with a **static** IPv4 address. A built-in **multi-lease DHCP
@@ -16,7 +16,7 @@ use esp_radio::wifi::{Config, Interface, WifiController};
 use embassy_net::udp::{PacketMetadata as UdpPacketMetadata, UdpSocket};
 use smoltcp::wire::{DhcpMessageType, DhcpPacket, DhcpRepr};
 
-use crate::collector::sta::{
+use crate::wifi::sta::{
     StackResourcesSlot, run_icmp_flood, run_icmp_flood_burst, run_icmp_flood_multi, run_net_task,
 };
 use crate::profile::RadioProfile;

@@ -1,16 +1,16 @@
 //! **Runtime reconfiguration** — running one node through several configurations.
 //!
 //! Drives the same hardware through two runs without reconstructing the node:
-//! a sniffer on `CHANNEL_A`, then `set_operational_mode` to a sniffer on
-//! `CHANNEL_B`. Anything the model admits can be swapped in this way — a station
-//! for an access point, a central for a peripheral — because the operational
-//! mode carries its own network role and reporting policy with it.
+//! a sniffer on `CHANNEL_A`, then `set_mode` to a sniffer on `CHANNEL_B`.
+//! Anything the model admits can be swapped in this way — a station for an
+//! access point, an initiator for a responder — because the mode carries its own
+//! roles and reporting with it.
 //!
 //! This example used to demonstrate `set_csi_output_enabled(false)` as the way
 //! to keep capturing without delivering. That method never worked: it wrote a
 //! flag no CSI path read. The attribute it was reaching for is
-//! `ReportingPolicy::Never`, which is set on the mode's config — see
-//! `esp_now.rs`, where a listening node is one line.
+//! `Reporting::None`, which is set on the mode's config — see `esp_now.rs`,
+//! where a node that reports nothing is one line.
 
 #![no_std]
 #![no_main]
@@ -20,7 +20,7 @@ use embassy_futures::join::join;
 use embassy_time::{Duration, Timer, with_timeout};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{
-    CSINode, CSINodeClient, NodeHardware, OperationalMode, WifiSnifferConfig, config::CsiConfig,
+    CsiConfig, CsiNode, CsiNodeClient, MeasurementSetup, Mode, NodeHardware, WifiSnifferConfig,
     log_ln, logging::logging::init_logger,
 };
 #[cfg(feature = "statistics")]
@@ -41,7 +41,7 @@ static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
 esp_bootloader_esp_idf::esp_app_desc!();
 
 /// First run: report throughput on `CHANNEL_A` for 10 s.
-async fn run_phase_a(client: &mut CSINodeClient) {
+async fn run_phase_a(client: &mut CsiNodeClient) {
     log_ln!("Phase 1: sniffing channel {}", CHANNEL_A);
 
     with_timeout(Duration::from_secs(10), async {
@@ -69,7 +69,7 @@ async fn run_phase_a(client: &mut CSINodeClient) {
 
 /// Second run: the same node on a different channel. Counters restart, because `run()` stamps a
 /// fresh capture window — that is how you tell a reconfiguration apart from a continuing run.
-async fn run_phase_b(client: &mut CSINodeClient) {
+async fn run_phase_b(client: &mut CsiNodeClient) {
     log_ln!("Phase 2: sniffing channel {}", CHANNEL_B);
 
     with_timeout(Duration::from_secs(5), async {
@@ -104,20 +104,20 @@ async fn main(spawner: Spawner) -> ! {
         .expect("Failed to initialize Wi-Fi controller");
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
-    let mut node_handle = CSINodeClient::new();
+    let mut node_handle = CsiNodeClient::new();
     let hardware = NodeHardware::new(controller);
-    let mut node = CSINode::sniffer(
+    let mut node = CsiNode::sniffer(
         WifiSnifferConfig::default().with_channel(CHANNEL_A),
-        Some(CsiConfig::default()),
+        MeasurementSetup::new().acquisition(CsiConfig::default()),
         hardware,
     );
     node.set_protocol(esp_radio::wifi::Protocol::N);
 
     join(node.run(), run_phase_a(&mut node_handle)).await;
 
-    // Same node, different configuration. The mode carries its own network role and collection
-    // mode, so there is nothing else to keep in step.
-    node.set_operational_mode(OperationalMode::Sniffer(
+    // Same node, different configuration. The mode carries its own roles and reporting, so there
+    // is nothing else to keep in step.
+    node.set_mode(Mode::Sniffer(
         WifiSnifferConfig::default().with_channel(CHANNEL_B),
     ));
     join(node.run(), run_phase_b(&mut node_handle)).await;
