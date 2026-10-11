@@ -12,33 +12,34 @@ the `no-std` embedded framework.
 
 ## The node model
 
-A deployment is a **CSI collection network**: nodes sharing a channel and a measurement session, in
-which traffic excites the channel and at least one node reports CSI. Each node is described by four
-independent attributes.
+A deployment is a **CSI sensing network**: nodes sharing a channel, in which soundings excite the
+channel and at least one node reports a measurement of it. Each node is described by four
+independent attributes, named in IEEE 802.11bf's terms wherever the standard has one.
 
 | Attribute | Values | Question it answers |
 |---|---|---|
-| Network role | Central, Peripheral | Who sources the traffic? |
-| Reporting policy | Always, Never, Threshold, Decimate | Whether, and how often, measurements leave the node |
-| Operational mode | six, below | How does it reach the channel? |
-| Session role | Controller; IEEE 802.11bf Initiator / Responder | Who runs the session? |
+| Mode | six, below | How does the node reach the channel? |
+| Session role | IEEE 802.11bf Initiator / Responder, or none (observer) | Who originates the soundings? |
+| Sensing role | IEEE 802.11bf Transmitter / Receiver / both | Who sends the sensing PPDUs, and who measures them? |
+| Reporting | Report (to host or local), ThresholdBased, Decimate, None | Whether, and how often, measurements leave the node |
 
-Not every mode admits every combination, and **the ones it does not admit are not offered**: where
-an attribute is fixed there is no setter to call.
+The run is started and stopped by the **controller** — the host tier, never a node and never the
+initiator. Not every mode admits every combination, and **the ones it does not admit are not
+offered**: where an attribute is fixed there is no setter to call.
 
-| Constructor | Operational mode | Network role | Reporting policy |
-|---|---|---|---|
-| `CSINode::sniffer` | Wi-Fi sniffer | peripheral | always, threshold or decimate |
-| `CSINode::station` | Wi-Fi station | either | any |
-| `CSINode::access_point` | Wi-Fi access point | central | any |
-| `CSINode::emitter` | Emitter (transmit-only sounding) | central | never |
-| `CSINode::esp_now` | ESP-NOW | either | any |
-| `CSINode::esp_now_simplex_source` | ESP-NOW simplex | central | never |
-| `CSINode::esp_now_simplex_peer` | ESP-NOW simplex | peripheral | always |
+| Constructor | Mode | Session role | Sensing role | Reporting |
+|---|---|---|---|---|
+| `CsiNode::sniffer` | Wi-Fi sniffer | none | receiver | report, threshold-based or decimate |
+| `CsiNode::station` | Wi-Fi station | initiator or none | transmitter-receiver or receiver | any |
+| `CsiNode::access_point` | Wi-Fi access point | initiator | receiver | any |
+| `CsiNode::emitter` | Emitter (transmit-only sounding) | none | transmitter | none |
+| `CsiNode::esp_now` | ESP-NOW | initiator or responder | transmitter-receiver | any |
+| `CsiNode::esp_now_simplex_source` | ESP-NOW simplex | initiator | transmitter | none |
+| `CsiNode::esp_now_simplex_peer` | ESP-NOW simplex | responder | receiver | report |
 
 <div align="center">
 
-![CSI collection network shapes](https://raw.githubusercontent.com/csi-rs/esp-csi-rs/main/assets/net-arch.png)
+![CSI sensing network shapes](https://raw.githubusercontent.com/csi-rs/esp-csi-rs/main/assets/net-arch.png)
 
 </div>
 
@@ -55,13 +56,15 @@ model maps onto IEEE 802.11bf.
 
 | Abstraction | Role |
 |---|---|
-| `OperationalMode`, `CSINode` | How the node reaches the channel; one constructor per mode |
-| `ReportingPolicy` | Whether, and how often, measurements leave the node |
+| `Mode`, `CsiNode` | How the node reaches the channel; one constructor per mode |
+| `SessionRole`, `SensingRole` | The node's IEEE 802.11bf roles, read back from the mode |
+| `Reporting`, `ReportTo` | Whether, and how often, measurements leave the node, and where to |
 | `CsiPacket` → `Envelope` | Format version, node id, session id, source kind, per-run frame counter |
 | `CsiPacket` → `CsiFrame` | Normalised `RxMeta`, the `Stimulus` that excited the channel, an optional `HeaderDigest`, and a `CsiPayload` (`EspRaw` tagged with its `LayoutId`, `Grouped`, `Variation`) |
 | `wire` | The frame format itself: `no_std`, radio-neutral and free of `esp-*` imports, so hosts decode with the same types |
 | `MeasurementSource`, `emit` | Feed frames from any source through the same policy, statistics and delivery |
-| `MeasurementSetup` | An IEEE 802.11bf-style setup (periodicity, bandwidth, responders) mapped onto the mode |
+| `MeasurementSetup` | The node's measurement setup: periodicity, bandwidth, acquisition |
+| `wire::MeasurementSetup` | The serialized IEEE 802.11bf-style setup a controller sends (periodicity, bandwidth, responders), mapped onto the mode |
 | `RadioProfile` | Seam for custom Wi-Fi bring-up |
 | `get_drop_breakdown`, `snapshot_tx_stats` | Drops per cause and per-transmitter counters (`statistics` feature) |
 
@@ -78,7 +81,7 @@ model maps onto IEEE 802.11bf.
 
 ```toml
 [dependencies]
-esp-csi-rs = { version = "0.12", features = ["esp32c3", "println"] }
+esp-csi-rs = { version = "0.13", features = ["esp32c3", "println"] }
 ```
 
 The crate uses Rust **edition 2024** and tracks `esp-hal` 1.2, `esp-radio` 1.0 and `esp-rtos` 0.4.
@@ -87,11 +90,11 @@ For `defmt` see [`docs/defmt.md`](docs/defmt.md).
 A sniffer:
 
 ```rust
-use esp_csi_rs::{CSINode, CsiConfig, NodeHardware, WifiSnifferConfig};
+use esp_csi_rs::{CsiConfig, CsiNode, MeasurementSetup, NodeHardware, WifiSnifferConfig};
 
-let mut node = CSINode::sniffer(
+let mut node = CsiNode::sniffer(
     WifiSnifferConfig::default().with_channel(7),
-    Some(CsiConfig::default()),
+    MeasurementSetup::new().acquisition(CsiConfig::default()),
     NodeHardware::new(controller),
 );
 node.run().await;
@@ -104,7 +107,7 @@ Reading measurements, naming the session and reporting only on change:
 
 ```rust
 use esp_csi_rs::csi::CsiPacket;
-use esp_csi_rs::wire::{Bandwidth, MeasurementSetup, StimulusParams};
+use esp_csi_rs::wire::{self, Bandwidth, StimulusParams};
 use esp_csi_rs::{Threshold, WifiSnifferConfig, set_csi_callback, set_session};
 
 fn on_csi(packet: &CsiPacket) {
@@ -116,18 +119,20 @@ set_csi_callback(on_csi);
 set_session(0x1013, Some(unix_time_us));
 let sniffer = WifiSnifferConfig::default().with_threshold(Threshold::new(6000, 200));
 
-let setup = MeasurementSetup::new(1).with_stimulus(StimulusParams::new(10_000, Bandwidth::Mhz20));
-central_node.apply_measurement_setup(&setup)?;
+// A controller's serialized setup, applied to an ESP-NOW initiator.
+let setup = wire::MeasurementSetup::new(1)
+    .with_stimulus(StimulusParams::new(10_000, Bandwidth::Mhz20));
+initiator_node.apply_measurement_setup(&setup)?;
 ```
 
 And an emitter for it to measure:
 
 ```rust
-use esp_csi_rs::{CSINode, EmitterConfig, EmitterPhy};
+use esp_csi_rs::{CsiNode, EmitterConfig, EmitterPhy};
 
 let emitter = EmitterConfig::new(7, EmitterPhy::Ht20)
     .with_period(embassy_time::Duration::from_millis(20));
-let mut node = CSINode::emitter(emitter, hardware);
+let mut node = CsiNode::emitter(emitter, hardware);
 ```
 
 ## Examples

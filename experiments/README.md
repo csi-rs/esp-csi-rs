@@ -9,22 +9,22 @@ These are **not** usage examples. To learn the API, start with the one-example-p
 
 ## What's here
 
-Three subjects, one per operational mode that the specs in `specs/` measure. Each subject is a
+Three subjects, one per mode that the specs in `specs/` measure. Each subject is a
 full harness plus a `_min` footprint floor.
 
 | Target | Subject | What it reports | Needs |
 |---|---|---|---|
-| `esp_now_bench` | Symmetric ESP-NOW, either end (`NETWORK_ROLE`) | `MEASURE`: `Throughput`, `Heap`, `Drop`, `Quiet` (power), `Cpu` | `statistics`; `cpu-test-tx` for `Cpu` |
-| `esp_now_bench_min` | ESP-NOW platform floor, no `CSINode` | nothing — built and measured, not run | — |
+| `esp_now_bench` | Symmetric ESP-NOW, either end (`SESSION_ROLE`) | `MEASURE`: `Throughput`, `Heap`, `Drop`, `Quiet` (power), `Cpu` | `statistics`; `cpu-test-tx` for `Cpu` |
+| `esp_now_bench_min` | ESP-NOW platform floor, no `CsiNode` | nothing — built and measured, not run | — |
 | `hw_check` | Any mode, configured by `HW_*` environment variables at build time | the `wire` format, decoded with `wire-tests`' `wire-decode` | `statistics` |
 | `sniffer_bench` | Wi-Fi sniffer on `CHANNEL` | `MEASURE`: `Throughput`, `Heap`, `Quiet`; `LOG_MODE` is a measured variable too | `statistics` |
-| `sniffer_bench_min` | Sniffer platform floor, no `CSINode` | nothing — built and measured, not run | — |
+| `sniffer_bench_min` | Sniffer platform floor, no `CsiNode` | nothing — built and measured, not run | — |
 | `station_bench` | Wi-Fi station pinging its gateway at `PING_RATE_HZ` | `MEASURE`: `Throughput`, `Heap`, `Quiet` (power) | `statistics` |
-| `station_bench_min` | Station platform floor, no `CSINode`, no IP stack | nothing — built and measured, not run | — |
+| `station_bench_min` | Station platform floor, no `CsiNode`, no IP stack | nothing — built and measured, not run | — |
 
 Every harness is configured by the `const`s at the top of its file. `esp_now_bench` and
-`station_bench` run their node as a **listener**, because a measurement of acquisition cost should
-not be paying delivery cost; a sniffer is always a collector, so `sniffer_bench` makes the output
+`station_bench` run their node with **`Reporting::None`**, because a measurement of acquisition cost
+should not be paying delivery cost; a sniffer always reports, so `sniffer_bench` makes the output
 format (`LOG_MODE`) one of its variables instead.
 
 `cpu_test_schedule.rs` is a **shared module**, not a target. `esp_now_bench` includes it with
@@ -34,7 +34,7 @@ with no control channel between them.
 ## Binary footprint
 
 The footprint number is `full − min`: the `_min` half performs the same platform and radio
-bring-up with no `CSINode` in it. **Build both halves with the same features**, or the difference
+bring-up with no `CsiNode` in it. **Build both halves with the same features**, or the difference
 includes whatever the features linked, and record the feature set alongside the number.
 
 ## Running

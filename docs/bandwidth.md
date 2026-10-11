@@ -17,15 +17,15 @@ let emitter = EmitterConfig::new(7, EmitterPhy::Ht40Above);
 
 - **Leave room in the band.** `Ht40Above` on channel 7 occupies up to channel 11; `Ht40Below`
   occupies down to channel 3. A primary too close to the band edge silently falls back.
-- **The collector needs a 40 MHz RX path.** Setting the secondary channel only configures the
+- **The receiver needs a 40 MHz RX path.** Setting the secondary channel only configures the
   offset; the interface bandwidth has to be widened too, or 40 MHz frames cannot be decoded. The
   library does both together.
 
 ## HT40 over ESP-NOW applies to the unicast leg only
 
-A per-peer HT40 rate only applies to a **unicast** peer. In the symmetric pairing the central
-broadcasts, the peripheral learns its MAC and replies by unicast, and the forced HT40 rate applies to
-that learned peer — so the wide CSI is collected by the *central*, from the peripheral's replies.
+A per-peer HT40 rate only applies to a **unicast** peer. In the symmetric pairing the initiator
+broadcasts, the responder learns its MAC and replies by unicast, and the forced HT40 rate applies to
+that learned peer — so the wide CSI is measured by the *initiator*, from the responder's replies.
 
 On the dual-band ESP32-C5, forcing the PHY on the *broadcast* peer is additionally unsafe: it wedges
 the Wi-Fi ISR. A C5 pair must use the unicast path.
@@ -35,7 +35,7 @@ primary/secondary pair (ch 1 Above, ch 11 Below) or accept HT20.
 
 ## Verify it actually engaged
 
-Check the **collector's** captured CSI. A subcarrier count `>= 100` (commonly ~117) confirms HT40;
+Check the **receiver's** captured CSI. A subcarrier count `>= 100` (commonly ~117) confirms HT40;
 ~53/~56 means it fell back to legacy or HT20. The `sniffer` and `esp_now` examples print it.
 
 ## Filter out legacy / ACK CSI
@@ -77,7 +77,8 @@ The receiver must also ask for HE-LTF, or it keeps reporting the L-LTF estimate.
 does that and turns off the legacy, HT, VHT and ACK paths, so short frames do not dilute the stream:
 
 ```rust
-let node = CSINode::sniffer(sniffer_config, Some(CsiConfig::he20()), hardware);
+let setup = MeasurementSetup::new().acquisition(CsiConfig::he20());
+let node = CsiNode::sniffer(sniffer_config, setup, hardware);
 ```
 
 On the C5/C6 the CSI packet's raw `cur_bb_format` is `4` for an HE SU PPDU and `5` for HE MU.
