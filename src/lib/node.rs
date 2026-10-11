@@ -1,6 +1,6 @@
 //! The [`CsiNode`] orchestrator and the Wi-Fi mode configs.
 //!
-//! [`CsiNode`] holds one [`Mode`] and one [`MeasurementSetup`](crate::MeasurementSetup), and its
+//! [`CsiNode`] holds one [`Mode`] and one [`MeasurementSetup`], and its
 //! `run` / `run_duration` wire up Wi-Fi, CSI and the mode's tasks. This module also owns the
 //! configs of the three Wi-Fi modes ([`WifiSnifferConfig`], [`WifiStationConfig`],
 //! [`WifiApConfig`]), the hardware bundle ([`NodeHardware`]), the TX/RX toggles ([`IOTaskConfig`]),
