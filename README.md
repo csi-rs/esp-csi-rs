@@ -10,33 +10,53 @@ the `no-std` embedded framework.
 > a CLI wrapper with pre-built binaries that exposes everything this crate does — flash it and talk
 > to the board over serial.
 
-## The node model
+## Overview
+`esp_csi_rs` builds on top of Espressif's Rust `esp-hal` and `esp-radio` crates' low-level abstractions to enable easy CSI collection on embedded ESP devices. The crate supports various modes and network configurations and integrates with the esp-wifi and embassy async ecosystems.
 
-A deployment is a **CSI sensing network**: nodes sharing a channel, in which soundings excite the
-channel and at least one node reports a measurement of it. Each node is described by four
-independent attributes, named in IEEE 802.11bf's terms wherever the standard has one.
+## Features
+- **Device Support**: supports all ESP devices supported by the `esp-hal` and have WiFi or ESP-NOW radio support.
+- **Host Support**: Where supported, `esp-csi-rs` leverages the `USB-JTAG-SERIAL` peripheral to allow higher baud rates compared to traditional UART.
+- **Multi Output Support:** postcard/COBS frames, plain text, a compact array format, the ESP32-CSI-Tool CSV layout, or `defmt`.
+- **Traffic Generation**: supports the generation of different types of traffic and control of traffic rate.
+- **Network Architechtures**: supports the creation of several network architechtures & topologies introducing flexibility for different network setups.
+- **Multi Mode Support**: supports multiple modes operational modes, including ESP-NOW, Wi-Fi, and raw 802.11 emitter packets. 
+- **802.11bf Ready**: is ready for 802.11bf support. 802.11bf devices would integrate as an additional node mode.  
+- **802.11bf Collection Model**: adopts the 802.11bf CSI collection and measurement terminology.
 
-| Attribute | Values | Question it answers |
-|---|---|---|
-| Mode | six, below | How does the node reach the channel? |
-| Session role | IEEE 802.11bf Initiator / Responder, or none (observer) | Who originates the soundings? |
-| Sensing role | IEEE 802.11bf Transmitter / Receiver / both | Who sends the sensing PPDUs, and who measures them? |
-| Reporting | Report (to host or local), ThresholdBased, Decimate, None | Whether, and how often, measurements leave the node |
 
-The run is started and stopped by the **controller** — the host tier, never a node and never the
-initiator. Not every mode admits every combination, and **the ones it does not admit are not
-offered**: where an attribute is fixed there is no setter to call.
 
-| Constructor | Mode | Session role | Sensing role | Reporting |
+## The Collection Network Model
+
+A CSI sensing network deployment is a set of nodes sharing a channel in which traffic (or soundings) excite the channel and at least one node reports a measurement of it. Measurments are taken in sessions and each node in a collection network has a role during that session. 
+
+The measurement node in a collection network can report the CSI locally to the collecting node itself (ex. for extra processing) or deliver it using a transport to a host. Measurements are also captured in measurement sessions. During a session CSI is captured/measured under a certain set of configuration parameters until the session concludes.
+
+The sensing architechture is split in two tiers:
+- **The Host Tier (Controller)**: This is the external orchestrator that could be the ESP application, a PC, a Python script, a server, or a host application (like esp-csi-cli-rs over a serial/UART link or network). It sends measurement configurations and collects or analyzes the resulting data. It oversees the experiment or sensing deployment.
+- **The Embedded Tier (The Node)**: This is the physical ESP32 device running the firmware. It exists on the channel to actually participate in Wi-Fi sensing by either transmitting sensing PPDUs, measuring incoming frames (calculating CSI), or both. A node is never the system-level controller because the node is the entity being orchestrated.
+
+## The Node Model
+
+Each node is described by four independent attributes, compatible with IEEE 802.11bf's terms wherever the standard has one:
+
+1. **Mode**: defines how does it reach the channel.
+2. **Session Role**: defines who is the initiator of a measurement session. A node can be an initiator or a responder. 
+3. **Sensing Role**: defines who does what in a sensig session. A node can be a transmitter or a reciever.
+4. **Reporting Policy**: defines how the collected measurements are reported.
+
+`esp-csi-rs` defines the following contsrutors for the different modes:
+
+| Constructor | Mode | Session role | Sensing role | Reporting Policy |
 |---|---|---|---|---|
 | `CsiNode::sniffer` | Wi-Fi sniffer | none | receiver | report, threshold-based or decimate |
 | `CsiNode::station` | Wi-Fi station | initiator or none | transmitter-receiver or receiver | any |
 | `CsiNode::access_point` | Wi-Fi access point | initiator | receiver | any |
-| `CsiNode::emitter` | Emitter (transmit-only sounding) | none | transmitter | none |
+| `CsiNode::emitter` | Raw 802.11 frames | none | transmitter | none |
 | `CsiNode::esp_now` | ESP-NOW | initiator or responder | transmitter-receiver | any |
 | `CsiNode::esp_now_simplex_source` | ESP-NOW simplex | initiator | transmitter | none |
 | `CsiNode::esp_now_simplex_peer` | ESP-NOW simplex | responder | receiver | report |
 
+Below are some of the different network shapes that could be deployed.
 <div align="center">
 
 ![CSI sensing network shapes](https://raw.githubusercontent.com/csi-rs/esp-csi-rs/main/assets/net-arch.png)
@@ -46,13 +66,29 @@ offered**: where an attribute is fixed there is no setter to call.
 [`docs/network-model.md`](docs/network-model.md) is the normative description, including how the
 model maps onto IEEE 802.11bf.
 
-## Architecture
+## System Architecture
+
+The architrecture of the system is split into two types of hardware:
+- The collection hardware which is typically the ESP device.
+- The processing hardware which can be the ESP itself or a host computer.
+
+The processing hardware typically decodes the reported measurements, processes them and stores or analyzes them.
+
+On the collection hardware the architechure is split into a controller and a data path. The controller lives in the ESP application and defines the measurement setup and parameters. The data path is mostly defined in `esp-csi-rs` and can live completely on the ESP device or split between the ESP and a host.
+
+The data path is split into two parts.
+1. **The Capture Path**: This is the callback inside the WiFi task that copies over the recieved CSI data, determines where it will be reported, and places it in a record. 
+2. **The Delivery Path**: This is the path that defines how the CSI records will be delivered. 
+
+The figure below visualizes the flow. 
 
 <div align="center">
 
 ![Data path from the radio to the host](https://raw.githubusercontent.com/csi-rs/esp-csi-rs/main/assets/data-path.png)
 
 </div>
+
+Some of the crate abstractions are defined in the table below:
 
 | Abstraction | Role |
 |---|---|
@@ -68,29 +104,27 @@ model maps onto IEEE 802.11bf.
 | `RadioProfile` | Seam for custom Wi-Fi bring-up |
 | `get_drop_breakdown`, `snapshot_tx_stats` | Drops per cause and per-transmitter counters (`statistics` feature) |
 
-## Features
 
-- **Devices:** ESP32, ESP32-C3, ESP32-C5 (dual-band 2.4/5 GHz), ESP32-C6, ESP32-S3.
-- **PHYs:** HT20 and HT40 on every chip; HE20 (802.11ax) on the ESP32-C5 and C6.
-- **Output:** postcard/COBS frames, plain text, a compact array format, the ESP32-CSI-Tool CSV
-  layout, or `defmt`.
-- **On-device processing:** register a `fn(&CsiPacket)` to process CSI inline in the Wi-Fi
-  callback.
 
 ## Getting started
+
+Make sure to add `esp-csi-rs` to the list of dependencies in `Cargo.toml`:
 
 ```toml
 [dependencies]
 esp-csi-rs = { version = "0.13", features = ["esp32c3", "println"] }
 ```
 
-The crate uses Rust **edition 2024** and tracks `esp-hal` 1.2, `esp-radio` 1.0 and `esp-rtos` 0.4.
-For `defmt` see [`docs/defmt.md`](docs/defmt.md).
+### Example: Creating a single node collection network (sniffer)
 
-A sniffer:
+In this configuration we simply pass the WiFi controller hardware instance and measurement setup to create a sniffer that sniffs packets on channel 7 using the measurement defualts.
+
+In the example, `controller` is the `WifiController` from `esp_radio::wifi::WifiController::new`. `NodeHardware` is an abstraction that claims its interfaces and handles.
 
 ```rust
 use esp_csi_rs::{CsiConfig, CsiNode, MeasurementSetup, NodeHardware, WifiSnifferConfig};
+
+// Device HAL and Controller instantiation
 
 let mut node = CsiNode::sniffer(
     WifiSnifferConfig::default().with_channel(7),
@@ -100,42 +134,26 @@ let mut node = CsiNode::sniffer(
 node.run().await;
 ```
 
-`controller` is the `WifiController` from `esp_radio::wifi::WifiController::new`; `NodeHardware`
-claims its interfaces, sniffer and ESP-NOW handle.
 
-Reading measurements, naming the session and reporting only on change:
+### Example: Creating a point to point collection network emitter
 
-```rust
-use esp_csi_rs::csi::CsiPacket;
-use esp_csi_rs::wire::{self, Bandwidth, StimulusParams};
-use esp_csi_rs::{Threshold, WifiSnifferConfig, set_csi_callback, set_session};
-
-fn on_csi(packet: &CsiPacket) {
-    let meta = packet.meta();
-    let _ = (packet.mac(), meta.timestamp_us, meta.ppdu, packet.csi_data());
-}
-
-set_csi_callback(on_csi);
-set_session(0x1013, Some(unix_time_us));
-let sniffer = WifiSnifferConfig::default().with_threshold(Threshold::new(6000, 200));
-
-// A controller's serialized setup, applied to an ESP-NOW initiator.
-let setup = wire::MeasurementSetup::new(1)
-    .with_stimulus(StimulusParams::new(10_000, Bandwidth::Mhz20));
-initiator_node.apply_measurement_setup(&setup)?;
-```
+In this configuration we pass the WiFi controller hardware instance and measurement setup to create an emitter that emits packets on channel 7 using the measurement defaults.
 
 And an emitter for it to measure:
 
 ```rust
 use esp_csi_rs::{CsiNode, EmitterConfig, EmitterPhy};
 
+// Device HAL and Controller instantiation
+
 let emitter = EmitterConfig::new(7, EmitterPhy::Ht20)
     .with_period(embassy_time::Duration::from_millis(20));
-let mut node = CsiNode::emitter(emitter, hardware);
+let mut node = CsiNode::emitter(emitter,  NodeHardware::new(controller));
 ```
 
 ## Examples
+
+For more examples Refer to the examples directory. Heres a table for the different examples that exist:
 
 | Example | What it does |
 |---|---|
@@ -148,6 +166,8 @@ let mut node = CsiNode::emitter(emitter, hardware);
 | `csi_callback` | Inline callback vs. queued delivery |
 | `runtime_config` | Reconfiguring one node between runs |
 | `synthetic_source` | A non-radio `MeasurementSource` feeding 802.11bf-shaped reports through `emit` (`synthetic` feature) |
+
+To build an example run the following:
 
 ```sh
 cargo esp32c3 --example sniffer          # println
