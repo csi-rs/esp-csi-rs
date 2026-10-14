@@ -188,6 +188,14 @@ Replace `esp32c3` with `esp32`, `esp32c5`, `esp32c6` or `esp32s3`. Measurement h
 | [`wire` on docs.rs](https://docs.rs/esp-csi-rs/latest/esp_csi_rs/wire/) | The frame format, subcarrier layouts and measurement setup |
 | [docs.rs](https://docs.rs/esp-csi-rs) | Full API documentation |
 
+To build or flash examples from this repo, [install the esp Rust toolchain via `espup`](https://docs.espressif.com/projects/rust/book/installation/index.html), then pin it for this checkout:
+
+```sh
+rustup override set esp
+```
+
+The committed `rust-toolchain.toml` intentionally pins `stable` (not `esp`) so that tooling which only needs to read `Cargo.toml`/`Cargo.lock` — like Dependabot — doesn't require the custom `esp` toolchain to be installed. CI selects `esp` explicitly (`cargo +esp ...`) for the actual chip builds.
+
 ## License
 
 Copyright 2026 The csi-rs Team. Licensed under either of
