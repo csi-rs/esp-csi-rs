@@ -1,3 +1,12 @@
+<p align="center">
+  <a href="https://github.com/csi-rs">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/csi-rs/.github/main/brand/svg/csi-rs-lockup-dark-nocaption.svg">
+      <img alt="csi-rs" src="https://raw.githubusercontent.com/csi-rs/.github/main/brand/svg/csi-rs-lockup-light-nocaption.svg" width="320">
+    </picture>
+  </a>
+</p>
+
 # `esp-csi-rs`
 
 A Rust crate for collecting **Channel State Information (CSI)** on **ESP32** series devices using
